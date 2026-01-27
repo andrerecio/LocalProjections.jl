@@ -1,7 +1,7 @@
 module LocalProjections
 
-export LocalProjection, LocalProjectionCovariance, IRFSummary
-export lp, coefpath, stderror, vcov, summarize
+export LocalProjection, LocalProjectionIV, LocalProjectionCovariance, IRFSummary
+export lp, lpiv, coefpath, stderror, vcov, summarize, first_stage
 export lag, lead, cumul, CumulTerm, lags, leads, LeadTerm, anchor, AnchorTerm
 
 using DataFrames
@@ -12,7 +12,7 @@ using StatsModels
 using StatsModels: AbstractTerm, Term, FunctionTerm, ConstantTerm, FormulaTerm,
                    ContinuousTerm, coefnames
 using Regress
-using Regress: OLSMatrixEstimator, ols
+using Regress: OLSMatrixEstimator, IVMatrixEstimator, ols, iv, TSLS, VcovSpec, deepcopy_vcov, FirstStageResult
 using CovarianceMatrices
 using Statistics
 using Distributions
@@ -598,6 +598,43 @@ function Base.show(io::IO, ::MIME"text/plain", lp::LocalProjection)
 end
 
 """
+    lp + vcov(estimator)
+
+Apply a covariance estimator to all models in a LocalProjection using the `+` operator.
+Returns a new LocalProjection with updated variance-covariance specification for each model.
+
+This is consistent with Regress.jl's `model + vcov(estimator)` pattern and allows chainable
+operations like `(lp + vcov(A)) + vcov(B)`.
+
+# Arguments
+- `lp::LocalProjection`: The local projection result
+- `v::VcovSpec{V}`: A variance-covariance specification from `vcov(estimator)`
+
+# Returns
+A new `LocalProjection` with the vcov estimator applied to each underlying model.
+
+# Example
+```julia
+lp_result = lp(@formula(leads(y) ~ x), df; horizon=12)
+
+# Apply robust standard errors
+lp_robust = lp_result + vcov(Bartlett{NeweyWest}())
+
+# Coefficients unchanged, but models now have HAC vcov
+@assert coefpath(lp_result) == coefpath(lp_robust)
+```
+"""
+function Base.:+(lp::LocalProjection{M}, v::VcovSpec{V}) where {M <: OLSMatrixEstimator, V}
+    # Apply vcov to each model using Regress.jl's + operator
+    new_models = [m + v for m in lp.models]
+    M_new = eltype(new_models)
+    return LocalProjection{M_new}(
+        convert(Vector{M_new}, new_models),
+        lp.horizon, lp.response, lp.shock, lp.base_formula, lp.coef_names
+    )
+end
+
+"""
     diagnose_vcov(lp::LocalProjection, h::Int=0)
 
 Run diagnostics on the model at horizon `h` to help debug vcov issues.
@@ -627,12 +664,12 @@ function diagnose_vcov(lp::LocalProjection, h::Int = 0)
 
     # Check for identical results
     if se_hc1 ≈ se_bart_nw
-        println("⚠️  WARNING: HC1 ≈ Bartlett NW (identical results)")
-        println("    This may indicate bandwidth = 0 or numerical issues")
+        println("WARNING: HC1 ≈ Bartlett NW (identical results)")
+        println("  This may indicate bandwidth = 0 or numerical issues")
     end
     if se_bart_nw ≈ se_bart_an ≈ se_parzen_nw
-        println("⚠️  WARNING: All HAC estimators produce identical results")
-        println("    This suggests bandwidth selection is returning 0")
+        println("WARNING: All HAC estimators produce identical results")
+        println("  This suggests bandwidth selection is returning 0")
     end
 
     # Check residuals autocorrelation
@@ -764,10 +801,6 @@ _extract_base_variables(Term(:x))                    # [:x]
 _extract_base_variables(FunctionTerm(lag, [:x, 4])) # [:x]  (strips lag)
 ```
 """
-# function _extract_base_variables(term::AbstractTerm)::Vector{Symbol}
-#     return StatsModels.termvars(term)  # Fallback
-# end
-
 # Specialized methods for specific term types
 function _extract_base_variables(t::Union{
         Term, StatsModels.ContinuousTerm, StatsModels.CategoricalTerm})
@@ -902,8 +935,14 @@ function lp(formula::FormulaTerm, data::AbstractDataFrame;
     # Note: coef_names_base includes intercept, so we need the second element (first RHS term)
     if shock === nothing
         # Default to first RHS coefficient (skip intercept which is first)
-        shock_symbol = length(coef_names_base) >= 2 ? Symbol(coef_names_base[2]) :
-                       Symbol(coef_names_base[1])
+        if length(coef_names_base) >= 2
+            shock_symbol = Symbol(coef_names_base[2])
+        else
+            # Only intercept exists - cannot select a meaningful shock term
+            throw(ArgumentError(
+                "Cannot automatically select shock term: only intercept found in model. " *
+                "Please provide a non-intercept regressor or specify `shock` explicitly."))
+        end
     else
         shock_symbol = shock
     end
@@ -942,7 +981,8 @@ function lp(formula::FormulaTerm, data::AbstractDataFrame;
         x = view(X, complete_rows, :)
 
         # Fit model using matrix form
-        model = ols(x, y)
+        # Note: has_intercept=false because X already has intercept column from StatsModels
+        model = ols(x, y; has_intercept=false)
         models[i] = model
 
         # Use pre-computed coefficient names (constant across horizons)
@@ -1253,6 +1293,524 @@ end
         term = lp.shock, levels = [0.95], irf_scale = 1.0)
     cov = vcov(estimator, lp)
     IRFPlot(lp, cov, term, Float64.(levels), Float64(irf_scale))
+end
+
+# ============================================================================
+# Instrumental Variables Local Projections
+# ============================================================================
+
+"""
+    LocalProjectionIV
+
+Stack of horizon-specific IV models produced by [`lpiv`](@ref).
+"""
+struct LocalProjectionIV{M <: IVMatrixEstimator}
+    models::Vector{M}
+    horizon::Int
+    response::Symbol
+    shock::Symbol
+    base_formula::FormulaTerm
+    coef_names::Vector{Vector{String}}
+    endogenous_names::Vector{String}
+    instrument_names::Vector{String}
+end
+
+"""
+    coefnames(lpiv::LocalProjectionIV)
+
+Return the coefficient names for the local projection IV models.
+"""
+StatsModels.coefnames(lpiv::LocalProjectionIV) = lpiv.coef_names[1]
+
+"""
+    coefnames(lpiv::LocalProjectionIV, h::Int)
+
+Return the coefficient names for horizon `h` (0-indexed).
+"""
+StatsModels.coefnames(lpiv::LocalProjectionIV, h::Int) = lpiv.coef_names[h + 1]
+
+function Base.show(io::IO, lpiv::LocalProjectionIV)
+    print(io, "LocalProjectionIV(horizon=0:$(lpiv.horizon), response=$(lpiv.response), shock=$(lpiv.shock))")
+end
+
+function Base.show(io::IO, ::MIME"text/plain", lpiv::LocalProjectionIV)
+    println(io, "LocalProjectionIV")
+    println(io, "  Response:     $(lpiv.response)")
+    println(io, "  Shock:        $(lpiv.shock)")
+    println(io, "  Horizon:      0:$(lpiv.horizon)")
+    println(io, "  Formula:      $(lpiv.base_formula)")
+    println(io, "  Endogenous:   $(lpiv.endogenous_names)")
+    println(io, "  Instruments:  $(lpiv.instrument_names)")
+    println(io, "  Coef names:   $(lpiv.coef_names[1])")
+end
+
+"""
+    lpiv + vcov(estimator)
+
+Apply a covariance estimator to all models in a LocalProjectionIV using the `+` operator.
+Returns a new LocalProjectionIV with updated variance-covariance specification for each model.
+
+# Example
+```julia
+result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon=10)
+result_hac = result + vcov(Bartlett{NeweyWest}())
+```
+"""
+function Base.:+(lpiv::LocalProjectionIV{M}, v::VcovSpec{V}) where {M <: IVMatrixEstimator, V}
+    new_models = [m + v for m in lpiv.models]
+    M_new = eltype(new_models)
+    return LocalProjectionIV{M_new}(
+        convert(Vector{M_new}, new_models),
+        lpiv.horizon, lpiv.response, lpiv.shock, lpiv.base_formula,
+        lpiv.coef_names, lpiv.endogenous_names, lpiv.instrument_names
+    )
+end
+
+"""
+    _parse_lpiv_formula(formula::FormulaTerm, sch, data)
+
+Parse an IV formula to extract endogenous, instrument, and exogenous terms.
+Handles `(x ~ z)` syntax for IV specification within the formula.
+
+Returns:
+- `lhs_term`: Applied schema LHS term
+- `endo_terms`: Vector of endogenous variable terms
+- `instr_terms`: Vector of instrument terms
+- `exo_terms`: Vector of exogenous control terms
+"""
+function _parse_lpiv_formula(formula::FormulaTerm, sch, data)
+    lhs_term = StatsModels.apply_schema(formula.lhs, sch, StatisticalModel)
+
+    endo_terms = AbstractTerm[]
+    instr_terms = AbstractTerm[]
+    exo_terms = AbstractTerm[]
+
+    # Handle RHS - can be single term, tuple of terms, or InteractionTerm
+    rhs = formula.rhs isa Tuple ? formula.rhs : (formula.rhs,)
+
+    for term in rhs
+        if term isa FormulaTerm
+            # IV specification: (endo ~ instruments)
+            endo = StatsModels.apply_schema(term.lhs, sch, StatisticalModel)
+            push!(endo_terms, endo)
+
+            instrs = term.rhs isa Tuple ? term.rhs : (term.rhs,)
+            for instr in instrs
+                instr_applied = StatsModels.apply_schema(instr, sch, StatisticalModel)
+                push!(instr_terms, instr_applied)
+            end
+        else
+            # Regular exogenous term
+            term_applied = StatsModels.apply_schema(term, sch, StatisticalModel)
+            push!(exo_terms, term_applied)
+        end
+    end
+
+    return lhs_term, endo_terms, instr_terms, exo_terms
+end
+
+"""
+    _extract_all_vars_from_formula(formula::FormulaTerm) -> Vector{Symbol}
+
+Extract all variable symbols from formula, including those nested in IV specs.
+"""
+function _extract_all_vars_from_formula(formula::FormulaTerm)
+    all_vars = Symbol[]
+
+    # LHS variables
+    append!(all_vars, StatsModels.termvars(formula.lhs))
+
+    # RHS - handle IV specs and regular terms
+    rhs = formula.rhs isa Tuple ? formula.rhs : (formula.rhs,)
+    for term in rhs
+        if term isa FormulaTerm
+            # IV specification: extract from both sides
+            append!(all_vars, StatsModels.termvars(term.lhs))
+            append!(all_vars, StatsModels.termvars(term.rhs))
+        else
+            append!(all_vars, StatsModels.termvars(term))
+        end
+    end
+
+    return unique(all_vars)
+end
+
+"""
+    lpiv(formula, data; horizon, shock=nothing)
+
+Estimate local projections with instrumental variables from horizon 0 to `horizon`.
+
+# Formula Syntax
+```julia
+lpiv(@formula(leads(y) ~ (x ~ z1) + lags(r, 5) + w), df; horizon=10)
+```
+
+Where:
+- `leads(y)` - response with horizon transformation (also supports `cumul(y)`, `anchor(y, baseline)`)
+- `(x ~ z1)` - x is endogenous, instrumented by z1
+- `lags(r, 5)` and `w` - exogenous controls
+
+# Arguments
+- `formula::FormulaTerm`: A formula with IV specification using `(endo ~ instruments)` syntax
+- `data::AbstractDataFrame`: DataFrame containing the variables
+- `horizon::Integer`: Maximum forecast horizon (must be non-negative)
+- `shock::Union{Symbol, Nothing}`: Optional coefficient to track (defaults to first endogenous)
+
+# Returns
+`LocalProjectionIV` struct containing IV models for each horizon.
+
+# Example
+```julia
+using LocalProjections, DataFrames, StatsModels, CovarianceMatrices
+
+# Generate data with endogeneity
+n = 200
+z = randn(n)
+u = randn(n)
+x = 0.5*z + 0.5*u      # Endogenous (correlated with u)
+y = 1.0 .+ 2.0*x .+ u  # True effect = 2.0
+
+df = DataFrame(y=y, x=x, z=z)
+
+# Fit IV local projection
+result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon=5)
+
+# Extract IRF (should be ~2.0, OLS would be biased)
+irf = coefpath(result; term=:x)
+
+# Apply HAC standard errors
+result_hac = result + vcov(Bartlett{NeweyWest}())
+
+# First-stage diagnostics
+fs = first_stage(result, 0)
+println("First-stage F: ", fs.F_joint)
+```
+"""
+function lpiv(formula::FormulaTerm, data::AbstractDataFrame;
+        horizon::Integer, shock::Union{Symbol, Nothing} = nothing)
+    horizon < 0 && throw(ArgumentError("horizon must be non-negative"))
+    df_base = DataFrame(data)
+
+    # Extract ALL variable names from formula (including those inside IV specs)
+    all_vars = _extract_all_vars_from_formula(formula)
+
+    # Create hints to treat all variables as continuous
+    hints = Dict{Symbol, Any}(var => StatsModels.ContinuousTerm for var in all_vars)
+
+    sch = StatsModels.schema(formula, df_base, hints)
+
+    # Parse the IV formula
+    lhs_term, endo_terms, instr_terms, exo_terms = _parse_lpiv_formula(formula, sch, df_base)
+
+    # Validate IV specification
+    isempty(endo_terms) &&
+        throw(ArgumentError("No endogenous variables found. Use (endo ~ instruments) syntax."))
+    isempty(instr_terms) &&
+        throw(ArgumentError("No instruments found. Use (endo ~ instruments) syntax."))
+
+    # Extract base variable names for filtering
+    base_vars_lhs = _extract_base_variables(formula.lhs)
+    base_vars_rhs = Symbol[]
+    rhs = formula.rhs isa Tuple ? formula.rhs : (formula.rhs,)
+    for term in rhs
+        if term isa FormulaTerm
+            append!(base_vars_rhs, _extract_base_variables(term.lhs))
+            append!(base_vars_rhs, _extract_base_variables(term.rhs))
+        else
+            append!(base_vars_rhs, _extract_base_variables(term))
+        end
+    end
+    base_vars = unique(vcat(base_vars_lhs, base_vars_rhs))
+
+    # Check LHS structure (leads, cumul, anchor)
+    is_anchor, is_cumulative, is_leads, anchor_term, cumul_term,
+    leads_term = _unwrap_lhs(lhs_term)
+
+    # Extract response variable name
+    response = if is_anchor
+        _extract_single_response(anchor_term.response, "anchor() response term")
+    elseif is_cumulative
+        _extract_single_response(cumul_term, "cumul() term")
+    elseif is_leads
+        _extract_single_response(leads_term, "leads() term")
+    else
+        throw(ArgumentError("LHS must use leads(), cumul(), or anchor()"))
+    end
+
+    # Stage 1: Remove rows with missing base variables
+    df_base_complete = dropmissing(df_base, base_vars, disallowmissing = true)
+
+    # Stage 2: Build X (endogenous + exogenous) and Z (instruments + exogenous) matrices ONCE
+
+    # Get exogenous matrix (includes intercept from StatsModels)
+    # Create a dummy formula for exogenous terms
+    if !isempty(exo_terms)
+        exo_tuple = length(exo_terms) == 1 ? exo_terms[1] : Tuple(exo_terms)
+        dummy_formula_exo = StatsModels.FormulaTerm(StatsModels.Term(response), exo_tuple)
+        mf_exo = StatsModels.ModelFrame(dummy_formula_exo, df_base_complete)
+        X_exo_raw = StatsModels.modelcols(mf_exo.f.rhs, mf_exo.data)
+        X_exo = map(v -> ismissing(v) ? NaN : Float64(v), X_exo_raw)
+        coef_names_exo = coefnames(mf_exo)
+    else
+        # No exogenous terms - just intercept
+        n_obs = nrow(df_base_complete)
+        X_exo = ones(n_obs, 1)
+        coef_names_exo = ["(Intercept)"]
+    end
+
+    # Get endogenous matrix - extract columns directly from terms (no formula intercept)
+    endo_names = String[]
+    X_endo_cols = []
+    for endo_term in endo_terms
+        # Use modelcols directly on the term to avoid intercept
+        endo_col_raw = StatsModels.modelcols(endo_term, df_base_complete)
+        endo_col = map(v -> ismissing(v) ? NaN : Float64(v), endo_col_raw)
+        push!(X_endo_cols, endo_col isa AbstractMatrix ? endo_col : reshape(endo_col, :, 1))
+        term_names = StatsModels.coefnames(endo_term)
+        append!(endo_names, term_names isa Vector ? term_names : [term_names])
+    end
+    X_endo = hcat(X_endo_cols...)
+
+    # Get instrument matrix - extract columns directly from terms (no formula intercept)
+    instr_names = String[]
+    Z_instr_cols = []
+    for instr_term in instr_terms
+        # Use modelcols directly on the term to avoid intercept
+        instr_col_raw = StatsModels.modelcols(instr_term, df_base_complete)
+        instr_col = map(v -> ismissing(v) ? NaN : Float64(v), instr_col_raw)
+        push!(Z_instr_cols, instr_col isa AbstractMatrix ? instr_col : reshape(instr_col, :, 1))
+        term_names = StatsModels.coefnames(instr_term)
+        append!(instr_names, term_names isa Vector ? term_names : [term_names])
+    end
+    Z_instr = hcat(Z_instr_cols...)
+
+    # Build full X = [exogenous, endogenous] and Z = [exogenous, instruments]
+    X_full = hcat(X_exo, X_endo)
+    Z_full = hcat(X_exo, Z_instr)
+
+    n_endogenous = size(X_endo, 2)
+    coef_names_base = vcat(coef_names_exo, endo_names)
+
+    # Check order condition
+    n_instruments = size(Z_instr, 2)
+    n_instruments >= n_endogenous ||
+        throw(ArgumentError("Not enough instruments: $n_instruments < $n_endogenous (order condition violated)"))
+
+    # Set shock variable
+    if shock === nothing
+        shock_symbol = Symbol(endo_names[1])
+    else
+        shock_symbol = shock
+    end
+
+    # Identify complete rows
+    X_missing_ind = vec(all(!isnan, X_full, dims = 2))
+    Z_missing_ind = vec(all(!isnan, Z_full, dims = 2))
+    XZ_complete = X_missing_ind .& Z_missing_ind
+
+    # Stage 3: Estimate IV models for each horizon
+    models = Vector{Any}(undef, horizon + 1)
+    coef_names_vec = Vector{Vector{String}}(undef, horizon + 1)
+
+    for (i, h) in enumerate(0:horizon)
+        # Build horizon-specific LHS
+        lhs_h = _build_lhs_for_horizon(h, is_anchor, is_cumulative, is_leads,
+            anchor_term, cumul_term, leads_term)
+
+        # Extract y_h
+        y_h = StatsModels.modelcols(lhs_h, df_base_complete)
+
+        # Find complete observations
+        y_complete_rows = .!isnan.(y_h)
+        complete_rows = XZ_complete .& y_complete_rows
+
+        if sum(complete_rows) == 0
+            throw(ArgumentError("No complete observations available for horizon $h"))
+        end
+
+        # Extract complete cases
+        y = view(y_h, complete_rows)
+        X = view(X_full, complete_rows, :)
+        Z = view(Z_full, complete_rows, :)
+
+        # Fit IV model
+        model = iv(TSLS(), collect(Z), collect(X), collect(y);
+            has_intercept=false, n_endogenous=n_endogenous)
+        models[i] = model
+        coef_names_vec[i] = coef_names_base
+
+        # Verify shock variable is present
+        available = Symbol.(coef_names_base)
+        shock_symbol in available ||
+            throw(ArgumentError("shock term $(shock_symbol) not present in model for horizon $h"))
+    end
+
+    # Convert to properly typed vector
+    typed_models = [m for m in models]
+    return LocalProjectionIV(
+        typed_models, horizon, response, shock_symbol, formula, coef_names_vec,
+        endo_names, instr_names)
+end
+
+"""
+    coefpath(lpiv::LocalProjectionIV; term=lpiv.shock)
+
+Collect the coefficient path across horizons for `term`.
+"""
+function coefpath(lpiv::LocalProjectionIV; term::Symbol = lpiv.shock)
+    n = lpiv.horizon + 1
+    coefficients = Vector{Float64}(undef, n)
+    for (i, model) in enumerate(lpiv.models)
+        names = lpiv.coef_names[i]
+        idx = findfirst(==(String(term)), names)
+        idx === nothing &&
+            throw(ArgumentError("term $term not present in model at horizon $(i - 1)"))
+        coefficients[i] = coef(model)[idx]
+    end
+    return coefficients
+end
+
+"""
+    vcov(estimator, lpiv::LocalProjectionIV)
+
+Compute diagonal covariance entries horizon-by-horizon using `estimator`
+from `CovarianceMatrices.jl`.
+"""
+function vcov(estimator, lpiv::LocalProjectionIV)
+    n = lpiv.horizon + 1
+    variances = Dict{Symbol, Vector{Float64}}()
+
+    for (i, model) in enumerate(lpiv.models)
+        cov = CovarianceMatrices.vcov(estimator, model)
+        names = Symbol.(lpiv.coef_names[i])
+        for (j, name) in enumerate(names)
+            vec = get!(variances, name) do
+                fill(NaN, n)
+            end
+            vec[i] = cov[j, j]
+        end
+    end
+
+    return LocalProjectionCovariance(estimator, variances, lpiv.horizon)
+end
+
+"""
+    first_stage(lpiv::LocalProjectionIV) -> Vector{FirstStageResult}
+
+Return first-stage diagnostics for all horizons in an IV local projection.
+"""
+function first_stage(lpiv::LocalProjectionIV)
+    return [Regress.first_stage(m) for m in lpiv.models]
+end
+
+"""
+    first_stage(lpiv::LocalProjectionIV, h::Int) -> FirstStageResult
+
+Return first-stage diagnostics for horizon `h` (0-indexed).
+"""
+function first_stage(lpiv::LocalProjectionIV, h::Int)
+    0 <= h <= lpiv.horizon || throw(BoundsError("horizon $h out of range 0:$(lpiv.horizon)"))
+    return Regress.first_stage(lpiv.models[h + 1])
+end
+
+"""
+    summarize(lpiv::LocalProjectionIV, cov::LocalProjectionCovariance; ...)
+    summarize(lpiv::LocalProjectionIV, estimator; ...)
+
+Create a summary table of IV impulse response coefficients with standard errors
+and confidence intervals.
+"""
+function summarize(lpiv::LocalProjectionIV, cov::LocalProjectionCovariance;
+        term::Symbol = lpiv.shock, level::Real = 0.95, scale::Real = 1.0)
+    beta = coefpath(lpiv; term = term) .* scale
+    se = stderror(cov; term = term) .* scale
+    z = quantile(Normal(), 0.5 + level / 2)
+    lower = beta .- z .* se
+    upper = beta .+ z .* se
+
+    IRFSummary(term, Float64(level), Float64(scale),
+        collect(0:lpiv.horizon), beta, se, lower, upper)
+end
+
+function summarize(lpiv::LocalProjectionIV,
+        estimator::CovarianceMatrices.AbstractAsymptoticVarianceEstimator;
+        term::Symbol = lpiv.shock, level::Real = 0.95, scale::Real = 1.0)
+    cov = vcov(estimator, lpiv)
+    summarize(lpiv, cov; term = term, level = level, scale = scale)
+end
+
+# ============================================================================
+# Plot Recipes for LocalProjectionIV
+# ============================================================================
+
+"""
+    IRFPlotIV
+
+Internal wrapper for IV local projection plots.
+"""
+struct IRFPlotIV{M <: IVMatrixEstimator, E}
+    lpiv::LocalProjectionIV{M}
+    cov::LocalProjectionCovariance{E}
+    term::Symbol
+    levels::Vector{Float64}
+    irf_scale::Float64
+end
+
+@recipe function f(wrapper::IRFPlotIV)
+    lpiv = wrapper.lpiv
+    cov = wrapper.cov
+    term = wrapper.term
+    levels = wrapper.levels
+    irf_scale = wrapper.irf_scale
+
+    beta = coefpath(lpiv; term = term) .* irf_scale
+    se = stderror(cov; term = term) .* irf_scale
+    horizons = collect(0:lpiv.horizon)
+
+    sorted_levels = sort(levels; rev = true)
+    for level in sorted_levels
+        (level <= 0 || level >= 1) && throw(ArgumentError("levels must be in (0, 1)"))
+    end
+
+    z_max = quantile(Normal(), 0.5 + sorted_levels[1] / 2)
+    ribbon_max = z_max .* se
+
+    xlabel --> "Horizon"
+    ylabel --> String(term)
+    label --> "IRF (IV)"
+    linewidth --> 2
+    fillalpha --> 0.3
+    legend --> :best
+
+    if length(sorted_levels) > 1
+        for (idx, level) in enumerate(sorted_levels[2:end])
+            @series begin
+                z = quantile(Normal(), 0.5 + level / 2)
+                band = z .* se
+                ribbon := band
+                fillalpha := 0.3 + 0.15 * idx
+                label := ""
+                linewidth := 0
+                linecolor := :transparent
+                horizons, beta
+            end
+        end
+    end
+
+    ribbon --> ribbon_max
+    return horizons, beta
+end
+
+@recipe function f(lpiv::LocalProjectionIV, cov::LocalProjectionCovariance;
+        term = lpiv.shock, levels = [0.95], irf_scale = 1.0)
+    IRFPlotIV(lpiv, cov, term, Float64.(levels), Float64(irf_scale))
+end
+
+@recipe function f(lpiv::LocalProjectionIV,
+        estimator::CovarianceMatrices.AbstractAsymptoticVarianceEstimator;
+        term = lpiv.shock, levels = [0.95], irf_scale = 1.0)
+    cov = vcov(estimator, lpiv)
+    IRFPlotIV(lpiv, cov, term, Float64.(levels), Float64(irf_scale))
 end
 
 # ============================================================================
@@ -1636,6 +2194,287 @@ end
     # 90% CI should be narrower than 95% CI
     @test all(summary_90.upper .- summary_90.lower .<
               summary_obj.upper .- summary_obj.lower)
+end
+
+@testitem "plus vcov operator" tags=[:vcov, :api] begin
+    using LocalProjections
+    using LocalProjections: VcovSpec
+    using DataFrames, StatsModels, Test
+    using CovarianceMatrices: HC1, Bartlett, NeweyWest
+    using Regress: vcov
+
+    n = 100
+    df = DataFrame(x = randn(n), y = randn(n))
+    lp_result = lp(@formula(leads(y) ~ x), df; horizon = 5)
+
+    # Test + vcov() syntax
+    lp_robust = lp_result + vcov(Bartlett{NeweyWest}())
+
+    # Result should be a LocalProjection
+    @test lp_robust isa LocalProjection
+
+    # Coefficients should be unchanged
+    @test coefpath(lp_result) == coefpath(lp_robust)
+
+    # Horizon and metadata should be preserved
+    @test lp_robust.horizon == lp_result.horizon
+    @test lp_robust.response == lp_result.response
+    @test lp_robust.shock == lp_result.shock
+    @test lp_robust.base_formula == lp_result.base_formula
+    @test lp_robust.coef_names == lp_result.coef_names
+
+    # Number of models should be the same
+    @test length(lp_robust.models) == length(lp_result.models)
+
+    # Test chaining: (lp + vcov(A)) + vcov(B)
+    lp_chained = (lp_result + vcov(HC1())) + vcov(Bartlett{NeweyWest}())
+    @test lp_chained isa LocalProjection
+    @test coefpath(lp_chained) == coefpath(lp_result)
+end
+
+@testitem "lpiv basic functionality" tags=[:lpiv, :iv, :core] begin
+    using LocalProjections
+    using LocalProjections: FirstStageResult
+    using DataFrames, StatsModels, Test
+    using Random
+    using CovarianceMatrices: HC1
+
+    Random.seed!(42)
+
+    # Generate data with endogeneity
+    n = 200
+    z = randn(n)
+    u = randn(n)
+    x = 0.5*z + 0.5*u      # Endogenous (correlated with u)
+    y = 1.0 .+ 2.0*x .+ u  # True effect = 2.0
+
+    df = DataFrame(y=y, x=x, z=z)
+
+    # Fit IV local projection
+    horizon = 3
+    result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon=horizon)
+
+    # Check struct type
+    @test result isa LocalProjectionIV
+    @test result.horizon == horizon
+    @test result.response == :y
+    @test result.shock == :x
+
+    # Check that we have the right number of models
+    @test length(result.models) == horizon + 1
+
+    # Check endogenous and instrument names
+    @test :x in Symbol.(result.endogenous_names) || "x" in result.endogenous_names
+    @test :z in Symbol.(result.instrument_names) || "z" in result.instrument_names
+
+    # Extract IRF - coefficient should be close to 2.0 for horizon 0
+    irf = coefpath(result; term=:x)
+    @test length(irf) == horizon + 1
+    # IV should recover true effect ~2.0 (with some noise due to finite sample)
+    @test irf[1] > 1.0 && irf[1] < 3.0  # Reasonable range
+
+    # Test first_stage
+    fs = first_stage(result, 0)
+    @test fs isa FirstStageResult
+    @test fs.F_joint > 0  # F-statistic should be positive
+
+    # Test first_stage for all horizons
+    all_fs = first_stage(result)
+    @test length(all_fs) == horizon + 1
+
+    # Test vcov
+    cov = LocalProjections.vcov(HC1(), result)
+    @test cov isa LocalProjectionCovariance
+    se = stderror(cov; term=:x)
+    @test length(se) == horizon + 1
+    @test all(se .> 0)  # Standard errors should be positive
+end
+
+@testitem "lpiv with controls" tags=[:lpiv, :iv] begin
+    using LocalProjections
+    using DataFrames, StatsModels, Test
+    using Random
+
+    Random.seed!(123)
+
+    # Generate data with endogeneity and exogenous control
+    n = 200
+    z = randn(n)
+    w = randn(n)           # Exogenous control
+    u = randn(n)
+    x = 0.5*z + 0.3*w + 0.4*u  # Endogenous
+    y = 1.0 .+ 2.0*x .+ 0.5*w .+ u
+
+    df = DataFrame(y=y, x=x, z=z, w=w)
+
+    # Fit IV LP with control
+    horizon = 2
+    result = lpiv(@formula(leads(y) ~ (x ~ z) + w), df; horizon=horizon)
+
+    @test result isa LocalProjectionIV
+
+    # Check coefficient names include both x and w
+    names = coefnames(result)
+    @test "x" in names
+    @test "w" in names
+
+    # Get coefficients for both terms
+    irf_x = coefpath(result; term=:x)
+    irf_w = coefpath(result; term=:w)
+
+    @test length(irf_x) == horizon + 1
+    @test length(irf_w) == horizon + 1
+end
+
+@testitem "lpiv plus vcov operator" tags=[:lpiv, :vcov, :api] begin
+    using LocalProjections
+    using LocalProjections: VcovSpec
+    using DataFrames, StatsModels, Test
+    using CovarianceMatrices: HC1, Bartlett, NeweyWest
+    using Regress: vcov
+    using Random
+
+    Random.seed!(456)
+
+    n = 150
+    z = randn(n)
+    u = randn(n)
+    x = 0.6*z + 0.4*u
+    y = 0.5 .+ 1.5*x .+ u
+
+    df = DataFrame(y=y, x=x, z=z)
+
+    result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon=3)
+
+    # Test + vcov() syntax
+    result_hac = result + vcov(Bartlett{NeweyWest}())
+
+    # Result should be a LocalProjectionIV
+    @test result_hac isa LocalProjectionIV
+
+    # Coefficients should be unchanged
+    @test coefpath(result) == coefpath(result_hac)
+
+    # Metadata should be preserved
+    @test result_hac.horizon == result.horizon
+    @test result_hac.response == result.response
+    @test result_hac.shock == result.shock
+    @test result_hac.endogenous_names == result.endogenous_names
+    @test result_hac.instrument_names == result.instrument_names
+
+    # Test chaining
+    result_chained = (result + vcov(HC1())) + vcov(Bartlett{NeweyWest}())
+    @test result_chained isa LocalProjectionIV
+    @test coefpath(result_chained) == coefpath(result)
+end
+
+@testitem "lpiv with cumul response" tags=[:lpiv, :cumul] begin
+    using LocalProjections
+    using DataFrames, StatsModels, Test
+    using Random
+
+    Random.seed!(789)
+
+    n = 150
+    z = randn(n)
+    u = randn(n)
+    x = 0.5*z + 0.5*u
+    y = 1.0 .+ 2.0*x .+ u
+
+    df = DataFrame(y=y, x=x, z=z)
+
+    # Cumulative IV local projection
+    horizon = 2
+    result = lpiv(@formula(cumul(y) ~ (x ~ z)), df; horizon=horizon)
+
+    @test result isa LocalProjectionIV
+    @test result.response == :y
+
+    irf = coefpath(result; term=:x)
+    @test length(irf) == horizon + 1
+
+    # Cumulative IRF should grow (roughly) with horizon
+    # At h=0: ~2.0 (impact)
+    # At h=1: ~4.0 (sum of two periods)
+    # This is approximate due to estimation noise
+    @test irf[1] > 0  # Impact positive
+end
+
+@testitem "lpiv summarize" tags=[:lpiv, :summarize, :api] begin
+    using LocalProjections
+    using DataFrames, StatsModels, Test
+    using CovarianceMatrices: HC1
+    using Random
+
+    Random.seed!(1011)
+
+    n = 150
+    z = randn(n)
+    u = randn(n)
+    x = 0.5*z + 0.5*u
+    y = 1.0 .+ 2.0*x .+ u
+
+    df = DataFrame(y=y, x=x, z=z)
+
+    result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon=3)
+    cov = LocalProjections.vcov(HC1(), result)
+
+    # Test summarize
+    summary_obj = summarize(result, cov)
+    @test summary_obj isa IRFSummary
+    @test length(summary_obj.horizon) == 4  # 0-3
+    @test summary_obj.term == :x
+
+    # Convert to DataFrame
+    summary_df = DataFrame(summary_obj)
+    @test summary_df isa DataFrame
+    @test nrow(summary_df) == 4
+
+    # Test with scale
+    summary_scaled = summarize(result, cov; scale=100)
+    @test summary_scaled.coef ≈ summary_obj.coef .* 100
+
+    # Test with estimator directly
+    summary_direct = summarize(result, HC1())
+    @test summary_direct.coef ≈ summary_obj.coef atol=1e-10
+end
+
+@testitem "lpiv comparison with manual 2SLS" tags=[:lpiv, :iv, :verification] begin
+    using LocalProjections
+    using DataFrames, StatsModels, Test
+    using LinearAlgebra
+    using Random
+
+    Random.seed!(2022)
+
+    # Generate data
+    n = 200
+    z = randn(n)
+    u = randn(n)
+    x = 0.5*z + 0.5*u
+    y = 1.0 .+ 2.0*x .+ u
+
+    df = DataFrame(y=y, x=x, z=z)
+
+    # lpiv result for horizon 0
+    result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon=0)
+    lpiv_coef = coefpath(result; term=:x)[1]
+
+    # Manual 2SLS for comparison
+    # Z = [ones, z], X = [ones, x]
+    Z_manual = hcat(ones(n), z)
+    X_manual = hcat(ones(n), x)
+    y_manual = y
+
+    # Stage 1: Xhat = Z * (Z'Z)^{-1} Z' X
+    Pz = Z_manual * inv(Z_manual' * Z_manual) * Z_manual'
+    X_hat = Pz * X_manual
+
+    # Stage 2: beta = (Xhat'Xhat)^{-1} Xhat'y
+    beta_2sls = (X_hat' * X_hat) \ (X_hat' * y_manual)
+
+    # Compare coefficients (second element is x coefficient)
+    @test lpiv_coef ≈ beta_2sls[2] atol=1e-8
 end
 
 end # module LocalProjections
