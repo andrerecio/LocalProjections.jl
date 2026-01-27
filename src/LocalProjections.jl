@@ -12,7 +12,8 @@ using StatsModels
 using StatsModels: AbstractTerm, Term, FunctionTerm, ConstantTerm, FormulaTerm,
                    ContinuousTerm, coefnames
 using Regress
-using Regress: OLSMatrixEstimator, IVMatrixEstimator, ols, iv, TSLS, VcovSpec, deepcopy_vcov, FirstStageResult
+using Regress: OLSMatrixEstimator, IVMatrixEstimator, ols, iv, TSLS, VcovSpec,
+               deepcopy_vcov, FirstStageResult
 using CovarianceMatrices
 using Statistics
 using Distributions
@@ -982,7 +983,7 @@ function lp(formula::FormulaTerm, data::AbstractDataFrame;
 
         # Fit model using matrix form
         # Note: has_intercept=false because X already has intercept column from StatsModels
-        model = ols(x, y; has_intercept=false)
+        model = ols(x, y; has_intercept = false)
         models[i] = model
 
         # Use pre-computed coefficient names (constant across horizons)
@@ -1330,7 +1331,8 @@ Return the coefficient names for horizon `h` (0-indexed).
 StatsModels.coefnames(lpiv::LocalProjectionIV, h::Int) = lpiv.coef_names[h + 1]
 
 function Base.show(io::IO, lpiv::LocalProjectionIV)
-    print(io, "LocalProjectionIV(horizon=0:$(lpiv.horizon), response=$(lpiv.response), shock=$(lpiv.shock))")
+    print(io,
+        "LocalProjectionIV(horizon=0:$(lpiv.horizon), response=$(lpiv.response), shock=$(lpiv.shock))")
 end
 
 function Base.show(io::IO, ::MIME"text/plain", lpiv::LocalProjectionIV)
@@ -1356,7 +1358,8 @@ result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon=10)
 result_hac = result + vcov(Bartlett{NeweyWest}())
 ```
 """
-function Base.:+(lpiv::LocalProjectionIV{M}, v::VcovSpec{V}) where {M <: IVMatrixEstimator, V}
+function Base.:+(lpiv::LocalProjectionIV{M}, v::VcovSpec{V}) where {
+        M <: IVMatrixEstimator, V}
     new_models = [m + v for m in lpiv.models]
     M_new = eltype(new_models)
     return LocalProjectionIV{M_new}(
@@ -1500,7 +1503,8 @@ function lpiv(formula::FormulaTerm, data::AbstractDataFrame;
     sch = StatsModels.schema(formula, df_base, hints)
 
     # Parse the IV formula
-    lhs_term, endo_terms, instr_terms, exo_terms = _parse_lpiv_formula(formula, sch, df_base)
+    lhs_term, endo_terms, instr_terms,
+    exo_terms = _parse_lpiv_formula(formula, sch, df_base)
 
     # Validate IV specification
     isempty(endo_terms) &&
@@ -1578,7 +1582,8 @@ function lpiv(formula::FormulaTerm, data::AbstractDataFrame;
         # Use modelcols directly on the term to avoid intercept
         instr_col_raw = StatsModels.modelcols(instr_term, df_base_complete)
         instr_col = map(v -> ismissing(v) ? NaN : Float64(v), instr_col_raw)
-        push!(Z_instr_cols, instr_col isa AbstractMatrix ? instr_col : reshape(instr_col, :, 1))
+        push!(Z_instr_cols, instr_col isa AbstractMatrix ? instr_col :
+                            reshape(instr_col, :, 1))
         term_names = StatsModels.coefnames(instr_term)
         append!(instr_names, term_names isa Vector ? term_names : [term_names])
     end
@@ -1635,7 +1640,7 @@ function lpiv(formula::FormulaTerm, data::AbstractDataFrame;
 
         # Fit IV model
         model = iv(TSLS(), collect(Z), collect(X), collect(y);
-            has_intercept=false, n_endogenous=n_endogenous)
+            has_intercept = false, n_endogenous = n_endogenous)
         models[i] = model
         coef_names_vec[i] = coef_names_base
 
@@ -1709,7 +1714,8 @@ end
 Return first-stage diagnostics for horizon `h` (0-indexed).
 """
 function first_stage(lpiv::LocalProjectionIV, h::Int)
-    0 <= h <= lpiv.horizon || throw(BoundsError("horizon $h out of range 0:$(lpiv.horizon)"))
+    0 <= h <= lpiv.horizon ||
+        throw(BoundsError("horizon $h out of range 0:$(lpiv.horizon)"))
     return Regress.first_stage(lpiv.models[h + 1])
 end
 
@@ -2248,11 +2254,11 @@ end
     x = 0.5*z + 0.5*u      # Endogenous (correlated with u)
     y = 1.0 .+ 2.0*x .+ u  # True effect = 2.0
 
-    df = DataFrame(y=y, x=x, z=z)
+    df = DataFrame(y = y, x = x, z = z)
 
     # Fit IV local projection
     horizon = 3
-    result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon=horizon)
+    result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon = horizon)
 
     # Check struct type
     @test result isa LocalProjectionIV
@@ -2268,7 +2274,7 @@ end
     @test :z in Symbol.(result.instrument_names) || "z" in result.instrument_names
 
     # Extract IRF - coefficient should be close to 2.0 for horizon 0
-    irf = coefpath(result; term=:x)
+    irf = coefpath(result; term = :x)
     @test length(irf) == horizon + 1
     # IV should recover true effect ~2.0 (with some noise due to finite sample)
     @test irf[1] > 1.0 && irf[1] < 3.0  # Reasonable range
@@ -2285,7 +2291,7 @@ end
     # Test vcov
     cov = LocalProjections.vcov(HC1(), result)
     @test cov isa LocalProjectionCovariance
-    se = stderror(cov; term=:x)
+    se = stderror(cov; term = :x)
     @test length(se) == horizon + 1
     @test all(se .> 0)  # Standard errors should be positive
 end
@@ -2305,11 +2311,11 @@ end
     x = 0.5*z + 0.3*w + 0.4*u  # Endogenous
     y = 1.0 .+ 2.0*x .+ 0.5*w .+ u
 
-    df = DataFrame(y=y, x=x, z=z, w=w)
+    df = DataFrame(y = y, x = x, z = z, w = w)
 
     # Fit IV LP with control
     horizon = 2
-    result = lpiv(@formula(leads(y) ~ (x ~ z) + w), df; horizon=horizon)
+    result = lpiv(@formula(leads(y) ~ (x ~ z) + w), df; horizon = horizon)
 
     @test result isa LocalProjectionIV
 
@@ -2319,8 +2325,8 @@ end
     @test "w" in names
 
     # Get coefficients for both terms
-    irf_x = coefpath(result; term=:x)
-    irf_w = coefpath(result; term=:w)
+    irf_x = coefpath(result; term = :x)
+    irf_w = coefpath(result; term = :w)
 
     @test length(irf_x) == horizon + 1
     @test length(irf_w) == horizon + 1
@@ -2342,9 +2348,9 @@ end
     x = 0.6*z + 0.4*u
     y = 0.5 .+ 1.5*x .+ u
 
-    df = DataFrame(y=y, x=x, z=z)
+    df = DataFrame(y = y, x = x, z = z)
 
-    result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon=3)
+    result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon = 3)
 
     # Test + vcov() syntax
     result_hac = result + vcov(Bartlett{NeweyWest}())
@@ -2381,16 +2387,16 @@ end
     x = 0.5*z + 0.5*u
     y = 1.0 .+ 2.0*x .+ u
 
-    df = DataFrame(y=y, x=x, z=z)
+    df = DataFrame(y = y, x = x, z = z)
 
     # Cumulative IV local projection
     horizon = 2
-    result = lpiv(@formula(cumul(y) ~ (x ~ z)), df; horizon=horizon)
+    result = lpiv(@formula(cumul(y) ~ (x ~ z)), df; horizon = horizon)
 
     @test result isa LocalProjectionIV
     @test result.response == :y
 
-    irf = coefpath(result; term=:x)
+    irf = coefpath(result; term = :x)
     @test length(irf) == horizon + 1
 
     # Cumulative IRF should grow (roughly) with horizon
@@ -2414,9 +2420,9 @@ end
     x = 0.5*z + 0.5*u
     y = 1.0 .+ 2.0*x .+ u
 
-    df = DataFrame(y=y, x=x, z=z)
+    df = DataFrame(y = y, x = x, z = z)
 
-    result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon=3)
+    result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon = 3)
     cov = LocalProjections.vcov(HC1(), result)
 
     # Test summarize
@@ -2431,7 +2437,7 @@ end
     @test nrow(summary_df) == 4
 
     # Test with scale
-    summary_scaled = summarize(result, cov; scale=100)
+    summary_scaled = summarize(result, cov; scale = 100)
     @test summary_scaled.coef ≈ summary_obj.coef .* 100
 
     # Test with estimator directly
@@ -2454,11 +2460,11 @@ end
     x = 0.5*z + 0.5*u
     y = 1.0 .+ 2.0*x .+ u
 
-    df = DataFrame(y=y, x=x, z=z)
+    df = DataFrame(y = y, x = x, z = z)
 
     # lpiv result for horizon 0
-    result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon=0)
-    lpiv_coef = coefpath(result; term=:x)[1]
+    result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon = 0)
+    lpiv_coef = coefpath(result; term = :x)[1]
 
     # Manual 2SLS for comparison
     # Z = [ones, z], X = [ones, x]
