@@ -1,9 +1,11 @@
 module LocalProjections
 
 export LocalProjection, LocalProjectionIV, LocalProjectionCovariance, IRFSummary
-export lp, lpiv, coefpath, stderror, vcov, summarize, first_stage
+export lp, lpiv, coefpath, stderror, vcov, summarize, first_stage, weakivtest
+export WeakIVTestResult
 export lag, lead, cumul, CumulTerm, lags, leads, LeadTerm, anchor, AnchorTerm
 export as_irf_result, LocalProjectionIRFResult
+export irfplot, irfplot!, irfplot_axis
 
 using DataFrames
 using PrettyTables: pretty_table, TextHighlighter, TextTableFormat,
@@ -13,16 +15,14 @@ using StatsModels
 using StatsModels: AbstractTerm, Term, FunctionTerm, ConstantTerm, FormulaTerm,
                    ContinuousTerm, coefnames
 using Regress
-using Regress: OLSMatrixEstimator, IVEstimator, IVMatrixEstimator, ols, iv, TSLS, VcovSpec,
-               deepcopy_vcov, FirstStageResult
+using Regress: OLSMatrixEstimator, IVMatrixEstimator, ols, iv, TSLS, VcovSpec,
+               FirstStageResult, weakivtest, WeakIVTestResult
 using CovarianceMatrices
 using Statistics
 using Distributions
 using RecipesBase
 using ShiftedArrays: lag, lead
 using StatsBase
-using Missings
-using TestItems
 using AxisArrays: AxisArrays, AxisArray, Axis
 using MacroEconometricTools: LocalProjectionIRFResult
 
@@ -540,23 +540,24 @@ struct LocalProjection{M <: OLSMatrixEstimator}
     response::Symbol
     shock::Symbol
     base_formula::FormulaTerm
-    coef_names::Vector{Vector{String}}  # Coefficient names for each horizon
+    coef_names::Vector{String}  # Coefficient names (constant across all horizons)
 end
 
 """
     coefnames(lp::LocalProjection)
 
 Return the coefficient names for the local projection models.
-Since all horizons share the same RHS, returns the coefficient names from horizon 0.
+Since all horizons share the same RHS, returns a single set of coefficient names.
 """
-StatsModels.coefnames(lp::LocalProjection) = lp.coef_names[1]
+StatsModels.coefnames(lp::LocalProjection) = lp.coef_names
 
 """
     coefnames(lp::LocalProjection, h::Int)
 
 Return the coefficient names for horizon `h` (0-indexed).
+Since all horizons share the same RHS, returns the same names regardless of `h`.
 """
-StatsModels.coefnames(lp::LocalProjection, h::Int) = lp.coef_names[h + 1]
+StatsModels.coefnames(lp::LocalProjection, h::Int) = lp.coef_names
 
 function Base.show(io::IO, lp::LocalProjection)
     print(io, "LocalProjection(horizon=0:$(lp.horizon), response=$(lp.response), shock=$(lp.shock))")
@@ -568,7 +569,7 @@ function Base.show(io::IO, ::MIME"text/plain", lp::LocalProjection)
     println(io, "  Shock:      $(lp.shock)")
     println(io, "  Horizon:    0:$(lp.horizon)")
     println(io, "  Formula:    $(lp.base_formula)")
-    println(io, "  Coef names: $(lp.coef_names[1])")
+    println(io, "  Coef names: $(lp.coef_names)")
 end
 
 """
@@ -836,10 +837,10 @@ function lp(formula::FormulaTerm, data::AbstractDataFrame;
 
     # Convert missing to NaN for type stability (handles lag(w) which returns missing)
     # This ensures X is always Float64, matching our leads/cumul which use default=NaN
-    X = map(v -> ismissing(v) ? NaN : Float64(v), X_raw)
+    X = Matrix{Float64}(map(v -> ismissing(v) ? NaN : Float64(v), X_raw))
 
     # Store coefficient names (constant across all horizons)
-    coef_names_base = coefnames(mf_base)
+    coef_names_base = Vector{String}(coefnames(mf_base))
 
     # Set shock variable: use provided shock or default to first RHS coefficient
     # Note: coef_names_base includes intercept, so we need the second element (first RHS term)
@@ -857,20 +858,32 @@ function lp(formula::FormulaTerm, data::AbstractDataFrame;
         shock_symbol = shock
     end
 
+    # Function barrier: X and coef_names_base are now concretely typed (Matrix{Float64},
+    # Vector{String}), so _lp_estimate_horizons can be fully inferred by the compiler.
+    return _lp_estimate_horizons(X, coef_names_base, df_base_complete, horizon,
+        response, shock_symbol, formula,
+        is_anchor, is_cumulative, is_leads, anchor_term, cumul_term, leads_term)
+end
+
+"""
+    _lp_estimate_horizons(X, coef_names_base, df, horizon, response, shock, formula, ...)
+
+Function barrier for type-stable per-horizon OLS estimation.
+Called after formula parsing to ensure X::Matrix{Float64} is concretely typed,
+breaking the type instability cascade from StatsModels' abstract return types.
+"""
+function _lp_estimate_horizons(X::Matrix{Float64}, coef_names_base::Vector{String},
+        df_base_complete, horizon, response, shock_symbol, formula,
+        is_anchor, is_cumulative, is_leads, anchor_term, cumul_term, leads_term)
     # Identify rows where X is complete (no NaN values)
     X_missing_ind = vec(all(!isnan, X, dims = 2))
-
-    coef_names_vec = Vector{Vector{String}}(undef, horizon + 1)
-
-    # ========================================================================
-    # Stage 3: Estimate models for each horizon (only y_h changes)
-    # ========================================================================
 
     # Helper to estimate one horizon
     function _estimate_horizon(h)
         lhs_h = _build_lhs_for_horizon(h, is_anchor, is_cumulative, is_leads,
             anchor_term, cumul_term, leads_term)
-        y_h = StatsModels.modelcols(lhs_h, df_base_complete)
+        # Convert to Vector{Float64} for type stability (modelcols may return ShiftedArray)
+        y_h = Vector{Float64}(StatsModels.modelcols(lhs_h, df_base_complete))
         y_complete_rows = .!isnan.(y_h)
         complete_rows = X_missing_ind .& y_complete_rows
         sum(complete_rows) == 0 &&
@@ -882,7 +895,6 @@ function lp(formula::FormulaTerm, data::AbstractDataFrame;
 
     # Estimate first model to get concrete type for typed vector
     first_model = _estimate_horizon(0)
-    coef_names_vec[1] = coef_names_base
 
     # Verify shock variable is present
     available = Symbol.(coef_names_base)
@@ -894,11 +906,10 @@ function lp(formula::FormulaTerm, data::AbstractDataFrame;
 
     for (i, h) in enumerate(1:horizon)
         models[i + 1] = _estimate_horizon(h)
-        coef_names_vec[i + 1] = coef_names_base
     end
 
     return LocalProjection(
-        models, horizon, response, shock_symbol, formula, coef_names_vec)
+        models, horizon, response, shock_symbol, formula, coef_names_base)
 end
 
 """
@@ -1013,7 +1024,7 @@ struct LocalProjectionIV{M <: IVMatrixEstimator}
     response::Symbol
     shock::Symbol
     base_formula::FormulaTerm
-    coef_names::Vector{Vector{String}}
+    coef_names::Vector{String}  # Coefficient names (constant across all horizons)
     endogenous_names::Vector{String}
     instrument_names::Vector{String}
 end
@@ -1022,15 +1033,17 @@ end
     coefnames(lpiv::LocalProjectionIV)
 
 Return the coefficient names for the local projection IV models.
+Since all horizons share the same RHS, returns a single set of coefficient names.
 """
-StatsModels.coefnames(lpiv::LocalProjectionIV) = lpiv.coef_names[1]
+StatsModels.coefnames(lpiv::LocalProjectionIV) = lpiv.coef_names
 
 """
     coefnames(lpiv::LocalProjectionIV, h::Int)
 
 Return the coefficient names for horizon `h` (0-indexed).
+Since all horizons share the same RHS, returns the same names regardless of `h`.
 """
-StatsModels.coefnames(lpiv::LocalProjectionIV, h::Int) = lpiv.coef_names[h + 1]
+StatsModels.coefnames(lpiv::LocalProjectionIV, h::Int) = lpiv.coef_names
 
 """Type alias for dispatching shared methods on both OLS and IV local projections."""
 const LPResult = Union{LocalProjection, LocalProjectionIV}
@@ -1048,7 +1061,7 @@ function Base.show(io::IO, ::MIME"text/plain", lpiv::LocalProjectionIV)
     println(io, "  Formula:      $(lpiv.base_formula)")
     println(io, "  Endogenous:   $(lpiv.endogenous_names)")
     println(io, "  Instruments:  $(lpiv.instrument_names)")
-    println(io, "  Coef names:   $(lpiv.coef_names[1])")
+    println(io, "  Coef names:   $(lpiv.coef_names)")
 end
 
 """
@@ -1075,7 +1088,7 @@ function Base.:+(lpiv::LocalProjectionIV{M}, v::VcovSpec{V}) where {
 end
 
 """
-    _parse_lpiv_formula(formula::FormulaTerm, sch, data)
+    _parse_lpiv_formula(formula::FormulaTerm, sch)
 
 Parse an IV formula to extract endogenous, instrument, and exogenous terms.
 Handles `(x ~ z)` syntax for IV specification within the formula.
@@ -1086,7 +1099,7 @@ Returns:
 - `instr_terms`: Vector of instrument terms
 - `exo_terms`: Vector of exogenous control terms
 """
-function _parse_lpiv_formula(formula::FormulaTerm, sch, data)
+function _parse_lpiv_formula(formula::FormulaTerm, sch)
     lhs_term = StatsModels.apply_schema(formula.lhs, sch, StatisticalModel)
 
     endo_terms = AbstractTerm[]
@@ -1209,7 +1222,7 @@ function lpiv(formula::FormulaTerm, data::AbstractDataFrame;
 
     # Parse the IV formula
     lhs_term, endo_terms, instr_terms,
-    exo_terms = _parse_lpiv_formula(formula, sch, df_base)
+    exo_terms = _parse_lpiv_formula(formula, sch)
 
     # Validate IV specification
     isempty(endo_terms) &&
@@ -1258,8 +1271,8 @@ function lpiv(formula::FormulaTerm, data::AbstractDataFrame;
         dummy_formula_exo = StatsModels.FormulaTerm(StatsModels.Term(response), exo_tuple)
         mf_exo = StatsModels.ModelFrame(dummy_formula_exo, df_base_complete)
         X_exo_raw = StatsModels.modelcols(mf_exo.f.rhs, mf_exo.data)
-        X_exo = map(v -> ismissing(v) ? NaN : Float64(v), X_exo_raw)
-        coef_names_exo = coefnames(mf_exo)
+        X_exo = Matrix{Float64}(map(v -> ismissing(v) ? NaN : Float64(v), X_exo_raw))
+        coef_names_exo = Vector{String}(coefnames(mf_exo))
     else
         # No exogenous terms - just intercept
         n_obs = nrow(df_base_complete)
@@ -1269,37 +1282,40 @@ function lpiv(formula::FormulaTerm, data::AbstractDataFrame;
 
     # Get endogenous matrix - extract columns directly from terms (no formula intercept)
     endo_names = String[]
-    X_endo_cols = []
+    X_endo_cols = Matrix{Float64}[]
     for endo_term in endo_terms
         # Use modelcols directly on the term to avoid intercept
         endo_col_raw = StatsModels.modelcols(endo_term, df_base_complete)
         endo_col = map(v -> ismissing(v) ? NaN : Float64(v), endo_col_raw)
-        push!(X_endo_cols, endo_col isa AbstractMatrix ? endo_col : reshape(endo_col, :, 1))
+        push!(X_endo_cols,
+            endo_col isa AbstractMatrix ? Matrix{Float64}(endo_col) :
+            reshape(Vector{Float64}(endo_col), :, 1))
         term_names = StatsModels.coefnames(endo_term)
         append!(endo_names, term_names isa Vector ? term_names : [term_names])
     end
-    X_endo = hcat(X_endo_cols...)
+    X_endo = hcat(X_endo_cols...)::Matrix{Float64}
 
     # Get instrument matrix - extract columns directly from terms (no formula intercept)
     instr_names = String[]
-    Z_instr_cols = []
+    Z_instr_cols = Matrix{Float64}[]
     for instr_term in instr_terms
         # Use modelcols directly on the term to avoid intercept
         instr_col_raw = StatsModels.modelcols(instr_term, df_base_complete)
         instr_col = map(v -> ismissing(v) ? NaN : Float64(v), instr_col_raw)
-        push!(Z_instr_cols, instr_col isa AbstractMatrix ? instr_col :
-                            reshape(instr_col, :, 1))
+        push!(Z_instr_cols,
+            instr_col isa AbstractMatrix ? Matrix{Float64}(instr_col) :
+            reshape(Vector{Float64}(instr_col), :, 1))
         term_names = StatsModels.coefnames(instr_term)
         append!(instr_names, term_names isa Vector ? term_names : [term_names])
     end
-    Z_instr = hcat(Z_instr_cols...)
+    Z_instr = hcat(Z_instr_cols...)::Matrix{Float64}
 
     # Build full X = [exogenous, endogenous] and Z = [exogenous, instruments]
-    X_full = hcat(X_exo, X_endo)
-    Z_full = hcat(X_exo, Z_instr)
+    X_full = hcat(X_exo, X_endo)::Matrix{Float64}
+    Z_full = hcat(X_exo, Z_instr)::Matrix{Float64}
 
     n_endogenous = size(X_endo, 2)
-    coef_names_base = vcat(coef_names_exo, endo_names)
+    coef_names_base = Vector{String}(vcat(coef_names_exo, endo_names))
 
     # Check order condition
     n_instruments = size(Z_instr, 2)
@@ -1313,19 +1329,37 @@ function lpiv(formula::FormulaTerm, data::AbstractDataFrame;
         shock_symbol = shock
     end
 
+    # Function barrier: X_full, Z_full, coef_names_base are now concretely typed,
+    # so _lpiv_estimate_horizons can be fully inferred by the compiler.
+    return _lpiv_estimate_horizons(X_full, Z_full, coef_names_base, df_base_complete,
+        horizon, n_endogenous, response, shock_symbol, formula,
+        endo_names, instr_names,
+        is_anchor, is_cumulative, is_leads, anchor_term, cumul_term, leads_term)
+end
+
+"""
+    _lpiv_estimate_horizons(X_full, Z_full, coef_names_base, df, ...)
+
+Function barrier for type-stable per-horizon IV estimation.
+Called after formula parsing and matrix assembly to ensure all matrix arguments
+are concretely typed as Matrix{Float64}.
+"""
+function _lpiv_estimate_horizons(X_full::Matrix{Float64}, Z_full::Matrix{Float64},
+        coef_names_base::Vector{String}, df_base_complete,
+        horizon, n_endogenous, response, shock_symbol, formula,
+        endo_names, instr_names,
+        is_anchor, is_cumulative, is_leads, anchor_term, cumul_term, leads_term)
     # Identify complete rows
     X_missing_ind = vec(all(!isnan, X_full, dims = 2))
     Z_missing_ind = vec(all(!isnan, Z_full, dims = 2))
     XZ_complete = X_missing_ind .& Z_missing_ind
 
-    # Stage 3: Estimate IV models for each horizon
-    coef_names_vec = Vector{Vector{String}}(undef, horizon + 1)
-
     # Helper to estimate one horizon
     function _estimate_iv_horizon(h)
         lhs_h = _build_lhs_for_horizon(h, is_anchor, is_cumulative, is_leads,
             anchor_term, cumul_term, leads_term)
-        y_h = StatsModels.modelcols(lhs_h, df_base_complete)
+        # Convert to Vector{Float64} for type stability (modelcols may return ShiftedArray)
+        y_h = Vector{Float64}(StatsModels.modelcols(lhs_h, df_base_complete))
         y_complete_rows = .!isnan.(y_h)
         complete_rows = XZ_complete .& y_complete_rows
         sum(complete_rows) == 0 &&
@@ -1339,7 +1373,6 @@ function lpiv(formula::FormulaTerm, data::AbstractDataFrame;
 
     # Estimate first model to get concrete type
     first_model = _estimate_iv_horizon(0)
-    coef_names_vec[1] = coef_names_base
 
     # Verify shock variable is present
     available = Symbol.(coef_names_base)
@@ -1351,11 +1384,10 @@ function lpiv(formula::FormulaTerm, data::AbstractDataFrame;
 
     for (i, h) in enumerate(1:horizon)
         models[i + 1] = _estimate_iv_horizon(h)
-        coef_names_vec[i + 1] = coef_names_base
     end
 
     return LocalProjectionIV(
-        models, horizon, response, shock_symbol, formula, coef_names_vec,
+        models, horizon, response, shock_symbol, formula, coef_names_base,
         endo_names, instr_names)
 end
 
@@ -1380,6 +1412,42 @@ function first_stage(lpiv::LocalProjectionIV, h::Int)
 end
 
 # ============================================================================
+# Weak IV Test for LocalProjectionIV
+# ============================================================================
+
+"""
+    weakivtest(lpiv::LocalProjectionIV, h::Int; kwargs...) -> WeakIVTestResult
+
+Montiel-Olea-Pflueger robust weak instrument test for horizon `h` (0-indexed).
+
+# Keyword Arguments
+- `level::Real=0.05`: Confidence level alpha
+- `eps::Real=0.001`: Convergence tolerance for bias optimization
+- `benchmark::Symbol=:nagar`: Bias benchmark (`:nagar` or `:ols`)
+
+# Returns
+A `WeakIVTestResult` containing effective F, robust F, critical values, etc.
+
+See also: [`lpiv`](@ref), [`first_stage`](@ref)
+"""
+function weakivtest(lpiv::LocalProjectionIV, h::Int; kwargs...)
+    0 <= h <= lpiv.horizon ||
+        throw(BoundsError("horizon $h out of range 0:$(lpiv.horizon)"))
+    return Regress.weakivtest(lpiv.models[h + 1]; kwargs...)
+end
+
+"""
+    weakivtest(lpiv::LocalProjectionIV; kwargs...) -> Vector{WeakIVTestResult}
+
+Montiel-Olea-Pflueger robust weak instrument test for all horizons.
+
+Returns a vector of `WeakIVTestResult`, one per horizon (0 to `lpiv.horizon`).
+"""
+function weakivtest(lpiv::LocalProjectionIV; kwargs...)
+    return [Regress.weakivtest(m; kwargs...) for m in lpiv.models]
+end
+
+# ============================================================================
 # Shared methods for LocalProjection and LocalProjectionIV (via LPResult)
 # ============================================================================
 
@@ -1391,12 +1459,12 @@ Works for both `LocalProjection` and `LocalProjectionIV`.
 """
 function coefpath(lp::LPResult; term::Symbol = lp.shock)
     n = lp.horizon + 1
+    names = lp.coef_names
+    idx = findfirst(==(String(term)), names)
+    idx === nothing &&
+        throw(ArgumentError("term $term not present in model"))
     coefficients = Vector{Float64}(undef, n)
     for (i, model) in enumerate(lp.models)
-        names = lp.coef_names[i]
-        idx = findfirst(==(String(term)), names)
-        idx === nothing &&
-            throw(ArgumentError("term $term not present in model at horizon $(i - 1)"))
         coefficients[i] = coef(model)[idx]
     end
     return coefficients
@@ -1411,10 +1479,10 @@ from `CovarianceMatrices.jl`. Works for both `LocalProjection` and `LocalProject
 function vcov(estimator, lp::LPResult)
     n = lp.horizon + 1
     variances = Dict{Symbol, Vector{Float64}}()
+    names = Symbol.(lp.coef_names)
 
     for (i, model) in enumerate(lp.models)
         cov = CovarianceMatrices.vcov(estimator, model)
-        names = Symbol.(lp.coef_names[i])
         for (j, name) in enumerate(names)
             vec = get!(variances, name) do
                 fill(NaN, n)
@@ -1434,13 +1502,15 @@ and confidence intervals. Works for both `LocalProjection` and `LocalProjectionI
 """
 function summarize(lp::LPResult, cov::LocalProjectionCovariance;
         term::Symbol = lp.shock, level::Real = 0.95, scale::Real = 1.0)
-    beta = coefpath(lp; term = term) .* scale
-    se = stderror(cov; term = term) .* scale
-    z = quantile(Normal(), 0.5 + level / 2)
+    level_f = Float64(level)
+    scale_f = Float64(scale)
+    beta = coefpath(lp; term = term) .* scale_f
+    se = stderror(cov; term = term) .* scale_f
+    z = quantile(Normal(), 0.5 + level_f / 2)
     lower = beta .- z .* se
     upper = beta .+ z .* se
 
-    IRFSummary(term, Float64(level), Float64(scale),
+    IRFSummary(term, level_f, scale_f,
         collect(0:lp.horizon), beta, se, lower, upper)
 end
 
@@ -1455,6 +1525,36 @@ function summarize(lp::LPResult,
     cov = vcov(estimator, lp)
     summarize(lp, cov; term = term, level = level, scale = scale)
 end
+
+# ============================================================================
+# Makie Extension Stubs
+# ============================================================================
+
+"""
+    irfplot(lp, estimator_or_cov; term=lp.shock, levels=[0.95], irf_scale=1.0)
+
+Plot impulse response function from a local projection. Requires Makie.
+
+Creates a line plot with confidence bands.
+
+# Arguments
+- `lp::Union{LocalProjection, LocalProjectionIV}`: estimated local projection
+- `estimator_or_cov`: a `CovarianceMatrices` estimator or `LocalProjectionCovariance`
+- `term::Symbol`: which coefficient to plot (default: shock variable)
+- `levels::Vector{Float64}`: confidence levels for bands (default: `[0.95]`)
+- `irf_scale::Float64`: scaling factor for IRF (default: `1.0`)
+"""
+function irfplot end
+function irfplot! end
+
+"""
+    irfplot_axis(subfig, lp, estimator_or_cov; kwargs...)
+
+Create an `Axis` with an IRF plot in the given sub-figure position. Requires Makie.
+
+Returns `(subfig, ax, plot)`.
+"""
+function irfplot_axis end
 
 # ============================================================================
 # Plot Recipes using RecipesBase
@@ -1529,675 +1629,6 @@ end
         term = lp.shock, levels = [0.95], irf_scale = 1.0)
     cov = vcov(estimator, lp)
     IRFPlot(lp, cov, term, Float64.(levels), Float64(irf_scale))
-end
-
-# ============================================================================
-# Test Items
-# ============================================================================
-
-@testitem "cumul transformation" tags=[:cumul, :core] begin
-    using LocalProjections
-    using DataFrames, StatsModels, Regress, StatsBase, Test
-
-    # Create simple synthetic data
-    n = 100
-    df = DataFrame(
-        x = 1.0:n,
-        y = sin.(1.0:n) .+ (1.0:n) ./ 10
-    )
-
-    # Test cumul transformation in lp() context
-    horizon = 3
-    lp_result = lp(@formula(cumul(y) ~ x), df; horizon = horizon)
-
-    # Manually compute cumulative sums and compare
-    # Note: Must replicate lp's filtering logic exactly
-    df_filtered = dropmissing(df, [:y, :x], disallowmissing = true)
-
-    for h in 0:horizon
-        # Get coefficient from lp result
-        lp_coef = coef(lp_result.models[h + 1])[2]  # x coefficient (index 2, after intercept)
-
-        # Manually compute cumulative y at horizon h using StatsModels
-        cumul_term_h = CumulTerm{typeof(Term(:y))}(Term(:y), h)
-        y_h = StatsModels.modelcols(cumul_term_h, df_filtered)
-        y_h_manual = map(x->sum(x), map(t->df_filtered.y[t:(t + h)], 1:(nrow(df_filtered) - h)))
-
-        # Find complete observations (no NaN in y_h)
-        complete_obs = .!isnan.(y_h)
-        y_manual = y_h[complete_obs]
-        # Manually run regression on complete data
-        X_manual = hcat(ones(sum(complete_obs)), df_filtered.x[complete_obs])
-
-        @test y_manual == y_h_manual  # Verify manual cumulative matches StatsModels output
-        manual_coef = (X_manual \ y_manual)[2]  # x coefficient
-
-        # Compare coefficients
-        @test lp_coef ≈ manual_coef atol=1e-10
-    end
-end
-
-@testitem "leads transformation" tags=[:leads, :core] begin
-    using LocalProjections
-    using DataFrames, StatsModels, Regress, StatsBase, Test
-    using ShiftedArrays: lead
-
-    # Create simple synthetic data
-    n = 100
-    df = DataFrame(
-        x = 1.0:n,
-        y = cos.(1.0:n) .+ (1.0:n) ./ 20
-    )
-
-    # Test leads transformation in lp() context
-    horizon = 3
-    lp_result = lp(@formula(leads(y) ~ x), df; horizon = horizon)
-
-    # Manually compute leads and compare
-    df_filtered = dropmissing(df, [:y, :x], disallowmissing = true)
-
-    for h in 0:horizon
-        # Get coefficient from lp result
-        lp_coef = coef(lp_result.models[h + 1])[2]  # x coefficient
-
-        # Manually compute lead of y at horizon h using StatsModels
-        leads_term_h = LeadTerm{typeof(Term(:y))}(Term(:y), h)
-        y_h = StatsModels.modelcols(leads_term_h, df_filtered)
-
-        # Find complete observations (no NaN)
-        complete_obs = .!isnan.(y_h)
-
-        # Manually run regression on complete data
-        X_manual = hcat(ones(sum(complete_obs)), df_filtered.x[complete_obs])
-        y_manual = y_h[complete_obs]
-        manual_coef = (X_manual \ y_manual)[2]  # x coefficient
-
-        # Compare coefficients
-        @test lp_coef ≈ manual_coef atol=1e-10
-    end
-
-    # Verify NaN handling (not missing)
-    y_lead_test = lead(df.y, 5, default = NaN)
-    @test eltype(y_lead_test) == Float64
-    @test any(isnan, y_lead_test)  # Should have NaN at boundaries
-end
-
-@testitem "anchor function syntax" tags=[:anchor, :core] begin
-    using LocalProjections
-    using DataFrames, StatsModels, Regress, StatsBase, Test
-
-    # Create simple synthetic data with both y and z
-    n = 100
-    df = DataFrame(
-        x = 1.0:n,
-        y = sin.(1.0:n) .+ (1.0:n) ./ 10,
-        z = cos.(1.0:n)
-    )
-
-    # Test anchor transformation with function syntax
-    horizon = 3
-    lp_result = lp(@formula(anchor(y, z) ~ x), df; horizon = horizon)
-
-    # Manually compute anchored response and compare
-    df_filtered = dropmissing(df, [:y, :z, :x], disallowmissing = true)
-
-    for h in 0:horizon
-        # Get coefficient from lp result
-        lp_coef = coef(lp_result.models[h + 1])[2]  # x coefficient
-
-        # Manually compute anchored response using StatsModels
-        inner_leads = LeadTerm{typeof(Term(:y))}(Term(:y), h)
-        anchor_h = AnchorTerm{typeof(inner_leads), typeof(Term(:z))}(
-            inner_leads, Term(:z), 0)  # horizon=0 because lead is in inner term
-        y_h = StatsModels.modelcols(anchor_h, df_filtered)
-
-        # Find complete observations (no NaN)
-        complete_obs = .!isnan.(y_h)
-
-        # Manually run regression on complete data
-        X_manual = hcat(ones(sum(complete_obs)), df_filtered.x[complete_obs])
-        y_manual = y_h[complete_obs]
-        manual_coef = (X_manual \ y_manual)[2]  # x coefficient
-
-        # Compare coefficients
-        @test lp_coef ≈ manual_coef atol=1e-10
-    end
-end
-
-@testitem "anchor pipe syntax" tags=[:anchor, :core] begin
-    using LocalProjections
-    using DataFrames, StatsModels, Regress, StatsBase, Test
-
-    # Create simple synthetic data
-    n = 100
-    df = DataFrame(
-        x = 1.0:n,
-        y = sin.(1.0:n) .+ (1.0:n) ./ 10,
-        z = cos.(1.0:n)
-    )
-
-    # Test anchor with pipe syntax
-    horizon = 3
-    lp_pipe = lp(@formula(leads(y)|z ~ x), df; horizon = horizon)
-
-    # Test anchor with function syntax (should be identical)
-    lp_func = lp(@formula(anchor(y, z) ~ x), df; horizon = horizon)
-
-    # Compare results from both syntaxes
-    for h in 0:horizon
-        pipe_coef = coef(lp_pipe.models[h + 1])[2]
-        func_coef = coef(lp_func.models[h + 1])[2]
-
-        @test pipe_coef ≈ func_coef atol=1e-10
-    end
-
-    # Also verify against manual computation
-    df_filtered = dropmissing(df, [:y, :z, :x], disallowmissing = true)
-
-    for h in 0:horizon
-        lp_coef = coef(lp_pipe.models[h + 1])[2]
-
-        # Manual computation using StatsModels
-        inner_leads = LeadTerm{typeof(Term(:y))}(Term(:y), h)
-        anchor_h = AnchorTerm{typeof(inner_leads), typeof(Term(:z))}(
-            inner_leads, Term(:z), 0)  # horizon=0 because lead is in inner term
-        y_h = StatsModels.modelcols(anchor_h, df_filtered)
-
-        y_h_manual = lead(df_filtered.y, h, default = NaN) .- df_filtered.z
-        complete_obs = .!isnan.(y_h)
-        X_manual = hcat(ones(sum(complete_obs)), df_filtered.x[complete_obs])
-        y_manual = y_h[complete_obs]
-        y_manual_manual = y_h_manual[complete_obs]
-        @test y_manual == y_manual_manual  # Verify manual matches StatsModels output
-        manual_coef = (X_manual \ y_manual)[2]
-
-        @test lp_coef ≈ manual_coef atol=1e-10
-    end
-end
-
-@testitem "modelcols anchor matches manual lead computation" tags=[:anchor, :verification] begin
-    using LocalProjections
-    using DataFrames, StatsModels, Test
-
-    # Create test data
-    n = 100
-    df = DataFrame(
-        y = sin.(1.0:n) .+ (1.0:n) ./ 10,
-        z = cos.(1.0:n)
-    )
-
-    # Test that modelcols(AnchorTerm) matches manual lead() - z computation
-    for h in 0:5
-        # Method 1: Using StatsModels.modelcols with AnchorTerm
-        inner_leads = LeadTerm{typeof(Term(:y))}(Term(:y), h)
-        anchor_h = AnchorTerm{typeof(inner_leads), typeof(Term(:z))}(
-            inner_leads, Term(:z), 0)
-        y_modelcols = StatsModels.modelcols(anchor_h, df)
-
-        # Method 2: Manual computation using lead() - z
-        y_manual = lead(df.y, h, default = NaN) .- df.z
-
-        # Compare (must handle NaN carefully)
-        for i in 1:n
-            if isnan(y_modelcols[i]) && isnan(y_manual[i])
-                @test true  # Both NaN, OK
-            elseif isnan(y_modelcols[i]) || isnan(y_manual[i])
-                @test false  # One NaN, other not - FAIL
-            else
-                @test y_modelcols[i] ≈ y_manual[i] atol=1e-10
-            end
-        end
-    end
-end
-
-@testitem "cumulative anchor (nested)" tags=[:nested, :anchor, :cumul] begin
-    using LocalProjections
-    using DataFrames, StatsModels, Regress, StatsBase, Test
-
-    # Create simple synthetic data
-    n = 100
-    df = DataFrame(
-        x = 1.0:n,
-        y = sin.(1.0:n) .+ (1.0:n) ./ 10,
-        z = cos.(1.0:n)
-    )
-
-    # Test cumulative anchor: cumul(y)|z
-    horizon = 3
-    lp_result = lp(@formula(cumul(y)|z ~ x), df; horizon = horizon)
-
-    # Manually compute cumulative anchored response
-    df_filtered = dropmissing(df, [:y, :z, :x], disallowmissing = true)
-
-    for h in 0:horizon
-        # Get coefficient from lp result
-        lp_coef = coef(lp_result.models[h + 1])[2]
-
-        # Manual computation using StatsModels: first cumul, then anchor
-        inner_cumul = CumulTerm{typeof(Term(:y))}(Term(:y), h)
-        anchor_h = AnchorTerm{typeof(inner_cumul), typeof(Term(:z))}(
-            inner_cumul, Term(:z), 0)  # horizon=0 because cumul already has horizon
-        y_h = StatsModels.modelcols(anchor_h, df_filtered)
-
-        # Find complete observations (no NaN)
-        complete_obs = .!isnan.(y_h)
-
-        # Manually run regression
-        X_manual = hcat(ones(sum(complete_obs)), df_filtered.x[complete_obs])
-        y_manual = y_h[complete_obs]
-        manual_coef = (X_manual \ y_manual)[2]
-
-        # Compare coefficients
-        @test lp_coef ≈ manual_coef atol=1e-10
-    end
-end
-
-@testitem "nested log transformations" tags=[:nested, :core] begin
-    using LocalProjections
-    using DataFrames, StatsModels, Regress, StatsBase, Test
-
-    # Create simple synthetic data (positive values for log)
-    n = 100
-    df = DataFrame(
-        x = 1.0:n,
-        y = exp.(1.0:n) ./ 100,  # Positive values
-        z = exp.(2.0:101) ./ 150
-    )
-
-    # Test cumul(log(y))
-    horizon = 2
-    lp_cumul_log = lp(@formula(cumul(log(y)) ~ x), df; horizon = horizon)
-    df_filtered1 = dropmissing(df, [:y, :x], disallowmissing = true)
-
-    for h in 0:horizon
-        lp_coef = coef(lp_cumul_log.models[h + 1])[2]
-
-        # Manual computation: cumulative sum of log(y) from t to t+h
-        log_y = log.(df_filtered1.y)
-        y_h = [t + h <= length(log_y) ? sum(log_y[t:(t + h)]) : NaN
-               for t in 1:length(log_y)]
-        complete_obs = .!isnan.(y_h)
-
-        X_manual = hcat(ones(sum(complete_obs)), df_filtered1.x[complete_obs])
-        y_manual = y_h[complete_obs]
-        manual_coef = (X_manual \ y_manual)[2]
-
-        @test lp_coef ≈ manual_coef atol=1e-10
-    end
-
-    # Test leads(log(y))
-    lp_lead_log = lp(@formula(leads(log(y)) ~ x), df; horizon = horizon)
-    df_filtered2 = dropmissing(df, [:y, :x], disallowmissing = true)
-
-    for h in 0:horizon
-        lp_coef = coef(lp_lead_log.models[h + 1])[2]
-
-        # Manual computation: lead of log(y) by h
-        log_y = log.(df_filtered2.y)
-        y_h = [t + h <= length(log_y) ? log_y[t + h] : NaN for t in 1:length(log_y)]
-        complete_obs = .!isnan.(y_h)
-
-        X_manual = hcat(ones(sum(complete_obs)), df_filtered2.x[complete_obs])
-        y_manual = y_h[complete_obs]
-        manual_coef = (X_manual \ y_manual)[2]
-
-        @test lp_coef ≈ manual_coef atol=1e-10
-    end
-
-    # Test anchor(log(y), z)
-    lp_anchor_log = lp(@formula(anchor(log(y), z) ~ x), df; horizon = horizon)
-    df_filtered3 = dropmissing(df, [:y, :z, :x], disallowmissing = true)
-
-    for h in 0:horizon
-        lp_coef = coef(lp_anchor_log.models[h + 1])[2]
-
-        # Manual computation: lead of log(y) by h, minus z at t
-        log_y = log.(df_filtered3.y)
-        y_h = [t + h <= length(log_y) ? log_y[t + h] - df_filtered3.z[t] : NaN
-               for t in 1:length(log_y)]
-        complete_obs = .!isnan.(y_h)
-
-        X_manual = hcat(ones(sum(complete_obs)), df_filtered3.x[complete_obs])
-        y_manual = y_h[complete_obs]
-        manual_coef = (X_manual \ y_manual)[2]
-
-        # Use relative tolerance for large values
-        @test lp_coef ≈ manual_coef rtol=1e-10
-    end
-end
-
-@testitem "summarize function" tags=[:summarize, :api] begin
-    using LocalProjections
-    using DataFrames, StatsModels, Test
-    using CovarianceMatrices: HC1
-
-    n = 100
-    df = DataFrame(x = randn(n), y = randn(n))
-    lp_result = lp(@formula(leads(y) ~ x), df; horizon = 5)
-    cov = LocalProjections.vcov(HC1(), lp_result)
-
-    # Test basic summarize returns IRFSummary
-    summary_obj = summarize(lp_result, cov)
-    @test summary_obj isa IRFSummary
-    @test length(summary_obj.horizon) == 6  # horizons 0-5
-    @test summary_obj.horizon == collect(0:5)
-    @test summary_obj.term == :x
-    @test summary_obj.level == 0.95
-
-    # Test conversion to DataFrame
-    summary_df = DataFrame(summary_obj)
-    @test summary_df isa DataFrame
-    @test nrow(summary_df) == 6
-    @test names(summary_df) == ["horizon", "coef", "se", "lower", "upper"]
-
-    # Test with scale
-    summary_scaled = summarize(lp_result, cov; scale = 100)
-    @test summary_scaled.coef ≈ summary_obj.coef .* 100
-    @test summary_scaled.scale == 100.0
-
-    # Test with estimator directly
-    summary_direct = summarize(lp_result, HC1())
-    @test summary_direct.coef ≈ summary_obj.coef atol=1e-10
-
-    # Test confidence bounds are sensible (lower < coef < upper when se > 0)
-    for i in 1:length(summary_obj.horizon)
-        if summary_obj.se[i] > 0
-            @test summary_obj.lower[i] < summary_obj.coef[i] < summary_obj.upper[i]
-        end
-    end
-
-    # Test different confidence level
-    summary_90 = summarize(lp_result, cov; level = 0.90)
-    @test summary_90.level == 0.90
-    # 90% CI should be narrower than 95% CI
-    @test all(summary_90.upper .- summary_90.lower .<
-              summary_obj.upper .- summary_obj.lower)
-end
-
-@testitem "plus vcov operator" tags=[:vcov, :api] begin
-    using LocalProjections
-    using LocalProjections: VcovSpec
-    using DataFrames, StatsModels, Test
-    using CovarianceMatrices: HC1, Bartlett, NeweyWest
-    using Regress: vcov
-
-    n = 100
-    df = DataFrame(x = randn(n), y = randn(n))
-    lp_result = lp(@formula(leads(y) ~ x), df; horizon = 5)
-
-    # Test + vcov() syntax
-    lp_robust = lp_result + vcov(Bartlett{NeweyWest}())
-
-    # Result should be a LocalProjection
-    @test lp_robust isa LocalProjection
-
-    # Coefficients should be unchanged
-    @test coefpath(lp_result) == coefpath(lp_robust)
-
-    # Horizon and metadata should be preserved
-    @test lp_robust.horizon == lp_result.horizon
-    @test lp_robust.response == lp_result.response
-    @test lp_robust.shock == lp_result.shock
-    @test lp_robust.base_formula == lp_result.base_formula
-    @test lp_robust.coef_names == lp_result.coef_names
-
-    # Number of models should be the same
-    @test length(lp_robust.models) == length(lp_result.models)
-
-    # Test chaining: (lp + vcov(A)) + vcov(B)
-    lp_chained = (lp_result + vcov(HC1())) + vcov(Bartlett{NeweyWest}())
-    @test lp_chained isa LocalProjection
-    @test coefpath(lp_chained) == coefpath(lp_result)
-end
-
-@testitem "lpiv basic functionality" tags=[:lpiv, :iv, :core] begin
-    using LocalProjections
-    using LocalProjections: FirstStageResult
-    using DataFrames, StatsModels, Test
-    using Random
-    using CovarianceMatrices: HC1
-    using LinearAlgebra
-
-    Random.seed!(42)
-
-    # Generate data with endogeneity
-    n = 200
-    z = randn(n)
-    u = randn(n)
-    x = 0.5*z + 0.5*u      # Endogenous (correlated with u)
-    y = 1.0 .+ 2.0*x .+ u  # True effect = 2.0
-
-    df = DataFrame(y = y, x = x, z = z)
-
-    # Fit IV local projection
-    horizon = 3
-    result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon = horizon)
-
-    # Check struct type
-    @test result isa LocalProjectionIV
-    @test result.horizon == horizon
-    @test result.response == :y
-    @test result.shock == :x
-
-    # Check that we have the right number of models
-    @test length(result.models) == horizon + 1
-
-    # Check endogenous and instrument names
-    @test :x in Symbol.(result.endogenous_names) || "x" in result.endogenous_names
-    @test :z in Symbol.(result.instrument_names) || "z" in result.instrument_names
-
-    # Extract IRF - coefficient should be close to 2.0 for horizon 0
-    irf = coefpath(result; term = :x)
-    @test length(irf) == horizon + 1
-    # IV should recover true effect ~2.0 (with some noise due to finite sample)
-    @test irf[1] > 1.0 && irf[1] < 3.0  # Reasonable range
-
-    # Test first_stage
-    fs = first_stage(result, 0)
-    @test fs isa FirstStageResult
-    @test fs.F_joint > 0  # F-statistic should be positive
-
-    # Test first_stage for all horizons
-    all_fs = first_stage(result)
-    @test length(all_fs) == horizon + 1
-
-    # Test vcov
-    cov = LocalProjections.vcov(HC1(), result)
-    @test cov isa LocalProjectionCovariance
-    se = stderror(cov; term = :x)
-    @test length(se) == horizon + 1
-    @test all(se .> 0)  # Standard errors should be positive
-end
-
-@testitem "lpiv with controls" tags=[:lpiv, :iv] begin
-    using LocalProjections
-    using DataFrames, StatsModels, Test
-    using Random
-    using LinearAlgebra
-
-    Random.seed!(123)
-
-    # Generate data with endogeneity and exogenous control
-    n = 200
-    z = randn(n)
-    w = randn(n)           # Exogenous control
-    u = randn(n)
-    x = 0.5*z + 0.3*w + 0.4*u  # Endogenous
-    y = 1.0 .+ 2.0*x .+ 0.5*w .+ u
-
-    df = DataFrame(y = y, x = x, z = z, w = w)
-
-    # Fit IV LP with control
-    horizon = 2
-    result = lpiv(@formula(leads(y) ~ (x ~ z) + w), df; horizon = horizon)
-
-    @test result isa LocalProjectionIV
-
-    # Check coefficient names include both x and w
-    names = coefnames(result)
-    @test "x" in names
-    @test "w" in names
-
-    # Get coefficients for both terms
-    irf_x = coefpath(result; term = :x)
-    irf_w = coefpath(result; term = :w)
-
-    @test length(irf_x) == horizon + 1
-    @test length(irf_w) == horizon + 1
-end
-
-@testitem "lpiv plus vcov operator" tags=[:lpiv, :vcov, :api] begin
-    using LocalProjections
-    using LocalProjections: VcovSpec
-    using DataFrames, StatsModels, Test
-    using CovarianceMatrices: HC1, Bartlett, NeweyWest
-    using Regress: vcov
-    using Random
-    using LinearAlgebra
-
-    Random.seed!(456)
-
-    n = 150
-    z = randn(n)
-    u = randn(n)
-    x = 0.6*z + 0.4*u
-    y = 0.5 .+ 1.5*x .+ u
-
-    df = DataFrame(y = y, x = x, z = z)
-
-    result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon = 3)
-
-    # Test + vcov() syntax
-    result_hac = result + vcov(Bartlett{NeweyWest}())
-
-    # Result should be a LocalProjectionIV
-    @test result_hac isa LocalProjectionIV
-
-    # Coefficients should be unchanged
-    @test coefpath(result) == coefpath(result_hac)
-
-    # Metadata should be preserved
-    @test result_hac.horizon == result.horizon
-    @test result_hac.response == result.response
-    @test result_hac.shock == result.shock
-    @test result_hac.endogenous_names == result.endogenous_names
-    @test result_hac.instrument_names == result.instrument_names
-
-    # Test chaining
-    result_chained = (result + vcov(HC1())) + vcov(Bartlett{NeweyWest}())
-    @test result_chained isa LocalProjectionIV
-    @test coefpath(result_chained) == coefpath(result)
-end
-
-@testitem "lpiv with cumul response" tags=[:lpiv, :cumul] begin
-    using LocalProjections
-    using DataFrames, StatsModels, Test
-    using Random
-    using LinearAlgebra
-
-    Random.seed!(789)
-
-    n = 150
-    z = randn(n)
-    u = randn(n)
-    x = 0.5*z + 0.5*u
-    y = 1.0 .+ 2.0*x .+ u
-
-    df = DataFrame(y = y, x = x, z = z)
-
-    # Cumulative IV local projection
-    horizon = 2
-    result = lpiv(@formula(cumul(y) ~ (x ~ z)), df; horizon = horizon)
-
-    @test result isa LocalProjectionIV
-    @test result.response == :y
-
-    irf = coefpath(result; term = :x)
-    @test length(irf) == horizon + 1
-
-    # Cumulative IRF should grow (roughly) with horizon
-    # At h=0: ~2.0 (impact)
-    # At h=1: ~4.0 (sum of two periods)
-    # This is approximate due to estimation noise
-    @test irf[1] > 0  # Impact positive
-end
-
-@testitem "lpiv summarize" tags=[:lpiv, :summarize, :api] begin
-    using LocalProjections
-    using DataFrames, StatsModels, Test
-    using CovarianceMatrices: HC1
-    using Random
-    using LinearAlgebra
-
-    Random.seed!(1011)
-
-    n = 150
-    z = randn(n)
-    u = randn(n)
-    x = 0.5*z + 0.5*u
-    y = 1.0 .+ 2.0*x .+ u
-
-    df = DataFrame(y = y, x = x, z = z)
-
-    result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon = 3)
-    cov = LocalProjections.vcov(HC1(), result)
-
-    # Test summarize
-    summary_obj = summarize(result, cov)
-    @test summary_obj isa IRFSummary
-    @test length(summary_obj.horizon) == 4  # 0-3
-    @test summary_obj.term == :x
-
-    # Convert to DataFrame
-    summary_df = DataFrame(summary_obj)
-    @test summary_df isa DataFrame
-    @test nrow(summary_df) == 4
-
-    # Test with scale
-    summary_scaled = summarize(result, cov; scale = 100)
-    @test summary_scaled.coef ≈ summary_obj.coef .* 100
-
-    # Test with estimator directly
-    summary_direct = summarize(result, HC1())
-    @test summary_direct.coef ≈ summary_obj.coef atol=1e-10
-end
-
-@testitem "lpiv comparison with manual 2SLS" tags=[:lpiv, :iv, :verification] begin
-    using LocalProjections
-    using DataFrames, StatsModels, Test
-    using LinearAlgebra
-    using Random
-
-    Random.seed!(2022)
-
-    # Generate data
-    n = 200
-    z = randn(n)
-    u = randn(n)
-    x = 0.5*z + 0.5*u
-    y = 1.0 .+ 2.0*x .+ u
-
-    df = DataFrame(y = y, x = x, z = z)
-
-    # lpiv result for horizon 0
-    result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon = 0)
-    lpiv_coef = coefpath(result; term = :x)[1]
-
-    # Manual 2SLS for comparison
-    # Z = [ones, z], X = [ones, x]
-    Z_manual = hcat(ones(n), z)
-    X_manual = hcat(ones(n), x)
-    y_manual = y
-
-    # Stage 1: Xhat = Z * (Z'Z)^{-1} Z' X
-    Pz = Z_manual * inv(Z_manual' * Z_manual) * Z_manual'
-    X_hat = Pz * X_manual
-
-    # Stage 2: beta = (Xhat'Xhat)^{-1} Xhat'y
-    beta_2sls = (X_hat' * X_hat) \ (X_hat' * y_manual)
-
-    # Compare coefficients (second element is x coefficient)
-    @test lpiv_coef ≈ beta_2sls[2] atol=1e-8
 end
 
 # ============================================================================
