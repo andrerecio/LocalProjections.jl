@@ -1,15 +1,12 @@
 using TestItems
 
-@testitem "cumul transformation" tags=[:cumul, :core] begin
+@testitem "cumul transformation" tags = [:cumul, :core] begin
     using LocalProjections
     using DataFrames, StatsModels, Regress, StatsBase, Test
 
     # Create simple synthetic data
     n = 100
-    df = DataFrame(
-        x = 1.0:n,
-        y = sin.(1.0:n) .+ (1.0:n) ./ 10
-    )
+    df = DataFrame(x = 1.0:n, y = sin.(1.0:n) .+ (1.0:n) ./ 10)
 
     # Test cumul transformation in lp() context
     horizon = 3
@@ -26,7 +23,7 @@ using TestItems
         # Manually compute cumulative y at horizon h using StatsModels
         cumul_term_h = CumulTerm{typeof(Term(:y))}(Term(:y), h)
         y_h = StatsModels.modelcols(cumul_term_h, df_filtered)
-        y_h_manual = map(x->sum(x), map(t->df_filtered.y[t:(t + h)], 1:(nrow(df_filtered) - h)))
+        y_h_manual = map(x -> sum(x), map(t -> df_filtered.y[t:(t + h)], 1:(nrow(df_filtered) - h)))
 
         # Find complete observations (no NaN in y_h)
         complete_obs = .!isnan.(y_h)
@@ -38,21 +35,18 @@ using TestItems
         manual_coef = (X_manual \ y_manual)[2]  # x coefficient
 
         # Compare coefficients
-        @test lp_coef ≈ manual_coef atol=1e-10
+        @test lp_coef ≈ manual_coef atol = 1e-10
     end
 end
 
-@testitem "leads transformation" tags=[:leads, :core] begin
+@testitem "leads transformation" tags = [:leads, :core] begin
     using LocalProjections
     using DataFrames, StatsModels, Regress, StatsBase, Test
     using ShiftedArrays: lead
 
     # Create simple synthetic data
     n = 100
-    df = DataFrame(
-        x = 1.0:n,
-        y = cos.(1.0:n) .+ (1.0:n) ./ 20
-    )
+    df = DataFrame(x = 1.0:n, y = cos.(1.0:n) .+ (1.0:n) ./ 20)
 
     # Test leads transformation in lp() context
     horizon = 3
@@ -78,7 +72,7 @@ end
         manual_coef = (X_manual \ y_manual)[2]  # x coefficient
 
         # Compare coefficients
-        @test lp_coef ≈ manual_coef atol=1e-10
+        @test lp_coef ≈ manual_coef atol = 1e-10
     end
 
     # Verify NaN handling (not missing)
@@ -87,17 +81,13 @@ end
     @test any(isnan, y_lead_test)  # Should have NaN at boundaries
 end
 
-@testitem "anchor function syntax" tags=[:anchor, :core] begin
+@testitem "anchor function syntax" tags = [:anchor, :core] begin
     using LocalProjections
     using DataFrames, StatsModels, Regress, StatsBase, Test
 
     # Create simple synthetic data with both y and z
     n = 100
-    df = DataFrame(
-        x = 1.0:n,
-        y = sin.(1.0:n) .+ (1.0:n) ./ 10,
-        z = cos.(1.0:n)
-    )
+    df = DataFrame(x = 1.0:n, y = sin.(1.0:n) .+ (1.0:n) ./ 10, z = cos.(1.0:n))
 
     # Test anchor transformation with function syntax
     horizon = 3
@@ -112,8 +102,7 @@ end
 
         # Manually compute anchored response using StatsModels
         inner_leads = LeadTerm{typeof(Term(:y))}(Term(:y), h)
-        anchor_h = AnchorTerm{typeof(inner_leads), typeof(Term(:z))}(
-            inner_leads, Term(:z), 0)  # horizon=0 because lead is in inner term
+        anchor_h = AnchorTerm{typeof(inner_leads), typeof(Term(:z))}(inner_leads, Term(:z), 0)  # horizon=0 because lead is in inner term
         y_h = StatsModels.modelcols(anchor_h, df_filtered)
 
         # Find complete observations (no NaN)
@@ -125,25 +114,21 @@ end
         manual_coef = (X_manual \ y_manual)[2]  # x coefficient
 
         # Compare coefficients
-        @test lp_coef ≈ manual_coef atol=1e-10
+        @test lp_coef ≈ manual_coef atol = 1e-10
     end
 end
 
-@testitem "anchor pipe syntax" tags=[:anchor, :core] begin
+@testitem "anchor pipe syntax" tags = [:anchor, :core] begin
     using LocalProjections
     using DataFrames, StatsModels, Regress, StatsBase, Test
 
     # Create simple synthetic data
     n = 100
-    df = DataFrame(
-        x = 1.0:n,
-        y = sin.(1.0:n) .+ (1.0:n) ./ 10,
-        z = cos.(1.0:n)
-    )
+    df = DataFrame(x = 1.0:n, y = sin.(1.0:n) .+ (1.0:n) ./ 10, z = cos.(1.0:n))
 
     # Test anchor with pipe syntax
     horizon = 3
-    lp_pipe = lp(@formula(leads(y)|z ~ x), df; horizon = horizon)
+    lp_pipe = lp(@formula(leads(y) | z ~ x), df; horizon = horizon)
 
     # Test anchor with function syntax (should be identical)
     lp_func = lp(@formula(anchor(y, z) ~ x), df; horizon = horizon)
@@ -153,7 +138,7 @@ end
         pipe_coef = coef(lp_pipe.models[h + 1])[2]
         func_coef = coef(lp_func.models[h + 1])[2]
 
-        @test pipe_coef ≈ func_coef atol=1e-10
+        @test pipe_coef ≈ func_coef atol = 1e-10
     end
 
     # Also verify against manual computation
@@ -164,8 +149,7 @@ end
 
         # Manual computation using StatsModels
         inner_leads = LeadTerm{typeof(Term(:y))}(Term(:y), h)
-        anchor_h = AnchorTerm{typeof(inner_leads), typeof(Term(:z))}(
-            inner_leads, Term(:z), 0)  # horizon=0 because lead is in inner term
+        anchor_h = AnchorTerm{typeof(inner_leads), typeof(Term(:z))}(inner_leads, Term(:z), 0)  # horizon=0 because lead is in inner term
         y_h = StatsModels.modelcols(anchor_h, df_filtered)
 
         y_h_manual = lead(df_filtered.y, h, default = NaN) .- df_filtered.z
@@ -176,27 +160,23 @@ end
         @test y_manual == y_manual_manual  # Verify manual matches StatsModels output
         manual_coef = (X_manual \ y_manual)[2]
 
-        @test lp_coef ≈ manual_coef atol=1e-10
+        @test lp_coef ≈ manual_coef atol = 1e-10
     end
 end
 
-@testitem "modelcols anchor matches manual lead computation" tags=[:anchor, :verification] begin
+@testitem "modelcols anchor matches manual lead computation" tags = [:anchor, :verification] begin
     using LocalProjections
     using DataFrames, StatsModels, Test
 
     # Create test data
     n = 100
-    df = DataFrame(
-        y = sin.(1.0:n) .+ (1.0:n) ./ 10,
-        z = cos.(1.0:n)
-    )
+    df = DataFrame(y = sin.(1.0:n) .+ (1.0:n) ./ 10, z = cos.(1.0:n))
 
     # Test that modelcols(AnchorTerm) matches manual lead() - z computation
     for h in 0:5
         # Method 1: Using StatsModels.modelcols with AnchorTerm
         inner_leads = LeadTerm{typeof(Term(:y))}(Term(:y), h)
-        anchor_h = AnchorTerm{typeof(inner_leads), typeof(Term(:z))}(
-            inner_leads, Term(:z), 0)
+        anchor_h = AnchorTerm{typeof(inner_leads), typeof(Term(:z))}(inner_leads, Term(:z), 0)
         y_modelcols = StatsModels.modelcols(anchor_h, df)
 
         # Method 2: Manual computation using lead() - z
@@ -209,27 +189,23 @@ end
             elseif isnan(y_modelcols[i]) || isnan(y_manual[i])
                 @test false  # One NaN, other not - FAIL
             else
-                @test y_modelcols[i] ≈ y_manual[i] atol=1e-10
+                @test y_modelcols[i] ≈ y_manual[i] atol = 1e-10
             end
         end
     end
 end
 
-@testitem "cumulative anchor (nested)" tags=[:nested, :anchor, :cumul] begin
+@testitem "cumulative anchor (nested)" tags = [:nested, :anchor, :cumul] begin
     using LocalProjections
     using DataFrames, StatsModels, Regress, StatsBase, Test
 
     # Create simple synthetic data
     n = 100
-    df = DataFrame(
-        x = 1.0:n,
-        y = sin.(1.0:n) .+ (1.0:n) ./ 10,
-        z = cos.(1.0:n)
-    )
+    df = DataFrame(x = 1.0:n, y = sin.(1.0:n) .+ (1.0:n) ./ 10, z = cos.(1.0:n))
 
     # Test cumulative anchor: cumul(y)|z
     horizon = 3
-    lp_result = lp(@formula(cumul(y)|z ~ x), df; horizon = horizon)
+    lp_result = lp(@formula(cumul(y) | z ~ x), df; horizon = horizon)
 
     # Manually compute cumulative anchored response
     df_filtered = dropmissing(df, [:y, :z, :x], disallowmissing = true)
@@ -240,8 +216,7 @@ end
 
         # Manual computation using StatsModels: first cumul, then anchor
         inner_cumul = CumulTerm{typeof(Term(:y))}(Term(:y), h)
-        anchor_h = AnchorTerm{typeof(inner_cumul), typeof(Term(:z))}(
-            inner_cumul, Term(:z), 0)  # horizon=0 because cumul already has horizon
+        anchor_h = AnchorTerm{typeof(inner_cumul), typeof(Term(:z))}(inner_cumul, Term(:z), 0)  # horizon=0 because cumul already has horizon
         y_h = StatsModels.modelcols(anchor_h, df_filtered)
 
         # Find complete observations (no NaN)
@@ -253,11 +228,11 @@ end
         manual_coef = (X_manual \ y_manual)[2]
 
         # Compare coefficients
-        @test lp_coef ≈ manual_coef atol=1e-10
+        @test lp_coef ≈ manual_coef atol = 1e-10
     end
 end
 
-@testitem "nested log transformations" tags=[:nested, :core] begin
+@testitem "nested log transformations" tags = [:nested, :core] begin
     using LocalProjections
     using DataFrames, StatsModels, Regress, StatsBase, Test
 
@@ -287,7 +262,7 @@ end
         y_manual = y_h[complete_obs]
         manual_coef = (X_manual \ y_manual)[2]
 
-        @test lp_coef ≈ manual_coef atol=1e-10
+        @test lp_coef ≈ manual_coef atol = 1e-10
     end
 
     # Test leads(log(y))
@@ -306,7 +281,7 @@ end
         y_manual = y_h[complete_obs]
         manual_coef = (X_manual \ y_manual)[2]
 
-        @test lp_coef ≈ manual_coef atol=1e-10
+        @test lp_coef ≈ manual_coef atol = 1e-10
     end
 
     # Test anchor(log(y), z)
@@ -319,7 +294,8 @@ end
         # Manual computation: lead of log(y) by h, minus z at t
         log_y = log.(df_filtered3.y)
         y_h = [t + h <= length(log_y) ? log_y[t + h] - df_filtered3.z[t] : NaN
-               for t in 1:length(log_y)]
+               for
+               t in 1:length(log_y)]
         complete_obs = .!isnan.(y_h)
 
         X_manual = hcat(ones(sum(complete_obs)), df_filtered3.x[complete_obs])
@@ -327,11 +303,11 @@ end
         manual_coef = (X_manual \ y_manual)[2]
 
         # Use relative tolerance for large values
-        @test lp_coef ≈ manual_coef rtol=1e-10
+        @test lp_coef ≈ manual_coef rtol = 1e-10
     end
 end
 
-@testitem "summarize function" tags=[:summarize, :api] begin
+@testitem "summarize function" tags = [:summarize, :api] begin
     using LocalProjections
     using DataFrames, StatsModels, Test
     using CovarianceMatrices: HC1
@@ -362,7 +338,7 @@ end
 
     # Test with estimator directly
     summary_direct = summarize(lp_result, HC1())
-    @test summary_direct.coef ≈ summary_obj.coef atol=1e-10
+    @test summary_direct.coef ≈ summary_obj.coef atol = 1e-10
 
     # Test confidence bounds are sensible (lower < coef < upper when se > 0)
     for i in 1:length(summary_obj.horizon)
@@ -375,11 +351,12 @@ end
     summary_90 = summarize(lp_result, cov; level = 0.90)
     @test summary_90.level == 0.90
     # 90% CI should be narrower than 95% CI
-    @test all(summary_90.upper .- summary_90.lower .<
-              summary_obj.upper .- summary_obj.lower)
+    @test all(
+        summary_90.upper .- summary_90.lower .< summary_obj.upper .- summary_obj.lower,
+    )
 end
 
-@testitem "plus vcov operator" tags=[:vcov, :api] begin
+@testitem "plus vcov operator" tags = [:vcov, :api] begin
     using LocalProjections
     using LocalProjections: VcovSpec
     using DataFrames, StatsModels, Test
@@ -415,7 +392,7 @@ end
     @test coefpath(lp_chained) == coefpath(lp_result)
 end
 
-@testitem "lpiv basic functionality" tags=[:lpiv, :iv, :core] begin
+@testitem "lpiv basic functionality" tags = [:lpiv, :iv, :core] begin
     using LocalProjections
     using LocalProjections: FirstStageResult
     using DataFrames, StatsModels, Test
@@ -423,14 +400,14 @@ end
     using CovarianceMatrices: HC1
     using LinearAlgebra
 
-    Random.seed!(42)
+    Random.seed!(889977)
 
     # Generate data with endogeneity
     n = 200
     z = randn(n)
     u = randn(n)
-    x = 0.5*z + 0.5*u      # Endogenous (correlated with u)
-    y = 1.0 .+ 2.0*x .+ u  # True effect = 2.0
+    x = 0.5 * z + 0.5 * u      # Endogenous (correlated with u)
+    y = 1.0 .+ 2.0 * x .+ u  # True effect = 2.0
 
     df = DataFrame(y = y, x = x, z = z)
 
@@ -474,7 +451,7 @@ end
     @test all(se .> 0)  # Standard errors should be positive
 end
 
-@testitem "lpiv with controls" tags=[:lpiv, :iv] begin
+@testitem "lpiv with controls" tags = [:lpiv, :iv] begin
     using LocalProjections
     using DataFrames, StatsModels, Test
     using Random
@@ -487,8 +464,8 @@ end
     z = randn(n)
     w = randn(n)           # Exogenous control
     u = randn(n)
-    x = 0.5*z + 0.3*w + 0.4*u  # Endogenous
-    y = 1.0 .+ 2.0*x .+ 0.5*w .+ u
+    x = 0.5 * z + 0.3 * w + 0.4 * u  # Endogenous
+    y = 1.0 .+ 2.0 * x .+ 0.5 * w .+ u
 
     df = DataFrame(y = y, x = x, z = z, w = w)
 
@@ -511,7 +488,7 @@ end
     @test length(irf_w) == horizon + 1
 end
 
-@testitem "lpiv plus vcov operator" tags=[:lpiv, :vcov, :api] begin
+@testitem "lpiv plus vcov operator" tags = [:lpiv, :vcov, :api] begin
     using LocalProjections
     using LocalProjections: VcovSpec
     using DataFrames, StatsModels, Test
@@ -525,8 +502,8 @@ end
     n = 150
     z = randn(n)
     u = randn(n)
-    x = 0.6*z + 0.4*u
-    y = 0.5 .+ 1.5*x .+ u
+    x = 0.6 * z + 0.4 * u
+    y = 0.5 .+ 1.5 * x .+ u
 
     df = DataFrame(y = y, x = x, z = z)
 
@@ -554,7 +531,7 @@ end
     @test coefpath(result_chained) == coefpath(result)
 end
 
-@testitem "lpiv with cumul response" tags=[:lpiv, :cumul] begin
+@testitem "lpiv with cumul response" tags = [:lpiv, :cumul] begin
     using LocalProjections
     using DataFrames, StatsModels, Test
     using Random
@@ -565,8 +542,8 @@ end
     n = 150
     z = randn(n)
     u = randn(n)
-    x = 0.5*z + 0.5*u
-    y = 1.0 .+ 2.0*x .+ u
+    x = 0.5 * z + 0.5 * u
+    y = 1.0 .+ 2.0 * x .+ u
 
     df = DataFrame(y = y, x = x, z = z)
 
@@ -587,7 +564,7 @@ end
     @test irf[1] > 0  # Impact positive
 end
 
-@testitem "lpiv summarize" tags=[:lpiv, :summarize, :api] begin
+@testitem "lpiv summarize" tags = [:lpiv, :summarize, :api] begin
     using LocalProjections
     using DataFrames, StatsModels, Test
     using CovarianceMatrices: HC1
@@ -599,8 +576,8 @@ end
     n = 150
     z = randn(n)
     u = randn(n)
-    x = 0.5*z + 0.5*u
-    y = 1.0 .+ 2.0*x .+ u
+    x = 0.5 * z + 0.5 * u
+    y = 1.0 .+ 2.0 * x .+ u
 
     df = DataFrame(y = y, x = x, z = z)
 
@@ -624,10 +601,10 @@ end
 
     # Test with estimator directly
     summary_direct = summarize(result, HC1())
-    @test summary_direct.coef ≈ summary_obj.coef atol=1e-10
+    @test summary_direct.coef ≈ summary_obj.coef atol = 1e-10
 end
 
-@testitem "lpiv comparison with manual 2SLS" tags=[:lpiv, :iv, :verification] begin
+@testitem "lpiv comparison with manual 2SLS" tags = [:lpiv, :iv, :verification] begin
     using LocalProjections
     using DataFrames, StatsModels, Test
     using LinearAlgebra
@@ -639,8 +616,8 @@ end
     n = 200
     z = randn(n)
     u = randn(n)
-    x = 0.5*z + 0.5*u
-    y = 1.0 .+ 2.0*x .+ u
+    x = 0.5 * z + 0.5 * u
+    y = 1.0 .+ 2.0 * x .+ u
 
     df = DataFrame(y = y, x = x, z = z)
 
@@ -662,14 +639,14 @@ end
     beta_2sls = (X_hat' * X_hat) \ (X_hat' * y_manual)
 
     # Compare coefficients (second element is x coefficient)
-    @test lpiv_coef ≈ beta_2sls[2] atol=1e-8
+    @test lpiv_coef ≈ beta_2sls[2] atol = 1e-8
 end
 
-@testitem "weakivtest for lpiv" tags=[:lpiv, :weakiv, :iv] begin
+@testitem "weakivtest for lpiv" tags = [:lpiv, :weakiv, :iv] begin
     using LocalProjections
     using DataFrames, StableRNGs, StatsModels
 
-    rng = StableRNG(42)
+    rng = StableRNG(4433222)
     n = 300
     z = randn(rng, n)
     z2 = randn(rng, n)
