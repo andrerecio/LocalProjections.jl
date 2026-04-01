@@ -4,7 +4,6 @@ version = "0.1.0"
 
 [deps]
 AxisArrays = "39de3d68-74b9-583c-8d2d-e117c070f3a9"
-CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
 CovarianceMatrices = "60f91f6f-d783-54cb-84f9-544141854719"
 DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
 Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
@@ -31,7 +30,6 @@ LocalProjectionsMakieExt = "Makie"
 [compat]
 Aqua = "0.8"
 AxisArrays = "0.4"
-CairoMakie = "0.15.9"
 CovarianceMatrices = "0.30"
 DataFrames = "1"
 Distributions = "0.25"
