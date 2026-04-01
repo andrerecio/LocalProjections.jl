@@ -16,7 +16,7 @@ using StatsModels: AbstractTerm, Term, FunctionTerm, ConstantTerm, FormulaTerm,
                    ContinuousTerm, coefnames
 using Regress
 using Regress: OLSMatrixEstimator, IVMatrixEstimator, ols, iv, TSLS, VcovSpec,
-               FirstStageResult, weakivtest, WeakIVTestResult
+               FirstStageResult, WeakIVTestResult
 using CovarianceMatrices
 using Statistics
 using Distributions

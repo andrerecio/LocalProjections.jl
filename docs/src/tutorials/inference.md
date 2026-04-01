@@ -65,11 +65,11 @@ println("Fixed bandwidth SEs: ", round.(se_fixed, digits=4))
 
 ## Summary Tables with `summarize()`
 
-Get a DataFrame with coefficients, standard errors, and confidence intervals:
+Get an `IRFSummary` table with coefficients, standard errors, and confidence intervals:
 
 ```@example infer
-summary_df = summarize(lp_result, cov_hc1)
-println(summary_df)
+summary_irf = summarize(lp_result, cov_hc1)
+println(summary_irf)
 ```
 
 ### Convenience syntax
@@ -77,8 +77,8 @@ println(summary_df)
 Pass the estimator directly instead of computing vcov separately:
 
 ```@example infer
-summary_df = summarize(lp_result, HC1())
-println(summary_df)
+summary_irf = summarize(lp_result, HC1())
+println(summary_irf)
 ```
 
 ### Scaling for Percentages

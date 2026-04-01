@@ -667,7 +667,7 @@ end
 
 @testitem "weakivtest for lpiv" tags=[:lpiv, :weakiv, :iv] begin
     using LocalProjections
-    using DataFrames, StableRNGs
+    using DataFrames, StableRNGs, StatsModels
 
     rng = StableRNG(42)
     n = 300
