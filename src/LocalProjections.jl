@@ -201,6 +201,10 @@ end
 # width: Return number of columns (nsteps)
 StatsModels.width(ll::LagTerm) = ll.nsteps
 
+# termvars: Return variables used in lags/LagTerm (needed for ModelFrame column selection)
+StatsModels.termvars(t::FunctionTerm{typeof(lags)}) = _termvars_unary(t)
+StatsModels.termvars(ll::LagTerm) = StatsModels.termvars(ll.term)
+
 # show: Display the term
 function Base.show(io::IO, ll::LagTerm)
     print(io, "lags($(ll.term), $(ll.nsteps))")
