@@ -682,3 +682,41 @@ end
     r_ols = weakivtest(result, 0; benchmark = :ols)
     @test r_ols.F_eff ≈ r0.F_eff  # F-stats are the same regardless of benchmark
 end
+
+@testitem "lpiv with lags() exogenous controls" tags = [:lpiv, :iv, :lags] begin
+    using LocalProjections
+    using DataFrames, StableRNGs, StatsModels
+
+    # Regression test: lpiv with lags() terms referencing columns other than the
+    # response variable. Previously failed because StatsModels.termvars was not
+    # defined for FunctionTerm{typeof(lags)} and LagTerm, so ModelFrame did not
+    # select the needed columns.
+    rng = StableRNG(9988)
+    n = 200
+    z = randn(rng, n)
+    x = 0.8 * z + randn(rng, n)
+    w1 = randn(rng, n)
+    w2 = randn(rng, n)
+    y = cumsum(x + 0.3 * w1 + 0.2 * w2) + 0.5 * randn(rng, n)
+    df = DataFrame(y = y, x = x, z = z, w1 = w1, w2 = w2)
+
+    horizon = 4
+
+    # This should not error — lags(w1, 2) and lags(w2, 2) reference columns
+    # :w1 and :w2 which are not the response variable :y
+    result = lpiv(
+        @formula(leads(y) ~ (x ~ z) + lags(w1, 2) + lags(w2, 2)),
+        df; horizon = horizon
+    )
+    @test result isa LocalProjectionIV
+    @test length(result.models) == horizon + 1
+
+    # Verify coefficients are finite
+    irf = coefpath(result; term = :x)
+    @test length(irf) == horizon + 1
+    @test all(isfinite, irf)
+
+    # Verify the expected number of coefficients:
+    # intercept + 2 lags of w1 + 2 lags of w2 + x = 6
+    @test length(result.coef_names) == 6
+end
