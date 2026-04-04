@@ -2,7 +2,7 @@ module LocalProjections
 
 export LocalProjection, LocalProjectionIV, LocalProjectionCovariance, IRFSummary
 export lp, lpiv, coefpath, stderror, vcov, summarize, first_stage, weakivtest
-export WeakIVTestResult
+export WeakIVTestResult, FirstStageIV
 export lag, lead, cumul, CumulTerm, lags, leads, LeadTerm, anchor, AnchorTerm
 export as_irf_result, LocalProjectionIRFResult
 export irfplot, irfplot!, irfplot_axis
@@ -16,7 +16,7 @@ using StatsModels: AbstractTerm, Term, FunctionTerm, ConstantTerm, FormulaTerm,
                    ContinuousTerm, coefnames
 using Regress
 using Regress: OLSMatrixEstimator, IVMatrixEstimator, ols, iv, TSLS, VcovSpec,
-               FirstStageResult, WeakIVTestResult
+               WeakIVTestResult, FirstStageIV
 using CovarianceMatrices
 using Statistics
 using Distributions
@@ -545,6 +545,7 @@ struct LocalProjection{M <: OLSMatrixEstimator}
     shock::Symbol
     base_formula::FormulaTerm
     coef_names::Vector{String}  # Coefficient names (constant across all horizons)
+    tautological_h0::Bool       # true when response == shock (h=0 is trivial: coef=1, SE=0)
 end
 
 """
@@ -609,7 +610,8 @@ function Base.:+(lp::LocalProjection{M}, v::VcovSpec{V}) where {M <: OLSMatrixEs
     M_new = eltype(new_models)
     return LocalProjection{M_new}(
         convert(Vector{M_new}, new_models),
-        lp.horizon, lp.response, lp.shock, lp.base_formula, lp.coef_names
+        lp.horizon, lp.response, lp.shock, lp.base_formula, lp.coef_names,
+        lp.tautological_h0
     )
 end
 
@@ -913,7 +915,8 @@ function _lp_estimate_horizons(X::Matrix{Float64}, coef_names_base::Vector{Strin
     end
 
     return LocalProjection(
-        models, horizon, response, shock_symbol, formula, coef_names_base)
+        models, horizon, response, shock_symbol, formula, coef_names_base,
+        response === shock_symbol)
 end
 
 """
@@ -1031,6 +1034,7 @@ struct LocalProjectionIV{M <: IVMatrixEstimator}
     coef_names::Vector{String}  # Coefficient names (constant across all horizons)
     endogenous_names::Vector{String}
     instrument_names::Vector{String}
+    tautological_h0::Bool       # true when response == shock (h=0 is trivial: coef=1, SE=0)
 end
 
 """
@@ -1087,7 +1091,8 @@ function Base.:+(lpiv::LocalProjectionIV{M}, v::VcovSpec{V}) where {
     return LocalProjectionIV{M_new}(
         convert(Vector{M_new}, new_models),
         lpiv.horizon, lpiv.response, lpiv.shock, lpiv.base_formula,
-        lpiv.coef_names, lpiv.endogenous_names, lpiv.instrument_names
+        lpiv.coef_names, lpiv.endogenous_names, lpiv.instrument_names,
+        lpiv.tautological_h0
     )
 end
 
@@ -1206,9 +1211,10 @@ irf = coefpath(result; term=:x)
 # Apply HAC standard errors
 result_hac = result + vcov(Bartlett{NeweyWest}())
 
-# First-stage diagnostics
+# First-stage OLS regression (one per endogenous variable)
 fs = first_stage(result, 0)
-println("First-stage F: ", fs.F_joint)
+println("First-stage R²: ", r2(fs[1]))
+println("First-stage coefs: ", coef(fs[1]))
 ```
 """
 function lpiv(formula::FormulaTerm, data::AbstractDataFrame;
@@ -1392,27 +1398,41 @@ function _lpiv_estimate_horizons(X_full::Matrix{Float64}, Z_full::Matrix{Float64
 
     return LocalProjectionIV(
         models, horizon, response, shock_symbol, formula, coef_names_base,
-        endo_names, instr_names)
+        endo_names, instr_names, response === shock_symbol)
 end
 
 """
-    first_stage(lpiv::LocalProjectionIV) -> Vector{FirstStageResult}
+    first_stage(lpiv::LocalProjectionIV)
 
-Return first-stage diagnostics for all horizons in an IV local projection.
+Return first-stage regressions and diagnostics for all horizons.
+
+Returns a vector of `FirstStageIV`, one per horizon (0 to `lpiv.horizon`).
+Each contains full OLS models, Kleibergen-Paap F, and non-robust F.
 """
 function first_stage(lpiv::LocalProjectionIV)
-    return [Regress.first_stage(m) for m in lpiv.models]
+    return [first_stage(lpiv, h) for h in 0:lpiv.horizon]
 end
 
 """
-    first_stage(lpiv::LocalProjectionIV, h::Int) -> FirstStageResult
+    first_stage(lpiv::LocalProjectionIV, h::Int) -> FirstStageIV
 
-Return first-stage diagnostics for horizon `h` (0-indexed).
+Return first-stage regressions and diagnostics for horizon `h` (0-indexed).
+
+# Example
+```julia
+result = lpiv(@formula(leads(y) ~ (x ~ z1 + z2)), df; horizon=10)
+fs = first_stage(result, 0)
+coef(fs.models[1])    # first-stage coefficients
+fs.F_kp               # Kleibergen-Paap F
+fs.F_nonrobust        # non-robust F (matching weakivtest)
+```
 """
 function first_stage(lpiv::LocalProjectionIV, h::Int)
     0 <= h <= lpiv.horizon ||
         throw(BoundsError("horizon $h out of range 0:$(lpiv.horizon)"))
-    return Regress.first_stage(lpiv.models[h + 1])
+    return Regress.first_stage(lpiv.models[h + 1];
+        endogenous_names = lpiv.endogenous_names,
+        instrument_names = lpiv.instrument_names)
 end
 
 # ============================================================================
@@ -1437,6 +1457,10 @@ See also: [`lpiv`](@ref), [`first_stage`](@ref)
 function weakivtest(lpiv::LocalProjectionIV, h::Int; kwargs...)
     0 <= h <= lpiv.horizon ||
         throw(BoundsError("horizon $h out of range 0:$(lpiv.horizon)"))
+    if h == 0 && lpiv.tautological_h0
+        @info "weakivtest at h=0 skipped: response == shock (tautological)"
+        return _tautological_weakivtest(lpiv.models[1]; kwargs...)
+    end
     return Regress.weakivtest(lpiv.models[h + 1]; kwargs...)
 end
 
@@ -1448,7 +1472,35 @@ Montiel-Olea-Pflueger robust weak instrument test for all horizons.
 Returns a vector of `WeakIVTestResult`, one per horizon (0 to `lpiv.horizon`).
 """
 function weakivtest(lpiv::LocalProjectionIV; kwargs...)
-    return [Regress.weakivtest(m; kwargs...) for m in lpiv.models]
+    results = Vector{WeakIVTestResult{Float64}}(undef, lpiv.horizon + 1)
+    for (i, m) in enumerate(lpiv.models)
+        if i == 1 && lpiv.tautological_h0
+            results[1] = _tautological_weakivtest(m; kwargs...)
+        else
+            results[i] = Regress.weakivtest(m; kwargs...)
+        end
+    end
+    return results
+end
+
+# Sentinel WeakIVTestResult for tautological h=0 (response == shock)
+function _tautological_weakivtest(model; level = 0.05, kwargs...)
+    T = Float64
+    nan4 = (NaN, NaN, NaN, NaN)
+    N = nobs(model)
+    n_endo = model.postestimation.n_endogenous
+    k_z = size(model.postestimation.Z, 2)
+    k_x = size(model.postestimation.X, 2)
+    K = k_z - k_x + n_endo  # number of excluded instruments
+    return WeakIVTestResult{T}(
+        Inf, Inf, Inf,          # F_eff, F_nonrobust, F_robust
+        1.0, 0.0,               # btsls, sebtsls
+        1.0, 0.0,               # bliml, sebliml
+        1.0, 0.0,               # bgmmf, sebgmmf
+        1.0,                    # kappa
+        nan4, nan4, nan4,       # cv_TSLS, cv_LIML, cv_GMMf
+        T(level), K, N
+    )
 end
 
 # ============================================================================
@@ -1471,6 +1523,11 @@ function coefpath(lp::LPResult; term::Symbol = lp.shock)
     for (i, model) in enumerate(lp.models)
         coefficients[i] = coef(model)[idx]
     end
+    # At h=0 when response == shock, the coefficient is known exactly:
+    # 1.0 for the shock term, 0.0 for all others
+    if lp.tautological_h0
+        coefficients[1] = term === lp.shock ? 1.0 : 0.0
+    end
     return coefficients
 end
 
@@ -1486,6 +1543,16 @@ function vcov(estimator, lp::LPResult)
     names = Symbol.(lp.coef_names)
 
     for (i, model) in enumerate(lp.models)
+        # At h=0 when response == shock, all coefficients are known exactly (variance = 0)
+        if i == 1 && lp.tautological_h0
+            for name in names
+                vec = get!(variances, name) do
+                    fill(NaN, n)
+                end
+                vec[1] = 0.0
+            end
+            continue
+        end
         cov = CovarianceMatrices.vcov(estimator, model)
         for (j, name) in enumerate(names)
             vec = get!(variances, name) do

@@ -436,8 +436,8 @@ end
 
     # Test first_stage
     fs = first_stage(result, 0)
-    @test fs isa FirstStageResult
-    @test fs.F_joint > 0  # F-statistic should be positive
+    @test fs isa FirstStageIV
+    @test fs.F_kp > 0  # Kleibergen-Paap F-statistic should be positive
 
     # Test first_stage for all horizons
     all_fs = first_stage(result)
@@ -719,4 +719,72 @@ end
     # Verify the expected number of coefficients:
     # intercept + 2 lags of w1 + 2 lags of w2 + x = 6
     @test length(result.coef_names) == 6
+end
+
+@testitem "tautological h=0 when response == shock" tags = [:lpiv, :iv, :tautological] begin
+    using LocalProjections
+    using DataFrames, StableRNGs, StatsModels
+    using CovarianceMatrices: HC1
+
+    rng = StableRNG(7766)
+    n = 200
+    z = randn(rng, n)
+    x = 0.8 * z + randn(rng, n)
+    w = randn(rng, n)
+    y = cumsum(x + 0.3 * w) + 0.5 * randn(rng, n)
+    df = DataFrame(y = y, x = x, z = z, w = w)
+
+    horizon = 4
+
+    # IV LP where response == shock (x is both response and endogenous)
+    result = lpiv(@formula(leads(x) ~ (x ~ z) + w), df; horizon = horizon)
+
+    @test result isa LocalProjectionIV
+    @test result.tautological_h0
+
+    # coefpath: h=0 should be exactly 1.0 for the shock term
+    irf = coefpath(result; term = :x)
+    @test irf[1] == 1.0
+    @test all(isfinite, irf[2:end])
+
+    # coefpath for a non-shock term: h=0 should be 0.0
+    irf_w = coefpath(result; term = :w)
+    @test irf_w[1] == 0.0
+
+    # vcov: h=0 variance should be 0.0
+    cov = vcov(HC1(), result)
+    se = stderror(cov; term = :x)
+    @test se[1] == 0.0
+    @test all(isfinite, se[2:end])
+
+    # summarize: should not error
+    summary = summarize(result, HC1())
+    @test summary.coef[1] == 1.0
+    @test summary.se[1] == 0.0
+    @test summary.lower[1] == 1.0
+    @test summary.upper[1] == 1.0
+
+    # weakivtest: should not error, h=0 returns sentinel with F_eff = Inf
+    wiv = weakivtest(result)
+    @test length(wiv) == horizon + 1
+    @test wiv[1].F_eff == Inf
+    @test all(r -> isfinite(r.F_eff), wiv[2:end])
+
+    # Single-horizon weakivtest at h=0
+    wiv0 = weakivtest(result, 0)
+    @test wiv0.F_eff == Inf
+
+    # Single-horizon weakivtest at h>0 should work normally
+    wiv1 = weakivtest(result, 1)
+    @test isfinite(wiv1.F_eff)
+
+    # OLS LP where response == shock
+    ols_result = lp(@formula(leads(x) ~ x + w), df; horizon = horizon)
+    @test ols_result.tautological_h0
+    irf_ols = coefpath(ols_result; term = :x)
+    @test irf_ols[1] == 1.0
+
+    # Non-tautological case: response != shock
+    result_ok = lpiv(@formula(leads(y) ~ (x ~ z) + w), df; horizon = horizon)
+    @test !result_ok.tautological_h0
 end
