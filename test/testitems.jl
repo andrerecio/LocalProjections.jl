@@ -394,7 +394,7 @@ end
 
 @testitem "lpiv basic functionality" tags = [:lpiv, :iv, :core] begin
     using LocalProjections
-    using LocalProjections: FirstStageResult
+    using LocalProjections: FirstStageIV
     using DataFrames, StatsModels, Test
     using Random
     using CovarianceMatrices: HC1
@@ -437,7 +437,8 @@ end
     # Test first_stage
     fs = first_stage(result, 0)
     @test fs isa FirstStageIV
-    @test fs.F_kp > 0  # Kleibergen-Paap F-statistic should be positive
+    @test fs.F_nonrobust[1] > 0
+    @test fs.F_robust[1] > 0
 
     # Test first_stage for all horizons
     all_fs = first_stage(result)

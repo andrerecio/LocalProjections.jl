@@ -86,6 +86,30 @@ vcov(Parzen{Andrews}(), lp_result)        # HAC with Andrews bandwidth
 | `stderror(cov; term)` | Extract standard errors for a term |
 | `plot(lp, cov; term, levels)` | Plot IRF with confidence bands |
 
+## Testing
+
+Run tests from the dedicated test environment:
+
+```julia
+julia --project=test_pkg -e 'using TestItemRunner; @run_package_tests'
+```
+
+When developing `LocalProjections.jl` together with a local checkout of `Regress.jl`,
+pin both packages into the test environment first:
+
+```julia
+julia --project=test_pkg -e '
+using Pkg
+Pkg.develop(path="/path/to/Regress.jl")
+Pkg.develop(path="/path/to/LocalProjections.jl")
+using TestItemRunner
+@run_package_tests
+'
+```
+
+The root `Pkg.test()` path can still be used, but `test_pkg` is the authoritative
+workflow because it provides the full test dependency set.
+
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.

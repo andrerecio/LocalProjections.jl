@@ -1407,7 +1407,7 @@ end
 Return first-stage regressions and diagnostics for all horizons.
 
 Returns a vector of `FirstStageIV`, one per horizon (0 to `lpiv.horizon`).
-Each contains full OLS models, Kleibergen-Paap F, and non-robust F.
+Each contains full OLS models plus non-robust and robust first-stage F-statistics.
 """
 function first_stage(lpiv::LocalProjectionIV)
     return [first_stage(lpiv, h) for h in 0:lpiv.horizon]
@@ -1423,8 +1423,8 @@ Return first-stage regressions and diagnostics for horizon `h` (0-indexed).
 result = lpiv(@formula(leads(y) ~ (x ~ z1 + z2)), df; horizon=10)
 fs = first_stage(result, 0)
 coef(fs.models[1])    # first-stage coefficients
-fs.F_kp               # Kleibergen-Paap F
-fs.F_nonrobust        # non-robust F (matching weakivtest)
+fs.F_nonrobust        # non-robust F
+fs.F_robust           # robust F using the model's current vcov
 ```
 """
 function first_stage(lpiv::LocalProjectionIV, h::Int)
