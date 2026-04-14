@@ -16,7 +16,8 @@ using StatsModels: AbstractTerm, Term, FunctionTerm, ConstantTerm, FormulaTerm,
                    ContinuousTerm, coefnames
 using Regress
 using Regress: OLSMatrixEstimator, IVMatrixEstimator, ols, iv, TSLS, VcovSpec,
-               WeakIVTestResult, FirstStageIV
+               WeakIVTestResult, FirstStageIV, lags, LagTerm,
+               first_stage, weakivtest
 using CovarianceMatrices
 using Statistics
 using Distributions
@@ -24,7 +25,7 @@ using RecipesBase
 using ShiftedArrays: lag, lead
 using StatsBase
 using AxisArrays: AxisArrays, AxisArray, Axis
-using MacroEconometricTools: LocalProjectionIRFResult
+using MacroEconometricTools: LocalProjectionIRFResult, irfplot
 
 # ============================================================================
 # Helper Functions for Common Patterns
@@ -151,70 +152,6 @@ function _build_lhs_for_horizon(h::Int, is_anchor, is_cumul, is_leads,
     else
         throw(ArgumentError("Invalid LHS term type"))
     end
-end
-
-"""
-    lags(term, n)
-
-Create multiple lag columns from 1 to n. Used in formulas like @formula(y ~ lags(x, 5))
-to create a matrix with lag(x,1), lag(x,2), ..., lag(x,5).
-"""
-lags(t::T, n::Int) where {T <: AbstractTerm} = LagTerm{T}(t, n)
-
-# Struct for behavior
-struct LagTerm{T <: AbstractTerm} <: AbstractTerm
-    term::T
-    nsteps::Int
-end
-
-StatsModels.terms(t::LagTerm) = (t.term,)
-
-function StatsModels.apply_schema(
-        t::FunctionTerm{typeof(lags)}, sch::StatsModels.Schema, ctx::Type)
-    term, nsteps = _parse_unary_binary_args(t, "lags", 1)
-    term = apply_schema(term, sch, ctx)
-    return LagTerm{typeof(term)}(term, nsteps)
-end
-
-function StatsModels.apply_schema(t::LagTerm, sch::StatsModels.Schema, ctx::Type)
-    term = apply_schema(t.term, sch, ctx)
-    LagTerm{typeof(term)}(term, t.nsteps)
-end
-
-# modelcols: Create matrix with nsteps columns, each being lag(x, i) for i=1:nsteps
-function StatsModels.modelcols(ll::LagTerm, d::Tables.ColumnTable)
-    original_cols = StatsModels.modelcols(ll.term, d)
-    n = length(original_cols)
-    nsteps = ll.nsteps
-
-    # Create matrix with nsteps columns
-    # Each column i contains lag(original_cols, i)
-    result = Matrix{eltype(original_cols)}(undef, n, nsteps)
-
-    for i in 1:nsteps
-        result[:, i] = lag(original_cols, i, default = NaN)
-    end
-
-    return result
-end
-
-# width: Return number of columns (nsteps)
-StatsModels.width(ll::LagTerm) = ll.nsteps
-
-# termvars: Return variables used in lags/LagTerm (needed for ModelFrame column selection)
-StatsModels.termvars(t::FunctionTerm{typeof(lags)}) = _termvars_unary(t)
-StatsModels.termvars(ll::LagTerm) = StatsModels.termvars(ll.term)
-
-# show: Display the term
-function Base.show(io::IO, ll::LagTerm)
-    print(io, "lags($(ll.term), $(ll.nsteps))")
-end
-
-# coefnames: Return nsteps coefficient names
-function StatsModels.coefnames(ll::LagTerm)
-    base_names = StatsModels.coefnames(ll.term)
-    # Create names like "x_lag1", "x_lag2", ..., "x_lagn"
-    return [base_names[1] * "_lag$i" for i in 1:ll.nsteps]
 end
 
 # ============================================================================
@@ -1409,7 +1346,7 @@ Return first-stage regressions and diagnostics for all horizons.
 Returns a vector of `FirstStageIV`, one per horizon (0 to `lpiv.horizon`).
 Each contains full OLS models plus non-robust and robust first-stage F-statistics.
 """
-function first_stage(lpiv::LocalProjectionIV)
+function Regress.first_stage(lpiv::LocalProjectionIV)
     return [first_stage(lpiv, h) for h in 0:lpiv.horizon]
 end
 
@@ -1427,7 +1364,7 @@ fs.F_nonrobust        # non-robust F
 fs.F_robust           # robust F using the model's current vcov
 ```
 """
-function first_stage(lpiv::LocalProjectionIV, h::Int)
+function Regress.first_stage(lpiv::LocalProjectionIV, h::Int)
     0 <= h <= lpiv.horizon ||
         throw(BoundsError("horizon $h out of range 0:$(lpiv.horizon)"))
     return Regress.first_stage(lpiv.models[h + 1];
@@ -1454,7 +1391,7 @@ A `WeakIVTestResult` containing effective F, robust F, critical values, etc.
 
 See also: [`lpiv`](@ref), [`first_stage`](@ref)
 """
-function weakivtest(lpiv::LocalProjectionIV, h::Int; kwargs...)
+function Regress.weakivtest(lpiv::LocalProjectionIV, h::Int; kwargs...)
     0 <= h <= lpiv.horizon ||
         throw(BoundsError("horizon $h out of range 0:$(lpiv.horizon)"))
     if h == 0 && lpiv.tautological_h0
@@ -1471,7 +1408,7 @@ Montiel-Olea-Pflueger robust weak instrument test for all horizons.
 
 Returns a vector of `WeakIVTestResult`, one per horizon (0 to `lpiv.horizon`).
 """
-function weakivtest(lpiv::LocalProjectionIV; kwargs...)
+function Regress.weakivtest(lpiv::LocalProjectionIV; kwargs...)
     results = Vector{WeakIVTestResult{Float64}}(undef, lpiv.horizon + 1)
     for (i, m) in enumerate(lpiv.models)
         if i == 1 && lpiv.tautological_h0
@@ -1615,7 +1552,7 @@ Creates a line plot with confidence bands.
 - `levels::Vector{Float64}`: confidence levels for bands (default: `[0.95]`)
 - `irf_scale::Float64`: scaling factor for IRF (default: `1.0`)
 """
-function irfplot end
+# irfplot is imported from MacroEconometricTools (hub) — methods added by Makie extension
 function irfplot! end
 
 """
