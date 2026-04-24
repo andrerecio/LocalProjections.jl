@@ -40,10 +40,9 @@ Standard Plots.jl keyword arguments work alongside IRF-specific options:
 plot(lp_result, HC1();
     term = :x,
     levels = [0.68, 0.95],
-    irf_scale = 100.0,
     title = "Impulse Response",
     xlabel = "Horizon",
-    ylabel = "Response (%)",
+    ylabel = "Response",
     legend = :topright)
 ```
 
@@ -106,13 +105,13 @@ The Makie recipe supports these attributes:
 |-----------|---------|-------------|
 | `term` | shock variable | Which coefficient to plot |
 | `levels` | `[0.95]` | Confidence levels for bands |
-| `irf_scale` | `1.0` | Scaling factor for the IRF |
 | `bandcolor` | `:blue` | Color of confidence bands |
 | `bandalpha` | `0.25` | Base opacity of bands |
 | `linecolor` | `:black` | Color of the point estimate line |
 | `linewidth` | `2.0` | Width of the point estimate line |
 | `drawzero` | `true` | Whether to draw a dashed zero line |
 | `zerolinecolor` | `:gray70` | Color of the zero line |
+| `xtickstep` | `4` | X-axis tick spacing (0 to disable) |
 
 ```julia
 irfplot(lp_result, HC1();
@@ -120,8 +119,7 @@ irfplot(lp_result, HC1();
     bandcolor = :steelblue,
     bandalpha = 0.3,
     linecolor = :darkblue,
-    linewidth = 2.5,
-    irf_scale = 100.0)
+    linewidth = 2.5)
 ```
 
 ## IRF-Specific Options
@@ -130,4 +128,5 @@ These options are common to both backends:
 
 - **`term`**: Which coefficient's impulse response to plot. Defaults to the shock variable specified in `lp()` / `lpiv()`.
 - **`levels`**: A vector of confidence levels. Multiple levels produce nested bands with decreasing opacity.
-- **`irf_scale`**: Multiply the IRF and standard errors by this factor (useful for converting to percentage points).
+
+To scale IRFs (e.g., to percentage points), convert to `LocalProjectionIRFResult` via `as_irf_result()` and use `rescale` from MacroEconometricTools.jl before plotting.
