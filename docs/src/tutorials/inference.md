@@ -117,7 +117,6 @@ plot(lp_result, HC1())
 # Multiple confidence levels, scaled
 plot(lp_result, HC1();
      levels=[0.68, 0.95],
-     irf_scale=1,
      title="Impulse Response Function",
      xlabel="Horizon",
      ylabel="Response",

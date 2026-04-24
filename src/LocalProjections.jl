@@ -25,7 +25,7 @@ using RecipesBase
 using ShiftedArrays: lag, lead
 using StatsBase
 using AxisArrays: AxisArrays, AxisArray, Axis
-using MacroEconometricTools: LocalProjectionIRFResult, irfplot
+using MacroEconometricTools: LocalProjectionIRFResult, irfplot, irfplot!
 
 # ============================================================================
 # Helper Functions for Common Patterns
@@ -1539,7 +1539,7 @@ end
 # ============================================================================
 
 """
-    irfplot(lp, estimator_or_cov; term=lp.shock, levels=[0.95], irf_scale=1.0)
+    irfplot(lp, estimator_or_cov; term=lp.shock, levels=[0.95])
 
 Plot impulse response function from a local projection. Requires Makie.
 
@@ -1550,10 +1550,8 @@ Creates a line plot with confidence bands.
 - `estimator_or_cov`: a `CovarianceMatrices` estimator or `LocalProjectionCovariance`
 - `term::Symbol`: which coefficient to plot (default: shock variable)
 - `levels::Vector{Float64}`: confidence levels for bands (default: `[0.95]`)
-- `irf_scale::Float64`: scaling factor for IRF (default: `1.0`)
 """
-# irfplot is imported from MacroEconometricTools (hub) — methods added by Makie extension
-function irfplot! end
+# irfplot and irfplot! are imported from MacroEconometricTools (hub) — methods added by Makie extension
 
 """
     irfplot_axis(subfig, lp, estimator_or_cov; kwargs...)
@@ -1579,7 +1577,6 @@ struct IRFPlot{L <: LPResult, E}
     cov::LocalProjectionCovariance{E}
     term::Symbol
     levels::Vector{Float64}
-    irf_scale::Float64
 end
 
 @recipe function f(wrapper::IRFPlot)
@@ -1587,10 +1584,9 @@ end
     cov = wrapper.cov
     term = wrapper.term
     levels = wrapper.levels
-    irf_scale = wrapper.irf_scale
 
-    beta = coefpath(lp; term = term) .* irf_scale
-    se = stderror(cov; term = term) .* irf_scale
+    beta = coefpath(lp; term = term)
+    se = stderror(cov; term = term)
     horizons = collect(0:lp.horizon)
 
     sorted_levels = sort(levels; rev = true)
@@ -1628,15 +1624,15 @@ end
 end
 
 @recipe function f(lp::LPResult, cov::LocalProjectionCovariance;
-        term = lp.shock, levels = [0.95], irf_scale = 1.0)
-    IRFPlot(lp, cov, term, Float64.(levels), Float64(irf_scale))
+        term = lp.shock, levels = [0.95])
+    IRFPlot(lp, cov, term, Float64.(levels))
 end
 
 @recipe function f(lp::LPResult,
         estimator::CovarianceMatrices.AbstractAsymptoticVarianceEstimator;
-        term = lp.shock, levels = [0.95], irf_scale = 1.0)
+        term = lp.shock, levels = [0.95])
     cov = vcov(estimator, lp)
-    IRFPlot(lp, cov, term, Float64.(levels), Float64(irf_scale))
+    IRFPlot(lp, cov, term, Float64.(levels))
 end
 
 # ============================================================================

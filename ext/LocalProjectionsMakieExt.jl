@@ -17,13 +17,13 @@ Makie.@recipe(IRFPlotMakie, lp, estimator_or_cov) do scene
     Makie.Theme(;
         term = Makie.automatic,
         levels = [0.95],
-        irf_scale = 1.0,
         drawzero = true,
         zerolinecolor = :gray70,
         bandcolor = :blue,
         bandalpha = 0.25,
         linecolor = :black,
-        linewidth = 2.0
+        linewidth = 2.0,
+        xtickstep = 4
     )
 end
 
@@ -34,13 +34,13 @@ function Makie.plot!(plot::IRFPlotMakie)
     term_val = plot.term[]
     term = term_val === Makie.automatic ? lp.shock : term_val
     levels = plot.levels[]
-    irf_scale = plot.irf_scale[]
     drawzero = plot.drawzero[]
     zerolinecolor = plot.zerolinecolor[]
     bandcolor = plot.bandcolor[]
     bandalpha = plot.bandalpha[]
     linecolor = plot.linecolor[]
     linewidth = plot.linewidth[]
+    xtickstep = plot.xtickstep[]
 
     # Get covariance (convert estimator if needed)
     cov = if est isa LocalProjectionCovariance
@@ -49,8 +49,8 @@ function Makie.plot!(plot::IRFPlotMakie)
         vcov(est, lp)
     end
 
-    beta = coefpath(lp; term = term) .* irf_scale
-    se = stderror(cov; term = term) .* irf_scale
+    beta = coefpath(lp; term = term)
+    se = stderror(cov; term = term)
     horizons = collect(0:lp.horizon)
 
     sorted_levels = sort(Float64.(levels); rev = true)
@@ -83,18 +83,23 @@ end
 # Convenience wrappers mapping irfplot/irfplot! to irfplotmakie/irfplotmakie!
 # ============================================================================
 
-irfplot(args...; kwargs...) = irfplotmakie(args...; kwargs...)
-irfplot!(args...; kwargs...) = irfplotmakie!(args...; kwargs...)
+irfplot(lp::LPResult, est; kwargs...) = irfplotmakie(lp, est; kwargs...)
+irfplot!(ax, lp::LPResult, est; kwargs...) = irfplotmakie!(ax, lp, est; kwargs...)
 
 function irfplot_axis(subfig, lp, estimator_or_cov; kwargs...)
     kw = Dict{Symbol, Any}(kwargs)
     term = get(kw, :term, lp.shock)
     title = pop!(kw, :title, "")
+    xtickstep = pop!(kw, :xtickstep, 4)
+    horizons = collect(0:lp.horizon)
+    xticks_val = xtickstep > 0 ? (horizons[1]:xtickstep:horizons[end]) : Makie.automatic
     ax = Makie.Axis(subfig[1, 1];
         xlabel = "Horizon",
         ylabel = string(term),
-        title = title
+        title = title,
+        xticks = xticks_val
     )
+    Makie.xlims!(ax, horizons[1] - 0.4, horizons[end] + 0.4)
     p = irfplotmakie!(ax, lp, estimator_or_cov; kw...)
     return (subfig, ax, p)
 end
