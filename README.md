@@ -6,9 +6,13 @@ Impulse response functions by local projections (Jordà, 2005): horizon-specific
 
 ## Installation
 
+This fork of [gragusa/LocalProjections.jl](https://github.com/gragusa/LocalProjections.jl)
+extends the inference procedures (EWC HAR inference, with bias correction and
+bootstrap bands in progress):
+
 ```julia
 using Pkg
-Pkg.add(url = "https://github.com/gragusa/LocalProjections.jl")
+Pkg.add(url = "https://github.com/andrerecio/LocalProjections.jl", rev = "dev")
 ```
 
 ## Quick start
