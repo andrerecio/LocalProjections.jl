@@ -789,3 +789,93 @@ end
     result_ok = lpiv(@formula(leads(y) ~ (x ~ z) + w), df; horizon = horizon)
     @test !result_ok.tautological_h0
 end
+
+@testitem "EWC bandwidth rule (LLSW 2018)" tags = [:ewc, :vcov, :api] begin
+    using LocalProjections
+    using DataFrames, StatsModels, StatsBase, Test
+
+    # Integer rule: B = floor(0.41 * T0^(2/3))
+    @test ewc_bandwidth(256) == 16   # baseline in the inference guide
+    @test ewc_bandwidth(100) == 8
+    @test ewc_bandwidth(1) == 1      # floor never below 1
+
+    # LP method uses the horizon-zero effective sample size
+    n = 150
+    df = DataFrame(x = randn(n), y = randn(n))
+    lp_result = lp(@formula(leads(y) ~ x + lags(y, 2)), df; horizon = 6)
+    T0 = Int(nobs(lp_result.models[1]))
+    @test T0 == n - 2  # two lags consumed
+    @test ewc_bandwidth(lp_result) == ewc_bandwidth(T0)
+end
+
+@testitem "EWC inference uses Student-t_B critical values" tags = [
+    :ewc, :vcov, :summarize, :api] begin
+    using LocalProjections
+    using DataFrames, StatsModels, Test
+    using CovarianceMatrices: EWC, HC1
+    using Distributions: Normal, TDist, quantile
+
+    n = 200
+    df = DataFrame(x = randn(n), y = randn(n))
+    lp_result = lp(@formula(leads(y) ~ x + lags(y, 2)), df; horizon = 6)
+    B = ewc_bandwidth(lp_result)
+
+    beta = coefpath(lp_result; term = :x)
+    cov_ewc = LocalProjections.vcov(EWC(B), lp_result)
+    se_ewc = stderror(cov_ewc; term = :x)
+
+    # summarize pairs EWC with t_B, not the normal
+    s90 = summarize(lp_result, cov_ewc; term = :x, level = 0.90)
+    tcrit = quantile(TDist(B), 0.95)
+    zcrit = quantile(Normal(), 0.95)
+    @test s90.lower ≈ beta .- tcrit .* se_ewc
+    @test s90.upper ≈ beta .+ tcrit .* se_ewc
+    @test !(s90.upper ≈ beta .+ zcrit .* se_ewc)  # t_B bands are wider
+
+    # Non-EWC estimators keep normal critical values
+    cov_hc1 = LocalProjections.vcov(HC1(), lp_result)
+    se_hc1 = stderror(cov_hc1; term = :x)
+    s90_hc1 = summarize(lp_result, cov_hc1; term = :x, level = 0.90)
+    @test s90_hc1.upper ≈ beta .+ zcrit .* se_hc1
+
+    # as_irf_result follows the same pairing
+    irf = as_irf_result(lp_result; vcov_estimator = EWC(B), coverage = [0.90])
+    @test vec(irf.upper[1].data) ≈ beta .+ tcrit .* se_ewc
+    @test vec(irf.lower[1].data) ≈ beta .- tcrit .* se_ewc
+end
+
+@testitem "EWC covariance matches direct cosine-projection formula" tags = [
+    :ewc, :vcov, :verification] begin
+    using LocalProjections
+    using DataFrames, StatsModels, LinearAlgebra, Test
+    using CovarianceMatrices
+    using CovarianceMatrices: EWC
+    using StatsBase: modelmatrix, residuals
+
+    # AR(1) errors so the long-run correction actually matters
+    n = 250
+    e = zeros(n)
+    for t in 2:n
+        e[t] = 0.5 * e[t - 1] + randn()
+    end
+    x = randn(n)
+    y = 0.8 .* x .+ e
+    df = DataFrame(x = x, y = y)
+    lp_result = lp(@formula(leads(y) ~ x + lags(y, 1)), df; horizon = 3)
+    B = ewc_bandwidth(lp_result)
+
+    for m in lp_result.models
+        X = modelmatrix(m)
+        u = residuals(m)
+        T, k = size(X)
+        g = X .* u
+        # Guide §2.2: Type-II DCT projections of the score
+        Lam = [sqrt(2 / T) * sum(cos(π * j * (t - 0.5) / T) * g[t, :] for t in 1:T)
+               for j in 1:B]
+        Omega = sum(l * l' for l in Lam) / B
+        # Sandwich with the T/(T-k) correlated-dof adjustment
+        V_direct = (T / (T - k)) * T * ((X'X) \ Omega) / (X'X)
+        V_pkg = CovarianceMatrices.vcov(EWC(B), m)
+        @test V_pkg ≈ V_direct rtol = 1e-10
+    end
+end
