@@ -2,6 +2,7 @@ module LocalProjections
 
 export LocalProjection, LocalProjectionIV, LocalProjectionCovariance, IRFSummary
 export lp, lpiv, coefpath, stderror, vcov, summarize, first_stage, weakivtest
+export ewc_bandwidth
 export WeakIVTestResult, FirstStageIV
 export lag, lead, cumul, CumulTerm, lags, leads, LeadTerm, anchor, AnchorTerm
 export as_irf_result, LocalProjectionIRFResult
@@ -24,6 +25,11 @@ using Distributions
 using RecipesBase
 using ShiftedArrays: lag, lead
 using StatsBase
+# Extend (and re-export) the shared StatsAPI generics rather than defining our
+# own functions: this keeps `vcov`/`stderror` the same binding as the one
+# exported by StatsModels, CovarianceMatrices, and Regress, so unqualified
+# calls work when those packages are loaded together with LocalProjections.
+import StatsBase: vcov, stderror
 using AxisArrays: AxisArrays, AxisArray, Axis
 using MacroEconometricTools: LocalProjectionIRFResult, irfplot, irfplot!
 
@@ -1474,7 +1480,8 @@ end
 Compute diagonal covariance entries horizon-by-horizon using `estimator`
 from `CovarianceMatrices.jl`. Works for both `LocalProjection` and `LocalProjectionIV`.
 """
-function vcov(estimator, lp::LPResult)
+function vcov(estimator::CovarianceMatrices.AbstractAsymptoticVarianceEstimator,
+        lp::LPResult)
     n = lp.horizon + 1
     variances = Dict{Symbol, Vector{Float64}}()
     names = Symbol.(lp.coef_names)
@@ -1502,11 +1509,72 @@ function vcov(estimator, lp::LPResult)
     return LocalProjectionCovariance(estimator, variances, lp.horizon)
 end
 
+# ============================================================================
+# Critical values (fixed-smoothing HAR inference)
+# ============================================================================
+
+"""
+    _critical_distribution(estimator)
+
+Reference distribution used to build confidence-interval critical values for
+a given covariance estimator.
+
+Defaults to `Normal()`. For the equal-weighted cosine estimator `EWC(B)`,
+returns `TDist(B)`: under fixed-smoothing asymptotics the EWC long-run
+variance is paired with Student-``t_B`` critical values for a single
+restriction (Lazarus, Lewis, Stock & Watson, 2018). Pairing EWC with normal
+critical values would understate the band width in finite samples.
+"""
+_critical_distribution(::Any) = Normal()
+_critical_distribution(estimator::CovarianceMatrices.EWC) = TDist(estimator.B)
+
+"""
+    _critical_value(estimator, level::Real)
+
+Two-sided critical value at confidence `level` from the reference
+distribution paired with `estimator` (see [`_critical_distribution`](@ref)).
+"""
+function _critical_value(estimator, level::Real)
+    quantile(_critical_distribution(estimator), 0.5 + level / 2)
+end
+
+"""
+    ewc_bandwidth(T₀::Integer) -> Int
+    ewc_bandwidth(lp::LPResult) -> Int
+
+Number of cosine terms ``B`` for the equal-weighted cosine (EWC) long-run
+variance estimator, using the Lazarus--Lewis--Stock--Watson (2018) rule for a
+single restriction:
+
+```math
+B = \\lfloor 0.41\\,T_0^{2/3} \\rfloor
+```
+
+For a `LocalProjection`/`LocalProjectionIV`, ``T_0`` is the effective sample
+size of the horizon-zero regression; the resulting integer is meant to be
+held fixed across horizons.
+
+# Example
+```julia
+lp_result = lp(@formula(leads(y) ~ x + lags(y, 4)), df; horizon = 20)
+B = ewc_bandwidth(lp_result)
+cov = vcov(EWC(B), lp_result)
+summarize(lp_result, cov; level = 0.90)  # Student-t_B critical values
+```
+"""
+ewc_bandwidth(T0::Integer) = max(1, floor(Int, 0.41 * T0^(2 / 3)))
+ewc_bandwidth(lp::LPResult) = ewc_bandwidth(Int(nobs(lp.models[1])))
+
 """
     summarize(lp, cov; term=lp.shock, level=0.95, scale=1.0) -> IRFSummary
 
 Create a summary table of impulse response coefficients with standard errors
 and confidence intervals. Works for both `LocalProjection` and `LocalProjectionIV`.
+
+Critical values are taken from the reference distribution paired with the
+covariance estimator stored in `cov`: Student-``t_B`` for `EWC(B)`
+(fixed-smoothing HAR inference, Lazarus et al. 2018), standard normal
+otherwise.
 """
 function summarize(lp::LPResult, cov::LocalProjectionCovariance;
         term::Symbol = lp.shock, level::Real = 0.95, scale::Real = 1.0)
@@ -1514,7 +1582,7 @@ function summarize(lp::LPResult, cov::LocalProjectionCovariance;
     scale_f = Float64(scale)
     beta = coefpath(lp; term = term) .* scale_f
     se = stderror(cov; term = term) .* scale_f
-    z = quantile(Normal(), 0.5 + level_f / 2)
+    z = _critical_value(cov.estimator, level_f)
     lower = beta .- z .* se
     upper = beta .+ z .* se
 
@@ -1594,7 +1662,7 @@ end
         (level <= 0 || level >= 1) && throw(ArgumentError("levels must be in (0, 1)"))
     end
 
-    z_max = quantile(Normal(), 0.5 + sorted_levels[1] / 2)
+    z_max = _critical_value(cov.estimator, sorted_levels[1])
     ribbon_max = z_max .* se
 
     xlabel --> "Horizon"
@@ -1607,7 +1675,7 @@ end
     if length(sorted_levels) > 1
         for (idx, level) in enumerate(sorted_levels[2:end])
             @series begin
-                z = quantile(Normal(), 0.5 + level / 2)
+                z = _critical_value(cov.estimator, level)
                 band = z .* se
                 ribbon := band
                 fillalpha := 0.3 + 0.15 * idx
@@ -1701,15 +1769,16 @@ function as_irf_result(lp::LPResult;
         )
 
         # Compute confidence bands as AxisArrays
+        # Critical values follow the estimator pairing (Student-t_B for EWC)
         lower = [AxisArray(
-                     reshape(beta .- quantile(Normal(), 0.5 + c/2) .* se, 1, 1, H),
+                     reshape(beta .- _critical_value(vcov_estimator, c) .* se, 1, 1, H),
                      Axis{:response}([lp.response]),
                      Axis{:shock}([term]),
                      Axis{:horizon}(horizons)
                  ) for c in coverage]
 
         upper = [AxisArray(
-                     reshape(beta .+ quantile(Normal(), 0.5 + c/2) .* se, 1, 1, H),
+                     reshape(beta .+ _critical_value(vcov_estimator, c) .* se, 1, 1, H),
                      Axis{:response}([lp.response]),
                      Axis{:shock}([term]),
                      Axis{:horizon}(horizons)

@@ -58,9 +58,10 @@ tmp/
 *.ipynb
 
 # Local Development
+.Rhistory
+docs/src/code/
 test_pkg/
 .claude/
-CLAUDE.md
 AGENTS.md
 GEMINI.md
 JULIA.md
