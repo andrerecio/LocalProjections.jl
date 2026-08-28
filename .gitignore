@@ -58,6 +58,8 @@ tmp/
 *.ipynb
 
 # Local Development
+.Rhistory
+docs/src/code/
 test_pkg/
 .claude/
 AGENTS.md
