@@ -11,6 +11,11 @@ permissions:
 jobs:
   benchmark:
     runs-on: ubuntu-latest
+    # AirspeedVelocity resolves the package in fresh comparison environments,
+    # where the unregistered [sources] git deps (Regress.jl,
+    # MacroEconometricTools.jl) are unsatisfiable on this fork — informative
+    # only, never green until those deps are registered.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: julia-actions/setup-julia@v2

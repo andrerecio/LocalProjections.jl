@@ -2,10 +2,9 @@ module LocalProjectionsMakieExt
 
 using Makie
 using LocalProjections
-using LocalProjections: LPResult, LocalProjectionCovariance,
-                        coefpath, stderror, vcov
+using LocalProjections: LPEstimate, LocalProjectionCovariance,
+                        coefpath, stderror, vcov, _critical_value
 using CovarianceMatrices
-using Distributions: Normal, quantile
 
 import LocalProjections: irfplot, irfplot!, irfplot_axis
 
@@ -60,8 +59,9 @@ function Makie.plot!(plot::IRFPlotMakie)
     end
 
     # Draw confidence bands (widest first, fading alpha)
+    # Critical values follow the estimator pairing (Student-t_B for EWC)
     for (idx, level) in enumerate(sorted_levels)
-        z = quantile(Normal(), 0.5 + level / 2)
+        z = _critical_value(cov.estimator, level)
         lower = beta .- z .* se
         upper = beta .+ z .* se
         alpha = clamp(bandalpha * 0.8^(idx - 1), 0.0f0, 1.0f0)
@@ -83,8 +83,8 @@ end
 # Convenience wrappers mapping irfplot/irfplot! to irfplotmakie/irfplotmakie!
 # ============================================================================
 
-irfplot(lp::LPResult, est; kwargs...) = irfplotmakie(lp, est; kwargs...)
-irfplot!(ax, lp::LPResult, est; kwargs...) = irfplotmakie!(ax, lp, est; kwargs...)
+irfplot(lp::LPEstimate, est; kwargs...) = irfplotmakie(lp, est; kwargs...)
+irfplot!(ax, lp::LPEstimate, est; kwargs...) = irfplotmakie!(ax, lp, est; kwargs...)
 
 function irfplot_axis(subfig, lp, estimator_or_cov; kwargs...)
     kw = Dict{Symbol, Any}(kwargs)

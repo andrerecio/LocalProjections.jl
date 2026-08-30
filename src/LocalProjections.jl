@@ -3,6 +3,7 @@ module LocalProjections
 export LocalProjection, LocalProjectionIV, LocalProjectionCovariance, IRFSummary
 export lp, lpiv, coefpath, stderror, vcov, summarize, first_stage, weakivtest
 export ewc_bandwidth
+export biascorrect, BiasCorrectedLP
 export WeakIVTestResult, FirstStageIV
 export lag, lead, cumul, CumulTerm, lags, leads, LeadTerm, anchor, AnchorTerm
 export as_irf_result, LocalProjectionIRFResult
@@ -21,6 +22,7 @@ using Regress: OLSMatrixEstimator, IVMatrixEstimator, ols, iv, TSLS, VcovSpec,
                first_stage, weakivtest
 using CovarianceMatrices
 using Statistics
+using LinearAlgebra: Symmetric, cond, factorize, tr
 using Distributions
 using RecipesBase
 using ShiftedArrays: lag, lead
@@ -1383,9 +1385,53 @@ end
 # ============================================================================
 
 """
+    _warn_unsupported_weakiv_estimator(estimator)
+
+The Montiel-Olea-Pflueger test in `Regress.jl` builds its weight matrix from
+the covariance estimator attached to the model, but only kernel HAC
+estimators (`CovarianceMatrices.HAC`, e.g. `Bartlett{NeweyWest}`) and
+CR0/CR1 cluster estimators are actually supported: any other estimator —
+notably `EWC`, and CR2/CR3 — silently falls back to an HC0-style
+(heteroskedasticity-robust only) weight matrix upstream. Emit a warning so
+that fallback is visible instead of silent.
+
+Note that for `EWC` this is not merely a missing feature: the MOP limiting
+distribution and critical values are derived under a consistently estimated
+weight matrix, whereas the fixed-``B`` EWC covariance converges to a random
+(Wishart-type) limit — the very non-degeneracy that motivates Student-``t_B``
+critical values in HAR inference. EWC is therefore unsuitable for this test
+by construction; use a kernel HAC estimator instead.
+"""
+function _warn_unsupported_weakiv_estimator(estimator)
+    supported_cluster = estimator isa
+                        Union{CovarianceMatrices.CR0, CovarianceMatrices.CR1}
+    unsupported = estimator isa CovarianceMatrices.Correlated &&
+                  !(estimator isa CovarianceMatrices.HAC) &&
+                  !supported_cluster
+    if unsupported
+        @warn "weakivtest does not support $(typeof(estimator)): the test statistics " *
+              "are computed with an HC0-style (heteroskedasticity-robust only) weight " *
+              "matrix instead. Note that the Montiel-Olea-Pflueger critical values " *
+              "assume a consistently estimated weight matrix, so fixed-smoothing " *
+              "estimators such as EWC are unsuitable for this test by construction. " *
+              "For serial-correlation-robust weak-IV inference attach a kernel HAC " *
+              "estimator, e.g. `lpiv_result + vcov(Bartlett{NeweyWest}())`."
+    end
+    return nothing
+end
+
+"""
     weakivtest(lpiv::LocalProjectionIV, h::Int; kwargs...) -> WeakIVTestResult
 
 Montiel-Olea-Pflueger robust weak instrument test for horizon `h` (0-indexed).
+
+The test uses the covariance estimator attached to the horizon-`h` model
+(`HR1` by default; set it with `lpiv_result + vcov(estimator)`). Kernel HAC
+estimators are supported. Unsupported estimators trigger a warning and fall
+back to heteroskedasticity-robust weighting; in particular `EWC` is
+incompatible with this test by construction — its fixed-``B`` covariance is
+not a consistent estimate of the weight matrix the MOP critical values
+assume (see [`_warn_unsupported_weakiv_estimator`](@ref)).
 
 # Keyword Arguments
 - `level::Real=0.05`: Confidence level alpha
@@ -1404,6 +1450,7 @@ function Regress.weakivtest(lpiv::LocalProjectionIV, h::Int; kwargs...)
         @info "weakivtest at h=0 skipped: response == shock (tautological)"
         return _tautological_weakivtest(lpiv.models[1]; kwargs...)
     end
+    _warn_unsupported_weakiv_estimator(lpiv.models[h + 1].vcov_estimator)
     return Regress.weakivtest(lpiv.models[h + 1]; kwargs...)
 end
 
@@ -1413,8 +1460,11 @@ end
 Montiel-Olea-Pflueger robust weak instrument test for all horizons.
 
 Returns a vector of `WeakIVTestResult`, one per horizon (0 to `lpiv.horizon`).
+The covariance estimator attached to the models is used for the weight
+matrix; see [`weakivtest(::LocalProjectionIV, ::Int)`](@ref) for details.
 """
 function Regress.weakivtest(lpiv::LocalProjectionIV; kwargs...)
+    _warn_unsupported_weakiv_estimator(lpiv.models[1].vcov_estimator)
     results = Vector{WeakIVTestResult{Float64}}(undef, lpiv.horizon + 1)
     for (i, m) in enumerate(lpiv.models)
         if i == 1 && lpiv.tautological_h0
@@ -1472,6 +1522,218 @@ function coefpath(lp::LPResult; term::Symbol = lp.shock)
         coefficients[1] = term === lp.shock ? 1.0 : 0.0
     end
     return coefficients
+end
+
+# ============================================================================
+# Herbst–Johannsen bias correction (BCC)
+# ============================================================================
+
+"""
+    BiasCorrectedLP
+
+Herbst–Johannsen bias-corrected local projection (the "BCC" estimator of
+Herbst & Johannsen, 2024). Wraps an OLS [`LocalProjection`](@ref) together
+with the persistence adjustments ``\\hat c_j`` estimated from the
+horizon-zero control matrix. Construct with [`biascorrect`](@ref).
+
+`coefpath` returns the corrected impulse-response path
+``\\hat\\theta_h^{\\,c}``. `summarize`, the plot recipes, and
+`as_irf_result` center the confidence bands on the corrected path while
+using the standard errors of the *uncorrected* OLS coefficients: following
+the reference implementation (`lp_biascorr.m` in Montiel Olea,
+Plagborg-Møller, Qian & Wolf, 2025), neither the sampling uncertainty of
+``\\hat c_j`` nor the covariance across lower-horizon responses entering
+the recursion is propagated into the bands.
+
+Properties not stored on the wrapper (`horizon`, `response`, `shock`,
+`models`, ...) are forwarded to the wrapped `LocalProjection`.
+"""
+struct BiasCorrectedLP{L <: LocalProjection}
+    lp::L
+    c::Vector{Float64}       # persistence adjustments ĉ_j, j = 1:horizon
+    T0::Int                  # horizon-zero estimation sample size
+    controls::Vector{String} # coefficient names spanning w_t
+end
+
+function Base.getproperty(bc::BiasCorrectedLP, name::Symbol)
+    name in fieldnames(BiasCorrectedLP) && return getfield(bc, name)
+    return getproperty(getfield(bc, :lp), name)
+end
+
+function Base.propertynames(bc::BiasCorrectedLP)
+    (fieldnames(BiasCorrectedLP)..., propertynames(getfield(bc, :lp))...)
+end
+
+"""
+    LPEstimate
+
+Union of the plain LP results ([`LPResult`](@ref)) and
+[`BiasCorrectedLP`](@ref), for the shared `summarize`/plotting/
+`as_irf_result` pipeline.
+"""
+const LPEstimate = Union{LPResult, BiasCorrectedLP}
+
+function Base.show(io::IO, bc::BiasCorrectedLP)
+    lp = bc.lp
+    print(io,
+        "BiasCorrectedLP(horizon=0:$(lp.horizon), response=$(lp.response), shock=$(lp.shock))")
+end
+
+function Base.show(io::IO, mime::MIME"text/plain", bc::BiasCorrectedLP)
+    println(io, "BiasCorrectedLP (Herbst–Johannsen)")
+    println(io, "  Controls:   ",
+        isempty(bc.controls) ? "(none)" : join(bc.controls, ", "))
+    println(io, "  T₀:         $(bc.T0)")
+    show(io, mime, bc.lp)
+end
+
+"""
+    _persistence_adjustments(w, H) -> Vector{Float64}
+
+Persistence adjustments ``\\hat c_j = 1 + \\mathrm{tr}(\\hat\\Sigma_0^{-1}
+\\hat\\Sigma_j)`` for ``j = 1, \\dots, H`` from the ``T \\times k`` control
+matrix `w` (guide §3.1), with ``\\hat\\Sigma_0 = \\sum_t \\tilde w_t
+\\tilde w_t' / (T-1)`` and ``\\hat\\Sigma_j = \\sum_{t \\le T-j} \\tilde
+w_t \\tilde w_{t+j}' / (T-j-1)`` computed from the demeaned controls.
+With no controls (`k == 0`) every trace term vanishes and ``\\hat c_j = 1``.
+"""
+function _persistence_adjustments(w::AbstractMatrix{<:Real}, H::Int)
+    T, k = size(w)
+    c = ones(H)
+    k == 0 && return c
+    T > H + 1 || throw(ArgumentError(
+        "estimating the lag-$H control autocovariance needs more than " *
+        "H + 1 = $(H + 1) horizon-zero observations, got $T"))
+    wt = w .- mean(w; dims = 1)
+    Sigma0 = Symmetric(wt' * wt / (T - 1))
+    kappa = cond(Sigma0)
+    (isfinite(kappa) && kappa < 1e12) || throw(ArgumentError(
+        "the control covariance Σ̂₀ is (near-)singular (cond ≈ $(round(kappa, sigdigits = 3))); " *
+        "drop collinear controls before bias-correcting"))
+    F = factorize(Sigma0)
+    for j in 1:H
+        Sigmaj = view(wt, 1:(T - j), :)' * view(wt, (j + 1):T, :) / (T - j - 1)
+        c[j] = 1 + tr(F \ Sigmaj)
+    end
+    return c
+end
+
+"""
+    biascorrect(lp::LocalProjection) -> BiasCorrectedLP
+
+Herbst–Johannsen small-sample bias correction of the impulse-response path
+(guide §3; "BCC" in Herbst & Johannsen, 2024).
+
+The control vector ``w_t`` is taken from the horizon-zero model matrix,
+selecting columns by coefficient name and excluding only the intercept and
+the contemporaneous shock. From its variance and lag autocovariances the
+persistence adjustments ``\\hat c_j = 1 +
+\\mathrm{tr}(\\hat\\Sigma_0^{-1}\\hat\\Sigma_j)`` are formed, and the
+corrected path is built recursively through already-corrected lower
+horizons:
+
+```math
+\\hat\\theta_0^{\\,c} = \\hat\\theta_0, \\qquad
+\\hat\\theta_h^{\\,c} = \\hat\\theta_h + \\frac{1}{T_0 - h}
+\\sum_{j=1}^{h} \\hat c_j \\, \\hat\\theta_{h-j}^{\\,c}.
+```
+
+The ``1/(T_0 - h)`` weights (and the lag-``j`` pairing in
+``\\hat\\Sigma_j``) assume the only horizon-related sample loss is the
+``h`` future observations. This is verified structurally: the horizon-``h``
+design matrix must equal the horizon-zero design truncated by its last
+``h`` rows, otherwise an error is thrown. One case is not detectable from
+the fitted object alone: an internal `NaN` gap in an RHS-only variable
+drops the same rows at every horizon, leaving the truncation pattern
+intact while the retained rows are no longer contiguous in time — the
+lag-``j`` autocovariance pairing is then misaligned at the gap. The
+correction therefore additionally assumes the horizon-zero estimation
+sample is a contiguous block of the original time axis.
+
+Only defined for OLS local projections — the correction is derived for
+least-squares LP coefficients, not for IV estimators.
+
+# Example
+```julia
+lp_result = lp(@formula(leads(y) ~ x + lags(y, 4)), df; horizon = 20)
+bc = biascorrect(lp_result)
+coefpath(bc)                       # corrected θ̂ᶜ path
+summarize(bc, HC1(); level = 0.90) # bands centered on θ̂ᶜ, SEs of θ̂
+```
+"""
+function biascorrect(lp_result::LocalProjection)
+    H = lp_result.horizon
+    m0 = lp_result.models[1]
+    T0 = Int(nobs(m0))
+    X0 = modelmatrix(m0)
+    for h in 1:H
+        mh = lp_result.models[h + 1]
+        Th = Int(nobs(mh))
+        (Th == T0 - h && modelmatrix(mh) == view(X0, 1:Th, :)) ||
+            throw(ArgumentError(
+                "the horizon-$h estimation sample is not the horizon-0 sample " *
+                "truncated by its last $h rows (horizon-specific missingness), " *
+                "so the Herbst–Johannsen 1/(T₀ − h) weights and lag-j " *
+                "autocovariance pairing do not apply"))
+    end
+    keep = [!(n == "(Intercept)" || n == String(lp_result.shock))
+            for n in lp_result.coef_names]
+    w = modelmatrix(m0)[:, keep]
+    c = _persistence_adjustments(w, H)
+    return BiasCorrectedLP(lp_result, c, T0, lp_result.coef_names[keep])
+end
+
+function biascorrect(::LocalProjectionIV)
+    throw(ArgumentError(
+        "the Herbst–Johannsen bias correction is derived for OLS local " *
+        "projections and is not available for LocalProjectionIV"))
+end
+
+"""
+    coefpath(bc::BiasCorrectedLP; term=bc.shock) -> Vector{Float64}
+
+Bias-corrected impulse-response path ``\\hat\\theta_h^{\\,c}`` (see
+[`biascorrect`](@ref)). The correction is defined for the impulse response
+of the shock only; request other terms from the uncorrected result via
+`coefpath(bc.lp; term = ...)`.
+"""
+function coefpath(bc::BiasCorrectedLP; term::Symbol = bc.lp.shock)
+    term === bc.lp.shock || throw(ArgumentError(
+        "the Herbst–Johannsen correction applies to the impulse response " *
+        "of the shock ($(bc.lp.shock)); use coefpath(bc.lp; term = :$term) " *
+        "for the uncorrected path of another term"))
+    theta = coefpath(bc.lp; term = term)
+    corrected = copy(theta)
+    for h in 1:bc.lp.horizon
+        acc = 0.0
+        for j in 1:h
+            acc += bc.c[j] * corrected[h - j + 1]
+        end
+        corrected[h + 1] = theta[h + 1] + acc / (bc.T0 - h)
+    end
+    return corrected
+end
+
+"""
+    vcov(estimator, bc::BiasCorrectedLP)
+
+Covariance of the *uncorrected* per-horizon OLS coefficients (the
+reference convention pairs the corrected path with the ordinary LP
+standard errors; see [`BiasCorrectedLP`](@ref)).
+"""
+function vcov(estimator::CovarianceMatrices.AbstractAsymptoticVarianceEstimator,
+        bc::BiasCorrectedLP)
+    return vcov(estimator, bc.lp)
+end
+
+"""
+    bc + vcov(estimator)
+
+Apply a covariance estimator to the wrapped models, keeping the bias
+correction (consistent with `lp + vcov(estimator)`).
+"""
+function Base.:+(bc::BiasCorrectedLP, v::VcovSpec)
+    return BiasCorrectedLP(bc.lp + v, bc.c, bc.T0, bc.controls)
 end
 
 """
@@ -1563,7 +1825,7 @@ summarize(lp_result, cov; level = 0.90)  # Student-t_B critical values
 ```
 """
 ewc_bandwidth(T0::Integer) = max(1, floor(Int, 0.41 * T0^(2 / 3)))
-ewc_bandwidth(lp::LPResult) = ewc_bandwidth(Int(nobs(lp.models[1])))
+ewc_bandwidth(lp::LPEstimate) = ewc_bandwidth(Int(nobs(lp.models[1])))
 
 """
     summarize(lp, cov; term=lp.shock, level=0.95, scale=1.0) -> IRFSummary
@@ -1575,8 +1837,12 @@ Critical values are taken from the reference distribution paired with the
 covariance estimator stored in `cov`: Student-``t_B`` for `EWC(B)`
 (fixed-smoothing HAR inference, Lazarus et al. 2018), standard normal
 otherwise.
+
+For a [`BiasCorrectedLP`](@ref), the bands are centered on the
+bias-corrected path but use the standard errors of the uncorrected OLS
+coefficients (the reference convention; see [`biascorrect`](@ref)).
 """
-function summarize(lp::LPResult, cov::LocalProjectionCovariance;
+function summarize(lp::LPEstimate, cov::LocalProjectionCovariance;
         term::Symbol = lp.shock, level::Real = 0.95, scale::Real = 1.0)
     level_f = Float64(level)
     scale_f = Float64(scale)
@@ -1595,7 +1861,7 @@ end
 
 Convenience method that computes vcov internally before creating summary table.
 """
-function summarize(lp::LPResult,
+function summarize(lp::LPEstimate,
         estimator::CovarianceMatrices.AbstractAsymptoticVarianceEstimator;
         term::Symbol = lp.shock, level::Real = 0.95, scale::Real = 1.0)
     cov = vcov(estimator, lp)
@@ -1640,7 +1906,7 @@ function irfplot_axis end
 Internal wrapper type for dispatching plot recipes on LocalProjection/LocalProjectionIV
 with covariance. Users should call `plot(lp, cov; ...)` or `plot(lp, estimator; ...)` directly.
 """
-struct IRFPlot{L <: LPResult, E}
+struct IRFPlot{L <: LPEstimate, E}
     lp::L
     cov::LocalProjectionCovariance{E}
     term::Symbol
@@ -1691,12 +1957,12 @@ end
     return horizons, beta
 end
 
-@recipe function f(lp::LPResult, cov::LocalProjectionCovariance;
+@recipe function f(lp::LPEstimate, cov::LocalProjectionCovariance;
         term = lp.shock, levels = [0.95])
     IRFPlot(lp, cov, term, Float64.(levels))
 end
 
-@recipe function f(lp::LPResult,
+@recipe function f(lp::LPEstimate,
         estimator::CovarianceMatrices.AbstractAsymptoticVarianceEstimator;
         term = lp.shock, levels = [0.95])
     cov = vcov(estimator, lp)
@@ -1738,7 +2004,7 @@ using Plots
 plot(irf)  # Uses MET's recipe
 ```
 """
-function as_irf_result(lp::LPResult;
+function as_irf_result(lp::LPEstimate;
         term::Symbol = lp.shock,
         vcov_estimator = nothing,
         coverage::Vector{Float64} = [0.68, 0.90, 0.95])
@@ -1794,6 +2060,9 @@ function as_irf_result(lp::LPResult;
 
     # Build metadata, adding IV-specific fields when applicable
     meta = (horizon = lp.horizon, formula = lp.base_formula, term = term)
+    if lp isa BiasCorrectedLP
+        meta = (meta..., bias_corrected = true)
+    end
     if lp isa LocalProjectionIV
         fs_diagnostics = [first_stage(lp, h) for h in 0:(H - 1)]
         meta = (meta..., is_iv = true, first_stage = fs_diagnostics)

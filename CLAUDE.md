@@ -20,7 +20,8 @@ julia --project -e 'using Pkg; Pkg.instantiate()'
 julia --project -e 'using Pkg; Pkg.test()'
 
 # Run a subset of test items by tag (tags: :cumul :leads :anchor :nested :summarize
-# :vcov :api :lpiv :iv :weakiv :lags :tautological :verification :core :met :smoke).
+# :vcov :api :lpiv :iv :weakiv :lags :tautological :verification :core :met :smoke
+# :ewc :biascorr).
 # There is no test/Project.toml (test deps live in [extras]), so use TestEnv.jl
 # (installed in the global environment) to activate the test target:
 julia --project -e 'using TestEnv; TestEnv.activate(); using TestItemRunner; @run_package_tests filter=ti->(:vcov in ti.tags)'
