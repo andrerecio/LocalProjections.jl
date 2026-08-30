@@ -883,15 +883,17 @@ end
 @testitem "weakivtest warns on unsupported vcov estimators" tags = [
     :lpiv, :weakiv, :vcov, :ewc] begin
     using LocalProjections
-    using DataFrames, StatsModels, Test, Random
+    using DataFrames, StatsModels, Test, StableRNGs
     using CovarianceMatrices: EWC, Bartlett, NeweyWest
 
-    # Seeded: on unlucky draws weakivtest's internals throw a DomainError
-    # (eigenvalue ≈ -1e-16 raised to -0.5 in Regress's _matrix_power_sym)
-    Random.seed!(20260828)
+    # StableRNG, not Random.seed!: the stream must be identical across Julia
+    # versions, because on unlucky draws weakivtest's internals throw a
+    # DomainError (values ≈ -1e-16 passed to sqrt / raised to -0.5 in
+    # Regress's Nagar routines)
+    rng = StableRNG(20260831)
     n = 200
-    z = randn(n)
-    u = randn(n)
+    z = randn(rng, n)
+    u = randn(rng, n)
     x = 0.5 .* z .+ 0.5 .* u
     y = 2.0 .* x .+ u
     df = DataFrame(y = y, x = x, z = z)
@@ -916,15 +918,15 @@ end
 @testitem "Herbst–Johannsen correction matches direct lp_biascorr.m port" tags = [
     :biascorr, :verification] begin
     using LocalProjections
-    using DataFrames, StatsModels, LinearAlgebra, Statistics, Test, Random
+    using DataFrames, StatsModels, LinearAlgebra, Statistics, Test, StableRNGs
     using StatsBase: modelmatrix
 
-    Random.seed!(20260830)
+    rng = StableRNG(20260830)
     n = 200
-    x = randn(n)
+    x = randn(rng, n)
     y = zeros(n)
     for t in 2:n
-        y[t] = 0.6 * y[t - 1] + 0.5 * x[t] + randn()
+        y[t] = 0.6 * y[t - 1] + 0.5 * x[t] + randn(rng)
     end
     df = DataFrame(y = y, x = x)
     lp_result = lp(@formula(leads(y) ~ x + lags(y, 2)), df; horizon = 8)
@@ -958,16 +960,16 @@ end
 @testitem "biascorrect conventions in summarize/as_irf_result" tags = [
     :biascorr, :summarize, :api] begin
     using LocalProjections
-    using DataFrames, StatsModels, Test, Random
+    using DataFrames, StatsModels, Test, StableRNGs
     using CovarianceMatrices: EWC, HC1
     using Distributions: TDist, quantile
 
-    Random.seed!(20260830)
+    rng = StableRNG(20260830)
     n = 200
-    x = randn(n)
+    x = randn(rng, n)
     y = zeros(n)
     for t in 2:n
-        y[t] = 0.6 * y[t - 1] + 0.5 * x[t] + randn()
+        y[t] = 0.6 * y[t - 1] + 0.5 * x[t] + randn(rng)
     end
     df = DataFrame(y = y, x = x)
     lp_result = lp(@formula(leads(y) ~ x + lags(y, 2)), df; horizon = 8)
@@ -1003,14 +1005,14 @@ end
 
 @testitem "biascorrect guards and edge cases" tags = [:biascorr, :api] begin
     using LocalProjections
-    using DataFrames, StatsModels, Test, Random
+    using DataFrames, StatsModels, Test, StableRNGs
 
-    Random.seed!(20260830)
+    rng = StableRNG(20260830)
     n = 200
-    x = randn(n)
+    x = randn(rng, n)
     y = zeros(n)
     for t in 2:n
-        y[t] = 0.6 * y[t - 1] + 0.5 * x[t] + randn()
+        y[t] = 0.6 * y[t - 1] + 0.5 * x[t] + randn(rng)
     end
     df = DataFrame(y = y, x = x)
 
