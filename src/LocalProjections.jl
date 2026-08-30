@@ -1383,9 +1383,53 @@ end
 # ============================================================================
 
 """
+    _warn_unsupported_weakiv_estimator(estimator)
+
+The Montiel-Olea-Pflueger test in `Regress.jl` builds its weight matrix from
+the covariance estimator attached to the model, but only kernel HAC
+estimators (`CovarianceMatrices.HAC`, e.g. `Bartlett{NeweyWest}`) and
+CR0/CR1 cluster estimators are actually supported: any other estimator —
+notably `EWC`, and CR2/CR3 — silently falls back to an HC0-style
+(heteroskedasticity-robust only) weight matrix upstream. Emit a warning so
+that fallback is visible instead of silent.
+
+Note that for `EWC` this is not merely a missing feature: the MOP limiting
+distribution and critical values are derived under a consistently estimated
+weight matrix, whereas the fixed-``B`` EWC covariance converges to a random
+(Wishart-type) limit — the very non-degeneracy that motivates Student-``t_B``
+critical values in HAR inference. EWC is therefore unsuitable for this test
+by construction; use a kernel HAC estimator instead.
+"""
+function _warn_unsupported_weakiv_estimator(estimator)
+    supported_cluster = estimator isa
+                        Union{CovarianceMatrices.CR0, CovarianceMatrices.CR1}
+    unsupported = estimator isa CovarianceMatrices.Correlated &&
+                  !(estimator isa CovarianceMatrices.HAC) &&
+                  !supported_cluster
+    if unsupported
+        @warn "weakivtest does not support $(typeof(estimator)): the test statistics " *
+              "are computed with an HC0-style (heteroskedasticity-robust only) weight " *
+              "matrix instead. Note that the Montiel-Olea-Pflueger critical values " *
+              "assume a consistently estimated weight matrix, so fixed-smoothing " *
+              "estimators such as EWC are unsuitable for this test by construction. " *
+              "For serial-correlation-robust weak-IV inference attach a kernel HAC " *
+              "estimator, e.g. `lpiv_result + vcov(Bartlett{NeweyWest}())`."
+    end
+    return nothing
+end
+
+"""
     weakivtest(lpiv::LocalProjectionIV, h::Int; kwargs...) -> WeakIVTestResult
 
 Montiel-Olea-Pflueger robust weak instrument test for horizon `h` (0-indexed).
+
+The test uses the covariance estimator attached to the horizon-`h` model
+(`HR1` by default; set it with `lpiv_result + vcov(estimator)`). Kernel HAC
+estimators are supported. Unsupported estimators trigger a warning and fall
+back to heteroskedasticity-robust weighting; in particular `EWC` is
+incompatible with this test by construction — its fixed-``B`` covariance is
+not a consistent estimate of the weight matrix the MOP critical values
+assume (see [`_warn_unsupported_weakiv_estimator`](@ref)).
 
 # Keyword Arguments
 - `level::Real=0.05`: Confidence level alpha
@@ -1404,6 +1448,7 @@ function Regress.weakivtest(lpiv::LocalProjectionIV, h::Int; kwargs...)
         @info "weakivtest at h=0 skipped: response == shock (tautological)"
         return _tautological_weakivtest(lpiv.models[1]; kwargs...)
     end
+    _warn_unsupported_weakiv_estimator(lpiv.models[h + 1].vcov_estimator)
     return Regress.weakivtest(lpiv.models[h + 1]; kwargs...)
 end
 
@@ -1413,8 +1458,11 @@ end
 Montiel-Olea-Pflueger robust weak instrument test for all horizons.
 
 Returns a vector of `WeakIVTestResult`, one per horizon (0 to `lpiv.horizon`).
+The covariance estimator attached to the models is used for the weight
+matrix; see [`weakivtest(::LocalProjectionIV, ::Int)`](@ref) for details.
 """
 function Regress.weakivtest(lpiv::LocalProjectionIV; kwargs...)
+    _warn_unsupported_weakiv_estimator(lpiv.models[1].vcov_estimator)
     results = Vector{WeakIVTestResult{Float64}}(undef, lpiv.horizon + 1)
     for (i, m) in enumerate(lpiv.models)
         if i == 1 && lpiv.tautological_h0

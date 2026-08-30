@@ -879,3 +879,36 @@ end
         @test V_pkg ≈ V_direct rtol = 1e-10
     end
 end
+
+@testitem "weakivtest warns on unsupported vcov estimators" tags = [
+    :lpiv, :weakiv, :vcov, :ewc] begin
+    using LocalProjections
+    using DataFrames, StatsModels, Test, Random
+    using CovarianceMatrices: EWC, Bartlett, NeweyWest
+
+    # Seeded: on unlucky draws weakivtest's internals throw a DomainError
+    # (eigenvalue ≈ -1e-16 raised to -0.5 in Regress's _matrix_power_sym)
+    Random.seed!(20260828)
+    n = 200
+    z = randn(n)
+    u = randn(n)
+    x = 0.5 .* z .+ 0.5 .* u
+    y = 2.0 .* x .+ u
+    df = DataFrame(y = y, x = x, z = z)
+    result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon = 3)
+
+    # Supported estimators: no logging (default HR1, kernel HAC)
+    @test_logs weakivtest(result, 1)
+    @test_logs weakivtest(result + vcov(Bartlett{NeweyWest}()), 1)
+
+    # EWC is silently downgraded to HC0-style weighting upstream: warn
+    result_ewc = result + vcov(EWC(10))
+    @test_logs (:warn, r"HC0-style") weakivtest(result_ewc, 1)
+    # Vector method warns once for all horizons
+    @test_logs (:warn, r"HC0-style") weakivtest(result_ewc)
+
+    # The warning does not change the returned statistics
+    w_plain = weakivtest(result, 1)
+    w_ewc = @test_logs (:warn, r"HC0-style") match_mode=:any weakivtest(result_ewc, 1)
+    @test w_ewc.F_eff == w_plain.F_eff  # documents the upstream fallback
+end
