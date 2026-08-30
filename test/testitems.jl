@@ -912,3 +912,138 @@ end
     w_ewc = @test_logs (:warn, r"HC0-style") match_mode=:any weakivtest(result_ewc, 1)
     @test w_ewc.F_eff == w_plain.F_eff  # documents the upstream fallback
 end
+
+@testitem "Herbst–Johannsen correction matches direct lp_biascorr.m port" tags = [
+    :biascorr, :verification] begin
+    using LocalProjections
+    using DataFrames, StatsModels, LinearAlgebra, Statistics, Test, Random
+    using StatsBase: modelmatrix
+
+    Random.seed!(20260830)
+    n = 200
+    x = randn(n)
+    y = zeros(n)
+    for t in 2:n
+        y[t] = 0.6 * y[t - 1] + 0.5 * x[t] + randn()
+    end
+    df = DataFrame(y = y, x = x)
+    lp_result = lp(@formula(leads(y) ~ x + lags(y, 2)), df; horizon = 8)
+    bc = biascorrect(lp_result)
+
+    # Direct port of lp_biascorr.m (guide §3) on the same inputs
+    keep = [!(nm in ("(Intercept)", "x")) for nm in lp_result.coef_names]
+    w = modelmatrix(lp_result.models[1])[:, keep]
+    irs = coefpath(lp_result; term = :x)
+    T = size(w, 1)
+    H = lp_result.horizon
+    wd = w .- mean(w; dims = 1)
+    S0 = (wd' * wd) / (T - 1)
+    acf = [1 + tr(S0 \ ((wd[1:(end - j), :]' * wd[(j + 1):end, :]) / (T - j - 1)))
+           for j in 1:H]
+    irs_c = copy(irs)
+    for h in 1:H
+        irs_c[h + 1] = irs[h + 1] +
+                       (1 / (T - h)) * sum(acf[j] * irs_c[h - j + 1] for j in 1:h)
+    end
+
+    @test coefpath(bc) ≈ irs_c
+    @test bc.c ≈ acf
+    @test bc.T0 == T
+    @test bc.controls == ["y_lag1", "y_lag2"]
+    # Impact response is untouched; later horizons genuinely move
+    @test coefpath(bc)[1] == irs[1]
+    @test maximum(abs.(coefpath(bc)[2:end] .- irs[2:end])) > 0
+end
+
+@testitem "biascorrect conventions in summarize/as_irf_result" tags = [
+    :biascorr, :summarize, :api] begin
+    using LocalProjections
+    using DataFrames, StatsModels, Test, Random
+    using CovarianceMatrices: EWC, HC1
+    using Distributions: TDist, quantile
+
+    Random.seed!(20260830)
+    n = 200
+    x = randn(n)
+    y = zeros(n)
+    for t in 2:n
+        y[t] = 0.6 * y[t - 1] + 0.5 * x[t] + randn()
+    end
+    df = DataFrame(y = y, x = x)
+    lp_result = lp(@formula(leads(y) ~ x + lags(y, 2)), df; horizon = 8)
+    bc = biascorrect(lp_result)
+
+    # Wrapped-field forwarding
+    @test bc.horizon == lp_result.horizon
+    @test bc.shock === :x && bc.response === :y
+
+    # Script-22 convention: bands centered on θ̂ᶜ with SEs of the
+    # uncorrected OLS coefficients
+    s_bc = summarize(bc, HC1(); level = 0.90)
+    s_lp = summarize(lp_result, HC1(); level = 0.90)
+    @test s_bc.coef ≈ coefpath(bc)
+    @test s_bc.se == s_lp.se
+    @test (s_bc.upper .- s_bc.coef) ≈ (s_lp.upper .- s_lp.coef)
+
+    # Estimator/critical-value pairing flows through (t_B for EWC)
+    B = ewc_bandwidth(bc)
+    s_ewc = summarize(bc, EWC(B); level = 0.90)
+    tcrit = quantile(TDist(B), 0.95)
+    @test s_ewc.upper ≈ s_ewc.coef .+ tcrit .* s_ewc.se
+
+    # bc + vcov keeps the correction, changes only the attached estimator
+    bc2 = bc + LocalProjections.vcov(EWC(B))
+    @test bc2.c == bc.c && coefpath(bc2) ≈ coefpath(bc)
+
+    # as_irf_result centers on the corrected path and flags the metadata
+    irf = as_irf_result(bc; vcov_estimator = HC1(), coverage = [0.90])
+    @test vec(irf.data) ≈ coefpath(bc)
+    @test irf.metadata.bias_corrected === true
+end
+
+@testitem "biascorrect guards and edge cases" tags = [:biascorr, :api] begin
+    using LocalProjections
+    using DataFrames, StatsModels, Test, Random
+
+    Random.seed!(20260830)
+    n = 200
+    x = randn(n)
+    y = zeros(n)
+    for t in 2:n
+        y[t] = 0.6 * y[t - 1] + 0.5 * x[t] + randn()
+    end
+    df = DataFrame(y = y, x = x)
+
+    # Derived for OLS LP only
+    iv_result = lpiv(@formula(leads(y) ~ (x ~ x) + lags(y, 1)), df; horizon = 2)
+    @test_throws ArgumentError biascorrect(iv_result)
+
+    # Correction is defined for the shock's impulse response only
+    bc = biascorrect(lp(@formula(leads(y) ~ x + lags(y, 2)), df; horizon = 4))
+    @test_throws ArgumentError coefpath(bc; term = :y_lag1)
+
+    # Internal NaN gap → horizon-h sample is no longer the truncated
+    # horizon-0 sample (guide §3.2: T − h must be checked, not copied)
+    df_gap = copy(df)
+    df_gap.y[100] = NaN
+    lp_gap = lp(@formula(leads(y) ~ x + lags(y, 2)), df_gap; horizon = 4)
+    @test_throws ArgumentError biascorrect(lp_gap)
+
+    # Collinear controls → Σ̂₀ (near-)singular
+    df_col = copy(df)
+    df_col.z = 2 .* df.y
+    lp_col = lp(@formula(leads(y) ~ x + lags(y, 1) + lags(z, 1)), df_col;
+        horizon = 4)
+    @test_throws ArgumentError biascorrect(lp_col)
+
+    # Tautological h=0 (response == shock): θ̂₀ᶜ stays pinned at 1
+    lp_taut = lp(@formula(leads(x) ~ x + lags(y, 2)), df; horizon = 4)
+    @test lp_taut.tautological_h0
+    @test coefpath(biascorrect(lp_taut))[1] == 1.0
+
+    # No controls beyond intercept + shock: ĉ_j ≡ 1, recursion still runs
+    lp_min = lp(@formula(leads(y) ~ x), df; horizon = 4)
+    bc_min = biascorrect(lp_min)
+    @test all(bc_min.c .== 1.0)
+    @test coefpath(bc_min)[1] == coefpath(lp_min)[1]
+end

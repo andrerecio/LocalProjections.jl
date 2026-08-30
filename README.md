@@ -2,13 +2,13 @@
 
 [![CI](https://github.com/andrerecio/LocalProjections.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/andrerecio/LocalProjections.jl/actions/workflows/CI.yml) [![codecov.io](http://codecov.io/github/andrerecio/LocalProjections.jl/coverage.svg?branch=main)](http://codecov.io/github/andrerecio/LocalProjections.jl?branch=main) [![Aqua QA](https://raw.githubusercontent.com/JuliaTesting/Aqua.jl/master/badge.svg)](https://github.com/JuliaTesting/Aqua.jl) ![SciML Code Style](https://img.shields.io/static/v1?label=code%20style&message=SciML&color=9558b2&labelColor=389826) ![lifecycle](https://img.shields.io/badge/lifecycle-maturing-blue.svg)
 
-Impulse response functions by local projections (Jordà, 2005): horizon-specific linear regressions with a formula interface, robust and HAR inference, and instrumental-variable support.
+Impulse response functions by local projections (Jordà, 2005): horizon-specific linear regressions with a formula interface, robust and HAR inference, small-sample bias correction, and instrumental-variable support.
 
 ## Installation
 
 This fork of [gragusa/LocalProjections.jl](https://github.com/gragusa/LocalProjections.jl)
-extends the inference procedures (EWC HAR inference, with bias correction and
-bootstrap bands in progress):
+extends the inference procedures (EWC HAR inference and Herbst–Johannsen bias
+correction, with bootstrap bands in progress):
 
 ```julia
 using Pkg
@@ -76,6 +76,24 @@ cov_ewc = vcov(EWC(B), lp_result)
 se = stderror(cov_ewc; term = :shock)
 plot(lp_result, cov_ewc; term = :shock, levels = [0.90])
 ```
+
+### Bias correction
+
+`biascorrect` applies the Herbst–Johannsen (2024) small-sample correction to
+the impulse-response path (the "BCC" estimator). The persistence of the
+controls is estimated from the horizon-zero regression, and each horizon is
+corrected recursively through the already-corrected lower horizons:
+
+```julia
+bc = biascorrect(lp_result)         # OLS local projections only
+coefpath(bc)                        # corrected θ̂ᶜ path (θ̂₀ unchanged)
+summarize(bc, HC1(); level = 0.90)  # bands centered on θ̂ᶜ
+```
+
+Following the reference implementation (Montiel Olea, Plagborg-Møller, Qian &
+Wolf, 2025), the confidence bands are centered on the corrected path but use
+the standard errors of the *uncorrected* coefficients. `plot` and
+`as_irf_result` accept the corrected result anywhere a plain one is accepted.
 
 ## Instrumental variables
 
