@@ -13,8 +13,17 @@ using DataFrames
 using Random
 using StableRNGs
 
+# Optional: benchmark against Apple's Accelerate BLAS instead of OpenBLAS.
+# macOS only, so it is loaded on request rather than unconditionally:
+#     LP_ACCELERATE=1 julia --project=benchmark benchmark/run_asv.jl
+# Must be loaded before the packages whose linear algebra we are timing.
+if get(ENV, "LP_ACCELERATE", "0") == "1"
+    using AppleAccelerate
+end
+
 using LocalProjections
 using CovarianceMatrices
+using StatsModels    # @formula
 
 # ============================================================================
 # Data Generation
@@ -167,4 +176,49 @@ let rng = StableRNG(DEFAULT_SEED + 40)
     lp_result = lp(@formula(leads(y) ~ x + lag(w)), df; horizon = 24)
 
     SUITE["coefpath"]["h24"] = @benchmarkable coefpath($lp_result; term = :x)
+end
+
+# ----------------------------------------------------------------------------
+# Lag Selection and VAR Bootstrap Benchmarks
+# ----------------------------------------------------------------------------
+
+function generate_var_data(rng::AbstractRNG, n::Int)
+    shock = zeros(n)
+    y = zeros(n)
+    for t in 2:n
+        shock[t] = 0.3 * shock[t - 1] + randn(rng)
+        y[t] = 0.6 * y[t - 1] + 0.8 * shock[t] + randn(rng)
+    end
+    return DataFrame(shock = shock, y = y)
+end
+
+SUITE["lagselect"] = BenchmarkGroup()
+
+let rng = StableRNG(DEFAULT_SEED + 50)
+    df = generate_var_data(rng, 500)
+
+    SUITE["lagselect"]["aic_pmax10"] = @benchmarkable lagselect(
+        $df, [:shock, :y]; maxlags = 10)
+end
+
+SUITE["bootstrap"] = BenchmarkGroup()
+
+let rng = StableRNG(DEFAULT_SEED + 51)
+    df = generate_var_data(rng, 240)
+    m = lp(@formula(leads(y) ~ shock + lags(y, 4) + lags(shock, 4)), df; horizon = 20)
+
+    # One draw is the unit of work that dominates the bootstrap; keep nboot small
+    # so the suite stays fast under AirspeedVelocity.
+    SUITE["bootstrap"]["nboot100_h20"] = @benchmarkable varbootstrap(
+        $m, $df; vars = [:shock, :y], nlags = 4, nboot = 100,
+        rng = StableRNG(1))
+
+    SUITE["bootstrap"]["nboot100_h20_nocorrections"] = @benchmarkable varbootstrap(
+        $m, $df; vars = [:shock, :y], nlags = 4, nboot = 100,
+        rng = StableRNG(1), biascorrect = false, popecorrect = false)
+
+    b = varbootstrap(m, df; vars = [:shock, :y], nlags = 4, nboot = 100,
+        rng = StableRNG(1))
+    SUITE["bootstrap"]["summarize_hall_t"] = @benchmarkable summarize(
+        $b; level = 0.90, method = :hall_t)
 end
