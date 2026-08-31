@@ -1,18 +1,22 @@
 [deps]
 AirspeedVelocity = "1c8270ee-6884-45cc-9545-60fa71ec23e4"
+AppleAccelerate = "13e28ba4-7ad8-5781-acae-3021b1ed3924"
 BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
 CovarianceMatrices = "60f91f6f-d783-54cb-84f9-544141854719"
 DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
 LocalProjections = "42571009-22de-48df-b2d5-611d176495e8"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 StableRNGs = "860ef19b-820b-49d6-a774-d7a799459cd3"
+StatsModels = "3eaba693-59b7-5ba5-a881-562e759f1c8d"
 
 [sources]
 LocalProjections = {path = ".."}
 
 [compat]
 AirspeedVelocity = "0.6"
+AppleAccelerate = "0.7"
 BenchmarkTools = "1"
 CovarianceMatrices = "0.30"
 DataFrames = "1"
 StableRNGs = "1"
+StatsModels = "0.7"

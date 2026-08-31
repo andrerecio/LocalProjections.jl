@@ -4,6 +4,8 @@ export LocalProjection, LocalProjectionIV, LocalProjectionCovariance, IRFSummary
 export lp, lpiv, coefpath, stderror, vcov, summarize, first_stage, weakivtest
 export ewc_bandwidth
 export biascorrect, BiasCorrectedLP
+export lagselect, VARLagSelection, nlags
+export varbootstrap, LPBootstrap
 export WeakIVTestResult, FirstStageIV
 export lag, lead, cumul, CumulTerm, lags, leads, LeadTerm, anchor, AnchorTerm
 export as_irf_result, LocalProjectionIRFResult
@@ -21,8 +23,10 @@ using Regress: OLSMatrixEstimator, IVMatrixEstimator, ols, iv, TSLS, VcovSpec,
                WeakIVTestResult, FirstStageIV, lags, LagTerm,
                first_stage, weakivtest
 using CovarianceMatrices
+using Random: AbstractRNG, Xoshiro
+import Random
 using Statistics
-using LinearAlgebra: Symmetric, cond, factorize, tr
+using LinearAlgebra: I, Symmetric, cond, eigvals, factorize, kron, logdet, tr
 using Distributions
 using RecipesBase
 using ShiftedArrays: lag, lead
@@ -1772,6 +1776,796 @@ function vcov(estimator::CovarianceMatrices.AbstractAsymptoticVarianceEstimator,
 end
 
 # ============================================================================
+# Reduced-form VAR and lag-order selection
+# ============================================================================
+
+"""
+    _var_data(data, vars) -> Matrix{Float64}
+
+Materialize the VAR data matrix `Y` (`T × n`) from `vars`, in the given order.
+
+`missing` and `NaN` are rejected: the moving-block bootstrap simulates a
+complete series and the VAR recursion has no notion of a gap. This is also the
+safe side of issue LP-1 (`lp` drops missing rows *before* lags are built, so an
+internal gap would silently collapse the time axis).
+"""
+function _var_data(data::AbstractDataFrame, vars::AbstractVector{Symbol})
+    isempty(vars) && throw(ArgumentError("`vars` must name at least one variable"))
+    length(unique(vars)) == length(vars) ||
+        throw(ArgumentError("`vars` contains duplicate names"))
+    T = nrow(data)
+    Y = Matrix{Float64}(undef, T, length(vars))
+    for (j, v) in enumerate(vars)
+        hasproperty(data, v) ||
+            throw(ArgumentError("variable $v named in `vars` is not a column of the data"))
+        col = data[!, v]
+        any(ismissing, col) &&
+            throw(ArgumentError("column $v contains `missing`; the VAR bootstrap " *
+                                "requires a gap-free sample"))
+        @inbounds for t in 1:T
+            Y[t, j] = Float64(col[t])
+        end
+        any(isnan, view(Y, :, j)) &&
+            throw(ArgumentError("column $v contains `NaN`; the VAR bootstrap " *
+                                "requires a gap-free sample"))
+    end
+    return Y
+end
+
+"""
+    _var_ols(Y::AbstractMatrix{Float64}, p::Int)
+
+Least-squares reduced-form VAR(`p`) with intercept. Port of
+`_estim/var_estim.m` in `lp_var_nberma`.
+
+Returns a named tuple `(; c, A, U, Σu, T, Tu)` where `c` is the `n`-vector of
+intercepts, `A` is `n × n × p` with `A[:, :, l]` the coefficient matrix on
+``Y_{t-l}``, `U` is the `Tu × n` residual matrix, and
+
+```math
+\\widehat\\Sigma_u = \\frac{U'U}{T_u - (np + 1)},
+\\qquad T_u = T - p,
+```
+
+the denominator used by `var_estim.m`: effective observations minus the number
+of regressors per equation, intercept included.
+"""
+function _var_ols(Y::AbstractMatrix{Float64}, p::Int)
+    p >= 1 || throw(ArgumentError("the VAR lag length must be at least 1 (got $p)"))
+    T, n = size(Y)
+    Tu = T - p
+    k = n * p + 1
+    Tu > k || throw(ArgumentError(
+        "a VAR($p) on $n variables needs more than $k usable observations, " *
+        "but T - p = $Tu are available (T = $T)"))
+    X = Matrix{Float64}(undef, Tu, k)
+    @inbounds for l in 1:p, j in 1:n, t in 1:Tu
+        X[t, (l - 1) * n + j] = Y[p + t - l, j]
+    end
+    @inbounds X[:, end] .= 1.0
+    Yd = Y[(p + 1):T, :]
+    B = X \ Yd                       # k × n
+    U = Yd - X * B
+    Σu = (U' * U) ./ (Tu - k)
+    A = Array{Float64}(undef, n, n, p)
+    @inbounds for l in 1:p
+        A[:, :, l] = transpose(B[((l - 1) * n + 1):(l * n), :])
+    end
+    return (; c = Vector{Float64}(B[end, :]), A = A, U = Matrix{Float64}(U),
+        Σu = Matrix{Float64}(Σu), T = T, Tu = Tu)
+end
+
+"""
+    VARLagSelection
+
+Result of [`lagselect`](@ref): the AIC and BIC paths over `p = 1:maxlags` for a
+reduced-form VAR, and the selected lag order.
+
+Fields: `vars`, `maxlags`, `criterion`, `lags`, `aic`, `bic`, `selected`,
+`nobs`. Use [`nlags`](@ref) to get the selected order as an `Int`.
+"""
+struct VARLagSelection
+    vars::Vector{Symbol}
+    maxlags::Int
+    criterion::Symbol
+    lags::Vector{Int}
+    aic::Vector{Float64}
+    bic::Vector{Float64}
+    selected::Int
+    nobs::Int
+end
+
+"""
+    nlags(s::VARLagSelection) -> Int
+
+The lag order selected by [`lagselect`](@ref) under its `criterion`.
+"""
+nlags(s::VARLagSelection) = s.selected
+
+"""
+    lagselect(data, vars; maxlags=10, criterion=:aic) -> VARLagSelection
+
+Select the lag order of a reduced-form VAR in `vars` by an information
+criterion. Port of `_estim/ic_var.m` in `lp_var_nberma`, which is what the
+Montiel Olea, Plagborg-Møller, Qian & Wolf (2025) simulations use to set the
+lag length of both the local-projection controls and the bootstrap VAR.
+
+With ``n`` variables, ``T`` observations and ``\\widehat\\Sigma_p`` the
+residual covariance of a VAR(``p``),
+
+```math
+\\mathrm{AIC}(p) = \\log\\det\\widehat\\Sigma_p
+                 + \\frac{2\\,(n^2p + n)}{T - p_{\\max}},
+\\qquad
+\\mathrm{BIC}(p) = \\log\\det\\widehat\\Sigma_p
+                 + \\frac{(n^2p + n)\\log(T - p_{\\max})}{T - p_{\\max}}.
+```
+
+Two conventions are inherited deliberately from the reference and are *not*
+bugs: the penalty denominator is the fixed ``T - p_{\\max}`` for every ``p``, so
+the criteria are comparable across the grid, but ``\\widehat\\Sigma_p`` is
+estimated by `_var_ols` on the full sample (``T - p`` rows, with the
+``(T-p) - (np+1)`` degrees-of-freedom denominator) rather than on a common
+subsample. The grid starts at ``p = 1``; ``p = 0`` is not considered.
+
+Both criteria are always computed; `criterion` (`:aic` or `:bic`) only decides
+which one `selected` minimizes. A single order is chosen for the whole system —
+there is no per-horizon or per-equation selection.
+
+# Example
+```julia
+sel = lagselect(df, [:shock, :y]; maxlags = 10, criterion = :aic)
+nlags(sel)     # selected p, to be used in the LP formula and in `varbootstrap`
+```
+
+See also [`nlags`](@ref), [`varbootstrap`](@ref).
+"""
+function lagselect(data::AbstractDataFrame, vars::AbstractVector{Symbol};
+        maxlags::Integer = 10, criterion::Symbol = :aic)
+    criterion in (:aic, :bic) ||
+        throw(ArgumentError("`criterion` must be :aic or :bic (got :$criterion)"))
+    maxlags >= 1 || throw(ArgumentError("`maxlags` must be at least 1 (got $maxlags)"))
+    Y = _var_data(data, vars)
+    T, n = size(Y)
+    pmax = Int(maxlags)
+    denom = T - pmax
+    denom > 0 || throw(ArgumentError(
+        "`maxlags` = $pmax is not smaller than the sample size T = $T"))
+    aics = Vector{Float64}(undef, pmax)
+    bics = Vector{Float64}(undef, pmax)
+    for p in 1:pmax
+        v = _var_ols(Y, p)
+        ld = logdet(Symmetric(v.Σu))
+        k = n^2 * p + n
+        aics[p] = ld + 2 * k / denom
+        bics[p] = ld + k * log(denom) / denom
+    end
+    sel = argmin(criterion === :aic ? aics : bics)
+    return VARLagSelection(collect(vars), pmax, criterion, collect(1:pmax),
+        aics, bics, sel, T)
+end
+
+function lagselect(data, vars::AbstractVector{Symbol}; kwargs...)
+    lagselect(DataFrame(data), vars; kwargs...)
+end
+
+function DataFrames.DataFrame(s::VARLagSelection)
+    DataFrame(lags = s.lags, aic = s.aic, bic = s.bic)
+end
+
+function Base.show(io::IO, s::VARLagSelection)
+    print(io, "VARLagSelection(criterion=:", s.criterion, ", selected=", s.selected, ")")
+end
+
+function Base.show(io::IO, ::MIME"text/plain", s::VARLagSelection)
+    data = (; Lags = s.lags, AIC = s.aic, BIC = s.bic)
+    labels = ["Lags", "AIC", "BIC"]
+    chosen = s.criterion === :aic ? 2 : 3
+    hl = TextHighlighter(
+        (d, i, j) -> s.lags[i] == s.selected && j == chosen,
+        crayon"bold"
+    )
+    title = "VAR lag-order selection (ic_var): " *
+            join(string.(s.vars), ", ") *
+            "  |  T = $(s.nobs), p = 1:$(s.maxlags)"
+    ioc = IOContext(io, :color => true)
+    pretty_table(ioc, data;
+        column_labels = labels,
+        title = title,
+        highlighters = [hl],
+        formatters = [fmt__round(4, [2, 3])],
+        alignment = [:r, :r, :r],
+        table_format = TextTableFormat(
+            borders = text_table_borders__unicode_rounded))
+    println(io, "Selected by :", s.criterion, ": p = ", s.selected)
+    return nothing
+end
+
+# ============================================================================
+# VAR residual moving-block bootstrap (Hall percentile-t)
+# ============================================================================
+
+"""
+    _pope_biascorrect(A, Σu, T) -> (A_corrected, δ)
+
+Pope (1990, eq. 9) analytical bias correction of the VAR slope matrices. Port
+of `_estim/var_biascorr.m` in `lp_var_nberma`.
+
+With companion matrix ``\\mathcal A``, ``G = \\mathrm{blkdiag}(\\Sigma_u, 0)``
+and ``\\Gamma_0`` solving the discrete Lyapunov equation
+``\\Gamma_0 = \\mathcal A\\Gamma_0\\mathcal A' + G``,
+
+```math
+M = (I-\\mathcal A')^{-1}
+  + \\mathcal A'(I-\\mathcal A'\\mathcal A')^{-1}
+  + \\sum_{\\lambda\\in\\mathrm{eig}(\\mathcal A)}\\lambda(I-\\lambda\\mathcal A')^{-1},
+\\qquad b = G\\,M\\,\\Gamma_0^{-1},
+\\qquad \\mathcal A^{c} = \\mathcal A + b/T.
+```
+
+Two details are easy to get wrong and are deliberate here:
+
+  - the middle term is ``\\mathcal A'(I - \\mathcal A'\\mathcal A')^{-1}``, i.e.
+    the square of the *transpose*, not ``\\mathcal A'\\mathcal A``;
+  - `T` is the **full** row count of the VAR data, not the number `Tu = T - p`
+    of fitted residuals.
+
+Two stability safeguards, both from the reference: if the OLS companion matrix
+already has an eigenvalue outside the unit circle the correction is skipped
+entirely (returning `δ = 0`); otherwise `δ` is lowered from 1 in steps of 0.01
+until ``\\mathcal A + \\delta b/T`` is stable. Requesting the correction
+therefore does not guarantee a full correction — inspect the returned `δ`.
+
+Validated against Pope's closed form for the AR(1) case, where `b` must equal
+``1 + 3\\rho`` exactly.
+"""
+function _pope_biascorrect(A::AbstractMatrix{Float64}, Σu::AbstractMatrix{Float64},
+        T::Real)
+    n, np = size(A)
+    Acomp = np == n ? Matrix{Float64}(A) :
+            [Matrix{Float64}(A); Matrix{Float64}(I, np - n, np - n) zeros(np - n, n)]
+    maximum(abs, eigvals(Acomp)) > 1 && return (Matrix{Float64}(A), 0.0)
+    G = zeros(Float64, np, np)
+    G[1:n, 1:n] = Σu
+    # Discrete Lyapunov solve: vec(𝒜 Γ 𝒜') = (𝒜 ⊗ 𝒜) vec(Γ).
+    Γ0 = reshape((I - kron(Acomp, Acomp)) \ vec(G), np, np)
+    At = Matrix{Float64}(transpose(Acomp))
+    M = inv(I - At) + At * inv(I - At * At)
+    for λ in eigvals(Acomp)
+        M = M + λ * inv(I - λ * At)
+    end
+    b = real.(G * (M / Γ0))
+    Acorr = Acomp + b ./ T
+    δ = 1.0
+    while maximum(abs, eigvals(Acorr)) > 1 && δ > 0
+        δ -= 0.01
+        Acorr = Acomp + δ .* b ./ T
+    end
+    return (Matrix{Float64}(Acorr[1:n, :]), δ)
+end
+
+"""
+    _pope_biascorrect(A::Array{Float64,3}, Σu, T)
+
+Method taking the `n × n × p` slope array produced by [`_var_ols`](@ref) and
+returning a corrected array of the same shape.
+"""
+function _pope_biascorrect(A::Array{Float64, 3}, Σu::AbstractMatrix{Float64}, T::Real)
+    n, _, p = size(A)
+    flat = Matrix{Float64}(undef, n, n * p)
+    @inbounds for l in 1:p
+        flat[:, ((l - 1) * n + 1):(l * n)] = A[:, :, l]
+    end
+    corrected, δ = _pope_biascorrect(flat, Σu, T)
+    out = Array{Float64}(undef, n, n, p)
+    @inbounds for l in 1:p
+        out[:, :, l] = corrected[:, ((l - 1) * n + 1):(l * n)]
+    end
+    return (out, δ)
+end
+
+"""
+    _var_impact(U, innov_index) -> Vector{Float64}
+
+Unit-impact structural shock vector. Port of the Cholesky step in
+`_estim/var_ir_estim.m`, which obtains it as the numerically equivalent
+regression of all residual columns on columns `1:innov_index` without a
+constant, keeping the coefficient on column `innov_index`.
+
+For `innov_index == 1` this reduces to ``\\Sigma_u[:,1]/\\Sigma_u[1,1]``, i.e.
+``L_{:,1}/L_{11}`` for the lower-triangular Cholesky factor `L` — the impact
+vector normalized to a unit change in the shock. It is always computed from the
+**original OLS** residuals, never from Pope-corrected quantities.
+"""
+function _var_impact(U::AbstractMatrix{Float64}, innov_index::Int)
+    Z = U[:, 1:innov_index]
+    B = Z \ U                       # innov_index × n
+    return Vector{Float64}(B[innov_index, :])
+end
+
+"""
+    _var_irf(A, ν, H) -> Matrix{Float64}
+
+VAR-implied structural impulse responses, `n × (H+1)`. Port of
+`_estim/var_ir.m`: the recursion
+``\\Theta_h = \\sum_{l=1}^{\\min(h,p)} A_l \\Theta_{h-l}`` with
+``\\Theta_0 = I``, returning ``\\Theta_h \\nu`` at each horizon. Equivalent to
+``e_r' C^h b`` on the companion form but cheaper.
+"""
+function _var_irf(A::Array{Float64, 3}, ν::AbstractVector{Float64}, H::Int)
+    n, _, p = size(A)
+    Θ = Vector{Matrix{Float64}}(undef, H + 1)
+    Θ[1] = Matrix{Float64}(I, n, n)
+    out = Matrix{Float64}(undef, n, H + 1)
+    out[:, 1] = ν
+    for h in 1:H
+        M = zeros(Float64, n, n)
+        for l in 1:min(h, p)
+            M += A[:, :, l] * Θ[h - l + 1]
+        end
+        Θ[h + 1] = M
+        out[:, h + 1] = M * ν
+    end
+    return out
+end
+
+"""
+    _position_means(U, ℓ) -> Matrix{Float64}
+
+Position-specific residual means for the moving-block bootstrap, `ℓ × n`.
+
+This is the **sliding-window** mean
+
+```math
+\\bar u_s = \\frac{1}{T_u-\\ell+1}\\sum_{r=0}^{T_u-\\ell}\\widehat u_{s+r},
+\\qquad s = 1,\\dots,\\ell,
+```
+
+which is what the `filter` trick in `_estim/var_boot.m` computes, and what the
+Brüggemann–Jentsch–Trenkler procedure requires: position `s` averages over
+exactly the `Tu - ℓ + 1` values it can take across the equiprobable block
+starts, so the resampled residuals have mean zero by construction.
+
+Note this is *not* the stride-`ℓ` mean `mean(u[s:ℓ:end])` used by
+`MacroEconometricTools.bootstrap_irf_block`; the two differ substantially
+(on `Tu = 236, ℓ = 20` the sliding mean averages 217 terms, the stride mean 11).
+Subtracting only the overall residual mean is not equivalent either.
+"""
+function _position_means(U::AbstractMatrix{Float64}, ℓ::Int)
+    Tu, n = size(U)
+    means = Matrix{Float64}(undef, ℓ, n)
+    @inbounds for s in 1:ℓ, j in 1:n
+
+        means[s, j] = mean(view(U, s:(Tu - ℓ + s), j))
+    end
+    return means
+end
+
+"""
+    _mbb_residuals!(dest, U, means, starts)
+
+Fill `dest` (`Tu × n`) with one moving-block bootstrap draw of the VAR
+residuals. Port of the block-resampling branch of `_estim/var_boot.m`:
+`length(starts)` blocks of length `ℓ` are laid down end to end, each taken from
+offset `starts[b] ∈ {0,…,Tu-ℓ}`, recentered by the position-specific `means`,
+and the concatenation is truncated to `Tu` rows.
+"""
+function _mbb_residuals!(dest::AbstractMatrix{Float64}, U::AbstractMatrix{Float64},
+        means::AbstractMatrix{Float64}, starts::AbstractVector{Int})
+    Tu, n = size(U)
+    ℓ = size(means, 1)
+    @inbounds for (b, offset) in enumerate(starts)
+        base = (b - 1) * ℓ
+        for s in 1:ℓ
+            row = base + s
+            row > Tu && break
+            for j in 1:n
+                dest[row, j] = U[offset + s, j] - means[s, j]
+            end
+        end
+    end
+    return dest
+end
+
+"""
+    _var_simulate(c, A, Ustar, Yinit) -> Matrix{Float64}
+
+Iterate the fitted VAR forward from the drawn initial conditions. Port of
+`_estim/var_sim.m`. `Yinit` supplies the first `p` rows verbatim and the
+remaining `size(Ustar, 1)` rows follow
+``Y_t^* = c + \\sum_{l=1}^{p} A_l Y_{t-l}^* + u_t^*``, so the returned matrix
+has `p + size(Ustar, 1)` rows.
+"""
+function _var_simulate(c::AbstractVector{Float64}, A::Array{Float64, 3},
+        Ustar::AbstractMatrix{Float64}, Yinit::AbstractMatrix{Float64})
+    n, _, p = size(A)
+    Tu = size(Ustar, 1)
+    T = size(Yinit, 1) + Tu
+    Y = Matrix{Float64}(undef, T, n)
+    @inbounds Y[1:size(Yinit, 1), :] = Yinit
+    @inbounds for t in (p + 1):T
+        for j in 1:n
+            Y[t, j] = c[j] + Ustar[t - p, j]
+        end
+        for l in 1:p, i in 1:n, j in 1:n
+            Y[t, j] += A[j, i, l] * Y[t - l, i]
+        end
+    end
+    return Y
+end
+
+"""
+    _lhs_kind(formula) -> Symbol
+
+Which response transform the local-projection formula uses: `:leads`, `:cumul`,
+`:anchor`, or `:unknown`. Determines how the VAR-implied pseudo-truth must be
+accumulated across horizons.
+"""
+function _lhs_kind(formula::FormulaTerm)
+    lhs = formula.lhs
+    if lhs isa FunctionTerm
+        nm = nameof(lhs.f)
+        nm === :leads && return :leads
+        nm === :cumul && return :cumul
+        (nm === :anchor || nm === :|) && return :anchor
+    end
+    return :unknown
+end
+
+_maybe_biascorrect(m::LocalProjection, apply::Bool) = apply ? biascorrect(m) : m
+
+"""
+    LPBootstrap
+
+Result of [`varbootstrap`](@ref): a local-projection impulse response together
+with the VAR residual moving-block bootstrap distribution used to build
+percentile-`t` bands.
+
+Three centers are involved and must not be confused (guide §4.6, Step 7):
+
+| Object | Center used |
+|---|---|
+| Reported real-data response (`theta`) | bias-corrected LP ``\\widehat\\theta_h^c`` |
+| Bootstrap responses (`theta_boot`) | bias-corrected bootstrap LP |
+| Center of the bootstrap `t`-statistic | Pope-corrected VAR pseudo-truth (`pseudo_truth`) |
+
+`se` holds the real-data HC1 standard errors of the **uncorrected** OLS
+coefficients — the reference never recomputes them after bias correction.
+`pope_delta` records the Pope safeguard outcome (`1.0` full correction, `0.0`
+skipped because the OLS companion was already explosive, in between
+attenuated); it is `NaN` when `popecorrect = false`, since no Pope step ran.
+
+Build bands with [`summarize`](@ref); plot with `plot(b; levels = [0.68, 0.90])`.
+"""
+struct LPBootstrap{L <: LPEstimate}
+    lp::L
+    term::Symbol
+    theta::Vector{Float64}
+    se::Vector{Float64}
+    pseudo_truth::Vector{Float64}
+    theta_boot::Matrix{Float64}
+    se_boot::Matrix{Float64}
+    vars::Vector{Symbol}
+    nlags::Int
+    blocklength::Int
+    nboot::Int
+    nfail::Int
+    biascorrected::Bool
+    popecorrected::Bool
+    pope_delta::Float64
+end
+
+function Base.getproperty(b::LPBootstrap, name::Symbol)
+    name in fieldnames(LPBootstrap) && return getfield(b, name)
+    return getproperty(getfield(b, :lp), name)
+end
+
+function Base.propertynames(b::LPBootstrap)
+    (fieldnames(LPBootstrap)..., propertynames(getfield(b, :lp))...)
+end
+
+function Base.show(io::IO, b::LPBootstrap)
+    print(io, "LPBootstrap(horizon=0:", length(b.theta) - 1, ", term=", b.term,
+        ", nboot=", b.nboot, ")")
+end
+
+function Base.show(io::IO, ::MIME"text/plain", b::LPBootstrap)
+    println(io, "LPBootstrap (VAR residual moving-block bootstrap)")
+    println(io, "  Term:          ", b.term)
+    println(io, "  Horizons:      0:", length(b.theta) - 1)
+    println(io, "  VAR variables: ", join(string.(b.vars), ", "),
+        "   (p = ", b.nlags, ")")
+    println(io, "  Draws:         ", b.nboot, " (block length ", b.blocklength,
+        b.nfail > 0 ? ", $(b.nfail) failed)" : ")")
+    println(io, "  LP correction: ",
+        b.biascorrected ? "Herbst–Johannsen" : "none (uncorrected OLS)")
+    println(io, "  VAR DGP:       ",
+        b.popecorrected ?
+        "Pope-corrected slopes (δ = $(round(b.pope_delta, digits = 2)))" :
+        "OLS slopes")
+    print(io, "  Bands:         pointwise, via summarize(b; level, method)")
+    return nothing
+end
+
+"""
+    coefpath(b::LPBootstrap; term=b.term) -> Vector{Float64}
+
+The real-data impulse response path carried by the bootstrap result — the
+bias-corrected path when `varbootstrap` was called with `biascorrect = true`.
+"""
+function coefpath(b::LPBootstrap; term::Symbol = b.term)
+    term === b.term || throw(ArgumentError(
+        "this bootstrap was run for term $(b.term); re-run `varbootstrap` " *
+        "to bootstrap a different coefficient"))
+    return copy(b.theta)
+end
+
+"""
+    varbootstrap(lp_result, data; vars, nlags, kwargs...) -> LPBootstrap
+
+VAR residual moving-block bootstrap with Hall percentile-`t` bands for a local
+projection, following Montiel Olea, Plagborg-Møller, Qian & Wolf (2025). See
+`docs/src/inference_procedures_guide.md` §4.
+
+A reduced-form VAR in `vars` (with the shock ordered so that a Cholesky
+identification recovers it) is fitted and used as the bootstrap DGP. In each
+draw the VAR residuals are resampled in overlapping blocks with
+position-specific recentering, the VAR is iterated from randomly drawn
+contiguous initial conditions, and **the complete local projection is
+re-estimated** on the artificial sample.
+
+# Required keywords
+  - `vars`: the VAR data vector, in identification order. It must contain the
+    shock and every variable the LP formula refers to, otherwise the LP cannot
+    be rebuilt in each draw.
+  - `nlags`: VAR lag length `p`. Choose it with [`lagselect`](@ref) or fix it.
+
+# Optional keywords
+  - `nboot = 1000`: bootstrap replications.
+  - `blocklength`: block length ``\\ell``; defaults to
+    ``\\lceil 5.03\\,T^{1/4}\\rceil`` on the VAR sample, the reference rule.
+  - `biascorrect = true`: apply the Herbst–Johannsen correction to the
+    real-data **and** every bootstrap LP path.
+  - `popecorrect = true`: use Pope-corrected VAR slopes for the bootstrap DGP
+    and the pseudo-truth.
+  - `rng`, `threaded = false`: see below.
+
+The two `true` defaults together give the complete procedure the reference
+recommends. Setting both to `false` reproduces the simpler variant (OLS VAR
+DGP, uncorrected LP) described in guide §4.5.
+
+# Reproducibility
+Per-draw seeds are drawn from `rng` sequentially *before* the loop, so output
+is bit-identical for `threaded = true` and `threaded = false` and independent
+of the thread count. Pass a seeded `rng` and record it; also record `nboot`,
+`nlags` and `blocklength` when reporting results.
+
+# Notes
+Bands are **pointwise across horizons**, not simultaneous. Draws in which the
+LP cannot be estimated are recorded in `nfail` and excluded from the quantiles.
+Only OLS local projections are supported, and the response transform must be
+`leads` or `cumul`.
+
+# Example
+```julia
+sel = lagselect(df, [:shock, :y]; maxlags = 10)
+m = lp(@formula(leads(y) ~ shock + lags(y, 4) + lags(shock, 4)), df; horizon = 20)
+b = varbootstrap(m, df; vars = [:shock, :y], nlags = nlags(sel), nboot = 1000)
+summarize(b; level = 0.90)
+```
+
+See also [`summarize`](@ref), [`lagselect`](@ref), [`biascorrect`](@ref).
+"""
+function varbootstrap(lp_result::LocalProjection, data::AbstractDataFrame;
+        vars::AbstractVector{Symbol},
+        nlags::Integer,
+        nboot::Integer = 1000,
+        blocklength::Union{Integer, Nothing} = nothing,
+        biascorrect::Bool = true,
+        popecorrect::Bool = true,
+        rng::AbstractRNG = Random.default_rng(),
+        threaded::Bool = false)
+    nboot >= 1 || throw(ArgumentError("`nboot` must be at least 1 (got $nboot)"))
+    p = Int(nlags)
+
+    varlist = collect(vars)
+    innov_index = findfirst(isequal(lp_result.shock), varlist)
+    innov_index === nothing && throw(ArgumentError(
+        "the shock $(lp_result.shock) is not in `vars` = $(varlist); the VAR " *
+        "data vector must contain the shock, in identification order"))
+    resp_index = findfirst(isequal(lp_result.response), varlist)
+    resp_index === nothing && throw(ArgumentError(
+        "the response $(lp_result.response) is not in `vars` = $(varlist)"))
+
+    needed = StatsModels.termvars(lp_result.base_formula)
+    missing_vars = setdiff(unique(needed), varlist)
+    isempty(missing_vars) || throw(ArgumentError(
+        "the local projection formula refers to $(missing_vars), which are not " *
+        "in `vars`; every variable the LP needs must be simulated by the VAR"))
+
+    kind = _lhs_kind(lp_result.base_formula)
+    kind in (:leads, :cumul) || throw(ArgumentError(
+        "the VAR bootstrap supports `leads` and `cumul` responses; got " *
+        "$(kind === :anchor ? "an anchored response" : "an unrecognized LHS")"))
+
+    Y = _var_data(data, varlist)
+    T = size(Y, 1)
+    v = _var_ols(Y, p)
+    ℓ = blocklength === nothing ? ceil(Int, 5.03 * T^(1 / 4)) : Int(blocklength)
+    (1 <= ℓ <= v.Tu) || throw(ArgumentError(
+        "`blocklength` = $ℓ must be between 1 and the number of VAR residuals " *
+        "T - p = $(v.Tu)"))
+
+    A_dgp, δ = popecorrect ? _pope_biascorrect(v.A, v.Σu, T) : (v.A, NaN)
+
+    H = lp_result.horizon
+    ν = _var_impact(v.U, innov_index)
+    irf_var = _var_irf(A_dgp, ν, H)
+    pseudo = Vector{Float64}(irf_var[resp_index, :])
+    kind === :cumul && (pseudo = cumsum(pseudo))
+
+    real_model = _maybe_biascorrect(lp_result, biascorrect)
+    term = lp_result.shock
+    theta = coefpath(real_model; term = term)
+    se = stderror(vcov(HC1(), lp_result); term = term)
+
+    means = _position_means(v.U, ℓ)
+    nblocks = cld(v.Tu, ℓ)
+    n_init = T - v.Tu
+    seeds = rand(rng, UInt64, nboot)
+
+    theta_boot = fill(NaN, nboot, H + 1)
+    se_boot = fill(NaN, nboot, H + 1)
+    failures = zeros(Int, nboot)
+
+    function run_draw(b::Int)
+        try
+            drng = Xoshiro(seeds[b])
+            Ustar = Matrix{Float64}(undef, v.Tu, length(varlist))
+            starts = [rand(drng, 0:(v.Tu - ℓ)) for _ in 1:nblocks]
+            _mbb_residuals!(Ustar, v.U, means, starts)
+            init = rand(drng, 1:(v.Tu + 1))
+            Yinit = Y[init:(init + n_init - 1), :]
+            Yb = _var_simulate(v.c, A_dgp, Ustar, Yinit)
+            dfb = DataFrame(Yb, varlist)
+            mb = lp(lp_result.base_formula, dfb; horizon = H, shock = term)
+            cb = vcov(HC1(), mb)
+            θb = coefpath(_maybe_biascorrect(mb, biascorrect); term = term)
+            sb = stderror(cb; term = term)
+            @inbounds for h in 1:(H + 1)
+                theta_boot[b, h] = θb[h]
+                se_boot[b, h] = sb[h]
+            end
+        catch
+            failures[b] = 1
+        end
+        return nothing
+    end
+
+    if threaded
+        Threads.@threads for b in 1:nboot
+            run_draw(b)
+        end
+    else
+        for b in 1:nboot
+            run_draw(b)
+        end
+    end
+
+    nfail = sum(failures)
+    if nfail > 0.05 * nboot
+        @warn "VAR bootstrap: $nfail of $nboot draws failed and are excluded " *
+              "from the quantiles; the bands may be unreliable."
+    end
+    minvalid = minimum(count(isfinite, view(theta_boot, :, h)) for h in 1:(H + 1))
+    if minvalid < 100
+        @warn "VAR bootstrap: some horizon has only $minvalid usable draws; " *
+              "bootstrap quantiles are noisy below ~100 draws."
+    end
+
+    return LPBootstrap(real_model, term, theta, se, pseudo, theta_boot, se_boot,
+        varlist, p, ℓ, Int(nboot), nfail, biascorrect, popecorrect, δ)
+end
+
+function varbootstrap(::LocalProjectionIV, ::AbstractDataFrame; kwargs...)
+    throw(ArgumentError(
+        "the VAR residual moving-block bootstrap is defined for OLS local " *
+        "projections and is not available for LocalProjectionIV"))
+end
+
+"""
+    _boot_interval(b, h, α, method) -> (lower, upper)
+
+One pointwise bootstrap interval at horizon index `h`. Port of
+`_estim/boot_ci.m`, which returns all three constructions:
+
+```math
+t^*_{b,h} = \\frac{\\widehat\\theta^*_{b,h} - \\theta^{\\mathrm{pseudo}}_h}
+                  {\\widehat{se}^*_{b,h}}
+```
+
+  - `:hall_t` (Hall percentile-`t`, recommended):
+    ``[\\widehat\\theta_h - \\widehat{se}_h q^*_{h,1-\\alpha/2},\\;
+       \\widehat\\theta_h - \\widehat{se}_h q^*_{h,\\alpha/2}]`` — note the
+    quantile reversal, which comes from inverting the studentized inequality;
+  - `:hall`: ``\\widehat\\theta_h + \\theta^{\\mathrm{pseudo}}_h`` minus the
+    reversed quantiles of the bootstrap responses;
+  - `:efron`: the plain ``[\\alpha/2, 1-\\alpha/2]`` quantiles of the draws.
+
+Intervals need not be symmetric around the point estimate. Quantiles use
+`Statistics.quantile` (type 7), which is close to but not bit-identical with
+MATLAB's `quantile`.
+"""
+function _boot_interval(b::LPBootstrap, h::Int, α::Float64, method::Symbol)
+    θs = view(b.theta_boot, :, h)
+    if b.se[h] == 0
+        # Tautological horizon (response === shock at h = 0): degenerate band.
+        return (b.theta[h], b.theta[h])
+    end
+    if method === :hall_t
+        ses = view(b.se_boot, :, h)
+        ts = Float64[]
+        @inbounds for i in eachindex(θs)
+            if isfinite(θs[i]) && isfinite(ses[i]) && ses[i] > 0
+                push!(ts, (θs[i] - b.pseudo_truth[h]) / ses[i])
+            end
+        end
+        isempty(ts) && throw(ErrorException(
+            "no usable bootstrap draws at horizon $(h - 1); cannot form a " *
+            "percentile-t interval"))
+        return (b.theta[h] - b.se[h] * quantile(ts, 1 - α / 2),
+            b.theta[h] - b.se[h] * quantile(ts, α / 2))
+    end
+    vals = Float64[x for x in θs if isfinite(x)]
+    isempty(vals) && throw(ErrorException(
+        "no usable bootstrap draws at horizon $(h - 1)"))
+    ql = quantile(vals, α / 2)
+    qu = quantile(vals, 1 - α / 2)
+    method === :efron && return (ql, qu)
+    # :hall
+    return (b.theta[h] + b.pseudo_truth[h] - qu,
+        b.theta[h] + b.pseudo_truth[h] - ql)
+end
+
+"""
+    summarize(b::LPBootstrap; level=0.90, method=:hall_t, scale=1.0) -> IRFSummary
+
+Bootstrap confidence bands for a local projection. `method` selects the
+interval construction: `:hall_t` (Hall percentile-`t`, the recommended one),
+`:hall`, or `:efron` — see [`_boot_interval`](@ref).
+
+The bands are **pointwise across horizons**, not simultaneous, and are
+generally asymmetric around the point estimate. Note that a percentile-`t` or
+Hall interval need not *contain* the point estimate: both correct for bias, so
+when the bootstrap `t`-distribution is shifted the whole interval can sit to
+one side of ``\\widehat\\theta_h``. That is a property of the method, not a
+defect. The reported `coef` is the
+real-data path (bias-corrected when `varbootstrap` was run with
+`biascorrect = true`) and `se` the HC1 standard errors of the uncorrected
+coefficients.
+"""
+function summarize(b::LPBootstrap; level::Real = 0.90, method::Symbol = :hall_t,
+        scale::Real = 1.0)
+    method in (:hall_t, :hall, :efron) || throw(ArgumentError(
+        "`method` must be :hall_t, :hall or :efron (got :$method)"))
+    level_f = Float64(level)
+    (0 < level_f < 1) ||
+        throw(ArgumentError("`level` must be in (0, 1) (got $level_f)"))
+    scale_f = Float64(scale)
+    α = 1 - level_f
+    H = length(b.theta) - 1
+    lower = Vector{Float64}(undef, H + 1)
+    upper = Vector{Float64}(undef, H + 1)
+    for h in 1:(H + 1)
+        lo, hi = _boot_interval(b, h, α, method)
+        lower[h] = lo * scale_f
+        upper[h] = hi * scale_f
+    end
+    return IRFSummary(b.term, level_f, scale_f, collect(0:H),
+        b.theta .* scale_f, b.se .* scale_f, lower, upper)
+end
+
+# ============================================================================
 # Critical values (fixed-smoothing HAR inference)
 # ============================================================================
 
@@ -1969,6 +2763,59 @@ end
     IRFPlot(lp, cov, term, Float64.(levels))
 end
 
+"""
+    BootstrapIRFPlot
+
+Internal wrapper for dispatching the plot recipe on [`LPBootstrap`](@ref).
+Users should call `plot(b; levels, method)` directly.
+"""
+struct BootstrapIRFPlot{B <: LPBootstrap}
+    boot::B
+    levels::Vector{Float64}
+    method::Symbol
+end
+
+@recipe function f(wrapper::BootstrapIRFPlot)
+    b = wrapper.boot
+    beta = b.theta
+    horizons = collect(0:(length(beta) - 1))
+
+    sorted_levels = sort(wrapper.levels; rev = true)
+    for level in sorted_levels
+        (level <= 0 || level >= 1) && throw(ArgumentError("levels must be in (0, 1)"))
+    end
+    bands = [summarize(b; level = lv, method = wrapper.method) for lv in sorted_levels]
+
+    xlabel --> "Horizon"
+    ylabel --> String(b.term)
+    label --> "IRF"
+    linewidth --> 2
+    fillalpha --> 0.3
+    legend --> :best
+
+    # Bootstrap bands are asymmetric, so the ribbon takes a (below, above) pair.
+    if length(sorted_levels) > 1
+        for (idx, s) in enumerate(bands[2:end])
+            @series begin
+                ribbon := (beta .- s.lower, s.upper .- beta)
+                fillalpha := 0.3 + 0.15 * idx
+                label := ""
+                linewidth := 0
+                linecolor := :transparent
+                horizons, beta
+            end
+        end
+    end
+
+    widest = bands[1]
+    ribbon --> (beta .- widest.lower, widest.upper .- beta)
+    return horizons, beta
+end
+
+@recipe function f(b::LPBootstrap; levels = [0.90], method = :hall_t)
+    BootstrapIRFPlot(b, Float64.(levels), method)
+end
+
 # ============================================================================
 # MacroEconometricTools Integration - LocalProjectionIRFResult Conversion
 # ============================================================================
@@ -2067,6 +2914,63 @@ function as_irf_result(lp::LPEstimate;
         fs_diagnostics = [first_stage(lp, h) for h in 0:(H - 1)]
         meta = (meta..., is_iv = true, first_stage = fs_diagnostics)
     end
+
+    return LocalProjectionIRFResult{T, typeof(data)}(
+        data, stderr_arr, lower, upper, coverage, meta
+    )
+end
+
+"""
+    as_irf_result(b::LPBootstrap; term=b.term, coverage=[0.68, 0.90], method=:hall_t)
+
+Convert a [`LPBootstrap`](@ref) to a `LocalProjectionIRFResult`, carrying the
+bootstrap bands rather than normal-approximation ones.
+
+The bands are those of [`summarize`](@ref) under `method`, so they are
+asymmetric and **pointwise**. `stderr` holds the real-data HC1 standard errors
+of the uncorrected coefficients — the reference convention — which are *not*
+what the bands are built from. The metadata records `bootstrap = true` along
+with the draw count, block length, VAR lag length, failed draws and which
+corrections were applied.
+"""
+function as_irf_result(b::LPBootstrap;
+        term::Symbol = b.term,
+        coverage::Vector{Float64} = [0.68, 0.90],
+        method::Symbol = :hall_t)
+    term === b.term || throw(ArgumentError(
+        "this bootstrap was run for term $(b.term), not $term"))
+    T = Float64
+    beta = coefpath(b; term = term)
+    H = length(beta)
+    horizons = 0:(H - 1)
+    resp = b.response
+
+    _ax(v) = AxisArray(
+        reshape(collect(T, v), 1, 1, H),
+        Axis{:response}([resp]),
+        Axis{:shock}([term]),
+        Axis{:horizon}(horizons)
+    )
+
+    data = _ax(beta)
+    stderr_arr = _ax(b.se)
+    bands = [summarize(b; level = c, method = method) for c in coverage]
+    lower = [_ax(s.lower) for s in bands]
+    upper = [_ax(s.upper) for s in bands]
+
+    meta = (horizon = H - 1,
+        formula = b.base_formula,
+        term = term,
+        bootstrap = true,
+        bootstrap_method = method,
+        nboot = b.nboot,
+        nfail = b.nfail,
+        blocklength = b.blocklength,
+        var_lags = b.nlags,
+        var_variables = b.vars,
+        bias_corrected = b.biascorrected,
+        pope_corrected = b.popecorrected,
+        pope_delta = b.pope_delta)
 
     return LocalProjectionIRFResult{T, typeof(data)}(
         data, stderr_arr, lower, upper, coverage, meta
