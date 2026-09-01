@@ -6,24 +6,56 @@ on:
       - master
 
 permissions:
-  pull-requests: write
+  contents: read
 
 jobs:
   benchmark:
     runs-on: ubuntu-latest
-    # AirspeedVelocity resolves the package in fresh comparison environments,
-    # where the unregistered [sources] git deps (Regress.jl,
-    # MacroEconometricTools.jl) are unsatisfiable on this fork — informative
-    # only, never green until those deps are registered.
-    continue-on-error: true
     steps:
+      # Full history: benchpkg installs the base and head commits from this
+      # checkout, so both must be present locally.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: julia-actions/setup-julia@v2
         with:
           version: '1'
       - uses: julia-actions/cache@v2
+      - name: Install AirspeedVelocity
+        run: |
+          julia -e 'using Pkg; Pkg.add(name = "AirspeedVelocity", version = "0.6"); Pkg.build("AirspeedVelocity")'
+          echo "$HOME/.julia/bin" >> "$GITHUB_PATH"
+      # The stock AirspeedVelocity action installs the package from its URL into
+      # a bare environment, where the unregistered [sources] dependencies
+      # (Regress.jl, MacroEconometricTools.jl) cannot be resolved. Calling
+      # benchpkg with --path makes it add the [sources] entries first, and
+      # --script skips the bare-environment download of the benchmark file.
+      # The script's own dependencies go in via --add.
       - name: Run benchmarks
-        uses: MilesCranmer/AirspeedVelocity.jl@action-v1
+        env:
+          JULIA_NUM_THREADS: 2
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          mkdir -p asv-results
+          benchpkg LocalProjections --path=. \
+            --rev="$BASE,$HEAD" \
+            --script=benchmark/benchmarks.jl \
+            --add=DataFrames,StatsModels,CovarianceMatrices,StableRNGs \
+            --output-dir=asv-results \
+            --nsamples-load-time=3
+      - name: Write summary
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          {
+            echo "## Benchmarks: base \`${BASE:0:7}\` vs head \`${HEAD:0:7}\`"
+            echo
+            benchpkgtable LocalProjections --path=. --rev="$BASE,$HEAD" \
+              --input-dir=asv-results --mode=time,memory --ratio
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
         with:
-          julia-version: '1'
-          tune: 'false'
+          name: benchmark-results
+          path: asv-results

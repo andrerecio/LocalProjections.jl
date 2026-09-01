@@ -192,33 +192,37 @@ function generate_var_data(rng::AbstractRNG, n::Int)
     return DataFrame(shock = shock, y = y)
 end
 
-SUITE["lagselect"] = BenchmarkGroup()
+# AirspeedVelocity loads this file against every revision it compares, so
+# benchmarks of features absent from the baseline must be skipped there.
+if isdefined(LocalProjections, :lagselect) && isdefined(LocalProjections, :varbootstrap)
+    SUITE["lagselect"] = BenchmarkGroup()
 
-let rng = StableRNG(DEFAULT_SEED + 50)
-    df = generate_var_data(rng, 500)
+    let rng = StableRNG(DEFAULT_SEED + 50)
+        df = generate_var_data(rng, 500)
 
-    SUITE["lagselect"]["aic_pmax10"] = @benchmarkable lagselect(
-        $df, [:shock, :y]; maxlags = 10)
-end
+        SUITE["lagselect"]["aic_pmax10"] = @benchmarkable lagselect(
+            $df, [:shock, :y]; maxlags = 10)
+    end
 
-SUITE["bootstrap"] = BenchmarkGroup()
+    SUITE["bootstrap"] = BenchmarkGroup()
 
-let rng = StableRNG(DEFAULT_SEED + 51)
-    df = generate_var_data(rng, 240)
-    m = lp(@formula(leads(y) ~ shock + lags(y, 4) + lags(shock, 4)), df; horizon = 20)
+    let rng = StableRNG(DEFAULT_SEED + 51)
+        df = generate_var_data(rng, 240)
+        m = lp(@formula(leads(y) ~ shock + lags(y, 4) + lags(shock, 4)), df; horizon = 20)
 
-    # One draw is the unit of work that dominates the bootstrap; keep nboot small
-    # so the suite stays fast under AirspeedVelocity.
-    SUITE["bootstrap"]["nboot100_h20"] = @benchmarkable varbootstrap(
-        $m, $df; vars = [:shock, :y], nlags = 4, nboot = 100,
-        rng = StableRNG(1))
+        # One draw is the unit of work that dominates the bootstrap; keep nboot small
+        # so the suite stays fast under AirspeedVelocity.
+        SUITE["bootstrap"]["nboot100_h20"] = @benchmarkable varbootstrap(
+            $m, $df; vars = [:shock, :y], nlags = 4, nboot = 100,
+            rng = StableRNG(1))
 
-    SUITE["bootstrap"]["nboot100_h20_nocorrections"] = @benchmarkable varbootstrap(
-        $m, $df; vars = [:shock, :y], nlags = 4, nboot = 100,
-        rng = StableRNG(1), biascorrect = false, popecorrect = false)
+        SUITE["bootstrap"]["nboot100_h20_nocorrections"] = @benchmarkable varbootstrap(
+            $m, $df; vars = [:shock, :y], nlags = 4, nboot = 100,
+            rng = StableRNG(1), biascorrect = false, popecorrect = false)
 
-    b = varbootstrap(m, df; vars = [:shock, :y], nlags = 4, nboot = 100,
-        rng = StableRNG(1))
-    SUITE["bootstrap"]["summarize_hall_t"] = @benchmarkable summarize(
-        $b; level = 0.90, method = :hall_t)
-end
+        b = varbootstrap(m, df; vars = [:shock, :y], nlags = 4, nboot = 100,
+            rng = StableRNG(1))
+        SUITE["bootstrap"]["summarize_hall_t"] = @benchmarkable summarize(
+            $b; level = 0.90, method = :hall_t)
+    end
+end # isdefined guard
