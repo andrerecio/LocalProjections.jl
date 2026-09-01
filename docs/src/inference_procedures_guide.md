@@ -1132,3 +1132,143 @@ Primary methodological references:
   Macroeconomists](https://economics.mit.edu/sites/default/files/2025-03/lp_var_primer.pdf)
   and its
   [supplement](https://economics.mit.edu/sites/default/files/2025-03/lp_var_primer_supplement.pdf).
+
+## 8. HAC bandwidth: `Bartlett{NeweyWest}` versus Stata's `ivreg2, bw(auto)`
+
+Both this package and the Stata program most applied LP work is written
+against — `ivreg2`, used by Ramey and Zubairy (2018) as
+`ivreg2 …, robust bw(auto)` — describe their standard errors as
+"Newey--West with automatic bandwidth". The two do not agree, and the gap is
+large enough to change reported confidence bands. This section states exactly
+what each does.
+
+### 8.1 What `CovarianceMatrices.Bartlett{NeweyWest}` computes
+
+Verified against `CovarianceMatrices` v0.30.5, `src/HAC.jl:398-417`, and
+reproduced by a hand-built sandwich. Let $M$ be the $T \times k$ moment matrix
+($m_t = z_t \hat u_t$ for IV, $x_t \hat u_t$ for OLS). With the default
+`prewhite = false`:
+
+1. **Lag-selection parameter** (`getrates`, `lagtruncation(Bartlett) = 2/9`):
+
+\[
+n = \left\lfloor 4 \left(\tfrac{T}{100}\right)^{2/9} \right\rfloor .
+\]
+
+2. **Weight vector** (`setkernelweights!`): $w_i = 1$ for every moment column
+   that is not constant, $0$ otherwise. For a regression with an intercept the
+   intercept's moment column is $\hat u_t$, which is not constant, so in
+   practice $w = \mathbf{1}$.
+
+3. **Weighted autocovariances** of the scalar series $\tilde m_t = m_t' w$:
+
+\[
+\hat\sigma_j = \frac{1}{T}\sum_{t} \tilde m_t \tilde m_{t+j},
+\qquad j = 0,\dots,n .
+\]
+
+4. **Newey--West (1994) moments**:
+
+\[
+\hat s_0 = \hat\sigma_0 + 2\sum_{j=1}^{n}\hat\sigma_j ,
+\qquad
+\hat s_1 = 2\sum_{j=1}^{n} j\,\hat\sigma_j .
+\]
+
+5. **Bandwidth** (`bwnw`, `growthrate(Bartlett) = 1/3`):
+
+\[
+\boxed{\;
+S_T = 1.1447 \left(\frac{\hat s_1}{\hat s_0}\right)^{2/3} T^{1/3}
+\;}
+\]
+
+which is exactly the Bartlett line of Newey and West (1994).
+
+Two consequences matter for replication:
+
+- $S_T$ is a **real number** and is used as such: the Bartlett weight on lag
+  $j$ is $1 - j/S_T$, non-zero for $j < S_T$. It is never rounded.
+- **No degrees-of-freedom correction is applied.** A hand-built sandwich with
+  the same $S_T$ reproduces the package's standard error to 13 significant
+  digits *only* without the $T/(T-K)$ factor. This matches `ivreg2`'s `robust`
+  without `small`, where the help file gives $q_c = 1$; it does **not** match
+  `ivreg2, robust small`, where $q_c = N/(N-K)$.
+
+### 8.2 What `ivreg2, bw(auto)` documents
+
+From the `ivreg2` help file (Baum, Schaffer and Stillman):
+
+- `bw(#)` "implements AC or HAC covariance estimation with bandwidth equal to
+  #, where # is an integer greater than zero" — the bandwidth is an
+  **integer**.
+- "If the Bartlett (default), Parzen, or quadratic-spectral kernels are
+  selected, the value `auto` may be given (rather than an integer) to invoke
+  Newey and West's (1994) automatic bandwidth-selection procedure."
+- "For bartlett, parzen, and tukey-hanning and tukey-hamming kernels, the
+  number of lags used to construct the kernel estimate equals the bandwidth
+  minus one" — i.e. the *same* parameterisation as above, lag $j$ weighted
+  $1 - j/\mathrm{bw}$ for $j \le \mathrm{bw}-1$. The kernel convention is
+  therefore not the source of any discrepancy.
+
+So the two agree on the target (Newey--West 1994), on the kernel, on the
+meaning of the bandwidth parameter, and — for `robust` without `small` — on
+the absence of a small-sample correction. They differ only in the *number*
+each procedure arrives at.
+
+### 8.3 Measured size of the difference
+
+Ramey--Zubairy full-sample Blanchard--Perotti cumulative multiplier
+regressions. "Implied bandwidth" is the fixed Bartlett bandwidth that
+reproduces the authors' published standard error at that horizon; it is
+reverse-engineered from their output, not read off a Stata log.
+
+| $h$ | $T$ | $S_T$ selected here | implied by published s.e. | s.e. here | published s.e. |
+|---:|---:|---:|---:|---:|---:|
+| 0 | 504 | 15.6 | 19.5 | 0.1488 | 0.1551 |
+| 2 | 502 | 3.1 | 30.0 | 0.1056 | 0.1331 |
+| 4 | 500 | 8.3 | 28.5 | 0.1054 | 0.1324 |
+| 8 | 496 | 14.3 | 29.0 | 0.0889 | 0.1043 |
+| 12 | 492 | 15.9 | 30.5 | 0.0915 | 0.1017 |
+| 16 | 488 | 16.5 | 30.0 | 0.1069 | 0.1194 |
+| 20 | 484 | 16.7 | 29.5 | 0.1255 | 0.1386 |
+
+The instructive pattern is not the level but the *shape*. The implied
+bandwidth is essentially flat at $\approx 29$--$30$ across horizons, while the
+data-driven value computed here swings between 3.1 and 16.7. At horizon $h$ the
+local-projection residual is MA($h$) by construction, so the two procedures
+respond very differently to a moving-average structure that is known a priori.
+This is not a constant-factor convention mismatch that could be absorbed into a
+scaling.
+
+Across both shocks and all 21 horizons the automatic rule gives standard errors
+**0.76 to 1.12 times** the published ones.
+
+### 8.4 What to do about it
+
+For work that must line up with `ivreg2, bw(auto)` output, do not use the
+automatic rule — pass a fixed bandwidth:
+
+```julia
+res = lpiv(@formula(cumul(y) ~ (cumul(g) ~ bp) + lags(y, 4) + lags(g, 4)),
+           rz; horizon = 20)
+
+summarize(res, vcov(Bartlett(30.0), res))     # fixed bandwidth
+```
+
+On the Ramey--Zubairy regressions this narrows the ratio to published standard
+errors from 0.76--1.12 to **0.99--1.05** (Blanchard--Perotti) and
+**0.95--1.11** (military news).
+
+More generally, for local projections a fixed, horizon-aware bandwidth is the
+defensible choice: the MA($h$) truncation is known, so there is little to be
+gained from estimating it. The EWC estimator of §2 is the other principled
+route, and unlike either Newey--West variant it comes with critical values
+matched to its own fixed-smoothing limit (see EWC-1 in §6.4).
+
+A caveat on the table: the published standard errors also embed a small
+data-vintage difference (the Ramey--Zubairy output spreadsheets predate the
+final revision of `RZDAT.xlsx` by a week), so the implied bandwidths are
+accurate to roughly $\pm 1$, not to the digit. The qualitative conclusion — a
+flat $\approx 30$ against a swinging 3--17 — is far larger than that
+uncertainty.

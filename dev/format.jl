@@ -15,7 +15,8 @@ is read-only reference material and must never be reformatted.
 using JuliaFormatter
 
 const ROOT = dirname(@__DIR__)
-const TARGETS = ["src", "ext", "test", "benchmark", "dev", "docs/make.jl"]
+const TARGETS = ["src", "ext", "test", "benchmark", "dev",
+    "docs/make.jl", "docs/make_rz_figure.jl"]
 
 function main()
     allclean = true

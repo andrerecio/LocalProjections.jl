@@ -194,6 +194,9 @@ struct CumulTerm{T <: AbstractTerm} <: AbstractTerm
 end
 
 StatsModels.terms(t::CumulTerm) = (t.term,)
+# termvars: needed once the schema has replaced the FunctionTerm, so that a
+# horizon-tracking cumul(x) standing alone on the RHS still counts as a regressor.
+StatsModels.termvars(t::CumulTerm) = StatsModels.termvars(t.term)
 
 function StatsModels.apply_schema(
         t::FunctionTerm{typeof(cumul)}, sch::StatsModels.Schema, ctx::Type)
@@ -270,6 +273,9 @@ struct LeadTerm{T <: AbstractTerm} <: AbstractTerm
 end
 
 StatsModels.terms(t::LeadTerm) = (t.term,)
+# termvars: needed once the schema has replaced the FunctionTerm, so that a
+# horizon-tracking leads(x) standing alone on the RHS still counts as a regressor.
+StatsModels.termvars(t::LeadTerm) = StatsModels.termvars(t.term)
 
 function StatsModels.apply_schema(
         t::FunctionTerm{typeof(leads)}, sch::StatsModels.Schema, ctx::Type)
@@ -421,6 +427,94 @@ end
 # termvars: Return variables used in anchor term
 function StatsModels.termvars(at::AnchorTerm)
     unique(vcat(StatsModels.termvars(at.response), StatsModels.termvars(at.anchor)))
+end
+
+# ============================================================================
+# Horizon-tracking terms on the right-hand side
+# ============================================================================
+
+"""
+    _has_dynamic_horizon(term) -> Bool
+
+`true` when `term` contains a `CumulTerm` or `LeadTerm` whose horizon is
+`nothing` — a right-hand-side term that must be rebuilt at every projection
+horizon rather than once. `cumul(x, 3)` and `leads(x, 3)` pin an explicit
+horizon and are therefore *not* dynamic.
+"""
+_has_dynamic_horizon(::Any) = false
+_has_dynamic_horizon(t::CumulTerm) = t.horizon === nothing || _has_dynamic_horizon(t.term)
+_has_dynamic_horizon(t::LeadTerm) = t.horizon === nothing || _has_dynamic_horizon(t.term)
+function _has_dynamic_horizon(t::AnchorTerm)
+    _has_dynamic_horizon(t.response) || _has_dynamic_horizon(t.anchor)
+end
+_has_dynamic_horizon(t::StatsModels.MatrixTerm) = any(_has_dynamic_horizon, t.terms)
+_has_dynamic_horizon(t::StatsModels.InteractionTerm) = any(_has_dynamic_horizon, t.terms)
+_has_dynamic_horizon(t::Tuple) = any(_has_dynamic_horizon, t)
+_has_dynamic_horizon(t::AbstractVector) = any(_has_dynamic_horizon, t)
+
+"""
+    _specialize_horizon(term, h::Int)
+
+Return `term` with every horizon-tracking `CumulTerm`/`LeadTerm` (horizon
+`nothing`) pinned to horizon `h`. Terms carrying an explicit horizon, and every
+other term, are returned unchanged.
+
+Coefficient names are deliberately taken from the *unspecialised* terms, so
+`cumul(g)` names one coefficient across all horizons rather than `cumul(g, 0)`,
+`cumul(g, 1)`, ... — `coefpath`, `summarize` and the plot recipes all assume
+horizon-invariant coefficient names.
+"""
+_specialize_horizon(t, ::Int) = t
+function _specialize_horizon(t::CumulTerm, h::Int)
+    inner = _specialize_horizon(t.term, h)
+    return CumulTerm{typeof(inner)}(inner, t.horizon === nothing ? h : t.horizon)
+end
+function _specialize_horizon(t::LeadTerm, h::Int)
+    inner = _specialize_horizon(t.term, h)
+    return LeadTerm{typeof(inner)}(inner, t.horizon === nothing ? h : t.horizon)
+end
+function _specialize_horizon(t::StatsModels.MatrixTerm, h::Int)
+    return StatsModels.MatrixTerm(map(x -> _specialize_horizon(x, h), t.terms))
+end
+function _specialize_horizon(t::StatsModels.InteractionTerm, h::Int)
+    return StatsModels.InteractionTerm(map(x -> _specialize_horizon(x, h), t.terms))
+end
+_specialize_horizon(t::Tuple, h::Int) = map(x -> _specialize_horizon(x, h), t)
+
+"""
+    _as_float_matrix(cols)
+
+Materialise `modelcols` output as a `Matrix{Float64}`, mapping `missing` to the
+`NaN` sentinel the per-horizon row masks use.
+"""
+function _as_float_matrix(cols::AbstractMatrix)
+    Matrix{Float64}(map(v -> ismissing(v) ? NaN : Float64(v), cols))
+end
+function _as_float_matrix(cols::AbstractVector)
+    reshape(Vector{Float64}(map(v -> ismissing(v) ? NaN : Float64(v), cols)), :, 1)
+end
+
+"""
+    _rhs_tracks_horizon(formula::FormulaTerm) -> Bool
+
+`true` when the *unapplied* right-hand side of `formula` contains a bare
+`cumul(x)` or `leads(x)` — a regressor that is rebuilt at every projection
+horizon — anywhere, including inside an IV block `(endo ~ instruments)` or
+an interaction. Explicit horizons (`cumul(x, 3)`) do not count.
+
+This is the raw-formula counterpart of `_has_dynamic_horizon`, used
+by procedures that only hold the fitted object and its `base_formula`.
+"""
+_rhs_tracks_horizon(formula::FormulaTerm) = _tracks_horizon(formula.rhs)
+
+_tracks_horizon(::Any) = false
+_tracks_horizon(t::Tuple) = any(_tracks_horizon, t)
+_tracks_horizon(t::FormulaTerm) = _tracks_horizon(t.lhs) || _tracks_horizon(t.rhs)
+_tracks_horizon(t::StatsModels.InteractionTerm) = any(_tracks_horizon, t.terms)
+function _tracks_horizon(t::FunctionTerm)
+    nm = nameof(t.f)
+    (nm === :cumul || nm === :leads) && length(t.args) == 1 && return true
+    return any(_tracks_horizon, t.args)
 end
 
 # ============================================================================
@@ -723,6 +817,23 @@ end
 
 Estimate local projections implied by `formula` up to the supplied `horizon`.
 `shock` selects the coefficient path of interest (defaults to the first RHS term).
+
+# Horizon-tracking right-hand-side terms
+
+`cumul(x)` and `leads(x)` are normally left-hand-side transforms, but they are
+also accepted on the right-hand side, where they *track the projection
+horizon*: at horizon `h` the column is rebuilt as the cumulative sum
+`x_t + ... + x_{t+h}` (or the lead `x_{t+h}`) rather than being computed once.
+Writing an explicit horizon — `cumul(x, 3)` — pins the column instead, and it
+is then constant across horizons like any other regressor.
+
+The coefficient keeps the horizon-free name (`"cumul(x)"`, not `"cumul(x, 0)"`,
+`"cumul(x, 1)"`, ...), so `coefpath`, `summarize` and the plot recipes work
+unchanged. When no horizon-tracking term appears on the RHS the design matrix
+is still built exactly once, as before.
+
+See also [`lpiv`](@ref), whose endogenous and instrument blocks accept the same
+terms.
 """
 function lp(formula::FormulaTerm, data::AbstractDataFrame;
         horizon::Integer, shock::Union{Symbol, Nothing} = nothing)
@@ -787,15 +898,23 @@ function lp(formula::FormulaTerm, data::AbstractDataFrame;
     # Create ModelFrame for the RHS computation (only once!)
     mf_base = StatsModels.ModelFrame(dummy_formula, df_base_complete)
 
-    # Extract X matrix (this handles all lag/lead transformations on RHS)
-    X_raw = StatsModels.modelcols(mf_base.f.rhs, mf_base.data)
-
-    # Convert missing to NaN for type stability (handles lag(w) which returns missing)
-    # This ensures X is always Float64, matching our leads/cumul which use default=NaN
-    X = Matrix{Float64}(map(v -> ismissing(v) ? NaN : Float64(v), X_raw))
-
-    # Store coefficient names (constant across all horizons)
+    # Store coefficient names (constant across all horizons, taken from the
+    # unspecialised terms so a horizon-tracking cumul(x) stays named "cumul(x)")
     coef_names_base = Vector{String}(coefnames(mf_base))
+
+    # Build the X matrix. A bare cumul(x)/leads(x) on the RHS tracks the
+    # projection horizon, so the design has to be rebuilt at every h; otherwise
+    # it is constant and is built exactly once.
+    rhs_applied = mf_base.f.rhs
+    Xof = if _has_dynamic_horizon(rhs_applied)
+        let rhs = rhs_applied, dat = mf_base.data
+            h -> _as_float_matrix(StatsModels.modelcols(_specialize_horizon(rhs, h), dat))
+        end
+    else
+        let X = _as_float_matrix(StatsModels.modelcols(rhs_applied, mf_base.data))
+            h -> X
+        end
+    end
 
     # Set shock variable: use provided shock or default to first RHS coefficient
     # Note: coef_names_base includes intercept, so we need the second element (first RHS term)
@@ -813,28 +932,30 @@ function lp(formula::FormulaTerm, data::AbstractDataFrame;
         shock_symbol = shock
     end
 
-    # Function barrier: X and coef_names_base are now concretely typed (Matrix{Float64},
-    # Vector{String}), so _lp_estimate_horizons can be fully inferred by the compiler.
-    return _lp_estimate_horizons(X, coef_names_base, df_base_complete, horizon,
+    # Function barrier: coef_names_base is concretely typed and `Xof` is a
+    # closure returning Matrix{Float64}, so _lp_estimate_horizons can be fully
+    # inferred by the compiler.
+    return _lp_estimate_horizons(Xof, coef_names_base, df_base_complete, horizon,
         response, shock_symbol, formula,
         is_anchor, is_cumulative, is_leads, anchor_term, cumul_term, leads_term)
 end
 
 """
-    _lp_estimate_horizons(X, coef_names_base, df, horizon, response, shock, formula, ...)
+    _lp_estimate_horizons(Xof, coef_names_base, df, horizon, response, shock, formula, ...)
 
 Function barrier for type-stable per-horizon OLS estimation.
-Called after formula parsing to ensure X::Matrix{Float64} is concretely typed,
-breaking the type instability cascade from StatsModels' abstract return types.
+`Xof(h)` returns the `Matrix{Float64}` design at horizon `h` — the same matrix
+every time unless the RHS carries a horizon-tracking `cumul`/`leads` term.
 """
-function _lp_estimate_horizons(X::Matrix{Float64}, coef_names_base::Vector{String},
+function _lp_estimate_horizons(Xof::F, coef_names_base::Vector{String},
         df_base_complete, horizon, response, shock_symbol, formula,
-        is_anchor, is_cumulative, is_leads, anchor_term, cumul_term, leads_term)
-    # Identify rows where X is complete (no NaN values)
-    X_missing_ind = vec(all(!isnan, X, dims = 2))
-
+        is_anchor, is_cumulative, is_leads, anchor_term, cumul_term,
+        leads_term) where {F}
     # Helper to estimate one horizon
     function _estimate_horizon(h)
+        X = Xof(h)::Matrix{Float64}
+        # Identify rows where X is complete (no NaN values)
+        X_missing_ind = vec(all(!isnan, X, dims = 2))
         lhs_h = _build_lhs_for_horizon(h, is_anchor, is_cumulative, is_leads,
             anchor_term, cumul_term, leads_term)
         # Convert to Vector{Float64} for type stability (modelcols may return ShiftedArray)
@@ -1129,6 +1250,31 @@ Where:
 - `(x ~ z1)` - x is endogenous, instrumented by z1
 - `lags(r, 5)` and `w` - exogenous controls
 
+# Horizon-tracking right-hand-side terms
+
+A bare `cumul(x)` or `leads(x)` anywhere on the right-hand side — endogenous
+regressor, instrument or exogenous control — tracks the projection horizon:
+at horizon `h` its column is rebuilt as `x_t + ... + x_{t+h}` (or `x_{t+h}`)
+instead of being computed once. `cumul(x, 3)` pins an explicit horizon and
+stays constant. Coefficient names come from the unpinned terms, so they are
+the same at every horizon.
+
+This is what makes the Ramey-Zubairy (2018) cumulative fiscal multiplier a
+single call: the endogenous regressor is cumulative spending through the same
+horizon as the cumulative response.
+
+```julia
+res = lpiv(@formula(cumul(y) ~ (cumul(g) ~ bp) + lags(y, 4) + lags(g, 4)),
+           rz; horizon = 20)
+
+summarize(res, vcov(Bartlett(30.0), res))   # multiplier path with s.e. and bands
+```
+
+The multiplier is the coefficient on `cumul(g)`, which `shock` picks up by
+default. On the choice of HAC bandwidth here — and why the automatic
+Newey-West rule does *not* reproduce Stata `ivreg2, bw(auto)` output — see
+section 8 of `docs/src/inference_procedures_guide.md`.
+
 # Arguments
 - `formula::FormulaTerm`: A formula with IV specification using `(endo ~ instruments)` syntax
 - `data::AbstractDataFrame`: DataFrame containing the variables
@@ -1221,63 +1367,74 @@ function lpiv(formula::FormulaTerm, data::AbstractDataFrame;
     # Stage 1: Remove rows with missing base variables
     df_base_complete = dropmissing(df_base, base_vars, disallowmissing = true)
 
-    # Stage 2: Build X (endogenous + exogenous) and Z (instruments + exogenous) matrices ONCE
+    # Stage 2: Build X (exogenous + endogenous) and Z (exogenous + instruments).
+    # Built once unless some term tracks the horizon (a bare `cumul(x)` or
+    # `leads(x)` anywhere on the RHS), in which case they are rebuilt per h.
 
-    # Get exogenous matrix (includes intercept from StatsModels)
-    # Create a dummy formula for exogenous terms
+    n_obs = nrow(df_base_complete)
+
+    # Exogenous block (includes the intercept supplied by StatsModels)
     if !isempty(exo_terms)
         exo_tuple = length(exo_terms) == 1 ? exo_terms[1] : Tuple(exo_terms)
         dummy_formula_exo = StatsModels.FormulaTerm(StatsModels.Term(response), exo_tuple)
         mf_exo = StatsModels.ModelFrame(dummy_formula_exo, df_base_complete)
-        X_exo_raw = StatsModels.modelcols(mf_exo.f.rhs, mf_exo.data)
-        X_exo = Matrix{Float64}(map(v -> ismissing(v) ? NaN : Float64(v), X_exo_raw))
+        exo_applied = mf_exo.f.rhs
+        exo_data = mf_exo.data
         coef_names_exo = Vector{String}(coefnames(mf_exo))
     else
         # No exogenous terms - just intercept
-        n_obs = nrow(df_base_complete)
-        X_exo = ones(n_obs, 1)
+        exo_applied = nothing
+        exo_data = nothing
         coef_names_exo = ["(Intercept)"]
     end
 
-    # Get endogenous matrix - extract columns directly from terms (no formula intercept)
+    # Coefficient names come from the unspecialised terms, so they are the same
+    # at every horizon even when the underlying columns are not.
+    _term_names(t) = (n = StatsModels.coefnames(t); n isa Vector ? n : [n])
     endo_names = String[]
-    X_endo_cols = Matrix{Float64}[]
-    for endo_term in endo_terms
-        # Use modelcols directly on the term to avoid intercept
-        endo_col_raw = StatsModels.modelcols(endo_term, df_base_complete)
-        endo_col = map(v -> ismissing(v) ? NaN : Float64(v), endo_col_raw)
-        push!(X_endo_cols,
-            endo_col isa AbstractMatrix ? Matrix{Float64}(endo_col) :
-            reshape(Vector{Float64}(endo_col), :, 1))
-        term_names = StatsModels.coefnames(endo_term)
-        append!(endo_names, term_names isa Vector ? term_names : [term_names])
+    for t in endo_terms
+        append!(endo_names, _term_names(t))
     end
-    X_endo = hcat(X_endo_cols...)::Matrix{Float64}
-
-    # Get instrument matrix - extract columns directly from terms (no formula intercept)
     instr_names = String[]
-    Z_instr_cols = Matrix{Float64}[]
-    for instr_term in instr_terms
-        # Use modelcols directly on the term to avoid intercept
-        instr_col_raw = StatsModels.modelcols(instr_term, df_base_complete)
-        instr_col = map(v -> ismissing(v) ? NaN : Float64(v), instr_col_raw)
-        push!(Z_instr_cols,
-            instr_col isa AbstractMatrix ? Matrix{Float64}(instr_col) :
-            reshape(Vector{Float64}(instr_col), :, 1))
-        term_names = StatsModels.coefnames(instr_term)
-        append!(instr_names, term_names isa Vector ? term_names : [term_names])
+    for t in instr_terms
+        append!(instr_names, _term_names(t))
     end
-    Z_instr = hcat(Z_instr_cols...)::Matrix{Float64}
-
-    # Build full X = [exogenous, endogenous] and Z = [exogenous, instruments]
-    X_full = hcat(X_exo, X_endo)::Matrix{Float64}
-    Z_full = hcat(X_exo, Z_instr)::Matrix{Float64}
-
-    n_endogenous = size(X_endo, 2)
     coef_names_base = Vector{String}(vcat(coef_names_exo, endo_names))
 
+    dynamic = _has_dynamic_horizon(endo_terms) || _has_dynamic_horizon(instr_terms) ||
+              (exo_applied !== nothing && _has_dynamic_horizon(exo_applied))
+
+    # `h === nothing` builds the (horizon-invariant) design directly; an Int
+    # pins every horizon-tracking term to that horizon first.
+    function _build_design(h::Union{Int, Nothing})
+        spec(t) = h === nothing ? t : _specialize_horizon(t, h)
+        X_exo = exo_applied === nothing ? ones(n_obs, 1) :
+                _as_float_matrix(StatsModels.modelcols(spec(exo_applied), exo_data))
+        X_endo = reduce(hcat,
+            (_as_float_matrix(StatsModels.modelcols(spec(t), df_base_complete))
+            for t in endo_terms))::Matrix{Float64}
+        Z_instr = reduce(hcat,
+            (_as_float_matrix(StatsModels.modelcols(spec(t), df_base_complete))
+            for t in instr_terms))::Matrix{Float64}
+        return (hcat(X_exo, X_endo)::Matrix{Float64},
+            hcat(X_exo, Z_instr)::Matrix{Float64})
+    end
+
+    XZof = if dynamic
+        h -> _build_design(h)
+    else
+        let XZ = _build_design(nothing)
+            h -> XZ
+        end
+    end
+
+    # Widths are horizon-invariant, so probing horizon 0 is enough.
+    X_probe, Z_probe = XZof(0)
+    n_exo = length(coef_names_exo)
+    n_endogenous = size(X_probe, 2) - n_exo
+    n_instruments = size(Z_probe, 2) - n_exo
+
     # Check order condition
-    n_instruments = size(Z_instr, 2)
     n_instruments >= n_endogenous ||
         throw(ArgumentError("Not enough instruments: $n_instruments < $n_endogenous (order condition violated)"))
 
@@ -1288,33 +1445,33 @@ function lpiv(formula::FormulaTerm, data::AbstractDataFrame;
         shock_symbol = shock
     end
 
-    # Function barrier: X_full, Z_full, coef_names_base are now concretely typed,
-    # so _lpiv_estimate_horizons can be fully inferred by the compiler.
-    return _lpiv_estimate_horizons(X_full, Z_full, coef_names_base, df_base_complete,
+    # Function barrier: coef_names_base is concretely typed and `XZof` returns a
+    # pair of Matrix{Float64}, so _lpiv_estimate_horizons can be fully inferred.
+    return _lpiv_estimate_horizons(XZof, coef_names_base, df_base_complete,
         horizon, n_endogenous, response, shock_symbol, formula,
         endo_names, instr_names,
         is_anchor, is_cumulative, is_leads, anchor_term, cumul_term, leads_term)
 end
 
 """
-    _lpiv_estimate_horizons(X_full, Z_full, coef_names_base, df, ...)
+    _lpiv_estimate_horizons(XZof, coef_names_base, df, ...)
 
 Function barrier for type-stable per-horizon IV estimation.
-Called after formula parsing and matrix assembly to ensure all matrix arguments
-are concretely typed as Matrix{Float64}.
+`XZof(h)` returns the `(X_full, Z_full)` pair at horizon `h` — the same pair
+every time unless some RHS term tracks the horizon.
 """
-function _lpiv_estimate_horizons(X_full::Matrix{Float64}, Z_full::Matrix{Float64},
+function _lpiv_estimate_horizons(XZof::F,
         coef_names_base::Vector{String}, df_base_complete,
         horizon, n_endogenous, response, shock_symbol, formula,
         endo_names, instr_names,
-        is_anchor, is_cumulative, is_leads, anchor_term, cumul_term, leads_term)
-    # Identify complete rows
-    X_missing_ind = vec(all(!isnan, X_full, dims = 2))
-    Z_missing_ind = vec(all(!isnan, Z_full, dims = 2))
-    XZ_complete = X_missing_ind .& Z_missing_ind
-
+        is_anchor, is_cumulative, is_leads, anchor_term, cumul_term,
+        leads_term) where {F}
     # Helper to estimate one horizon
     function _estimate_iv_horizon(h)
+        X_full, Z_full = XZof(h)::Tuple{Matrix{Float64}, Matrix{Float64}}
+        # Identify complete rows
+        XZ_complete = vec(all(!isnan, X_full, dims = 2)) .&
+                      vec(all(!isnan, Z_full, dims = 2))
         lhs_h = _build_lhs_for_horizon(h, is_anchor, is_cumulative, is_leads,
             anchor_term, cumul_term, leads_term)
         # Convert to Vector{Float64} for type stability (modelcols may return ShiftedArray)
@@ -1435,7 +1592,7 @@ estimators are supported. Unsupported estimators trigger a warning and fall
 back to heteroskedasticity-robust weighting; in particular `EWC` is
 incompatible with this test by construction — its fixed-``B`` covariance is
 not a consistent estimate of the weight matrix the MOP critical values
-assume (see [`_warn_unsupported_weakiv_estimator`](@ref)).
+assume (see `_warn_unsupported_weakiv_estimator`).
 
 # Keyword Arguments
 - `level::Real=0.05`: Confidence level alpha
@@ -1666,6 +1823,10 @@ summarize(bc, HC1(); level = 0.90) # bands centered on θ̂ᶜ, SEs of θ̂
 ```
 """
 function biascorrect(lp_result::LocalProjection)
+    _rhs_tracks_horizon(lp_result.base_formula) && throw(ArgumentError(
+        "the Herbst–Johannsen correction assumes the same regressors at every " *
+        "horizon, but the formula has a horizon-tracking right-hand-side term " *
+        "(a bare `cumul(x)` or `leads(x)`), so the design changes with h"))
     H = lp_result.horizon
     m0 = lp_result.models[1]
     T0 = Int(nobs(m0))
@@ -2047,7 +2208,7 @@ end
 """
     _pope_biascorrect(A::Array{Float64,3}, Σu, T)
 
-Method taking the `n × n × p` slope array produced by [`_var_ols`](@ref) and
+Method taking the `n × n × p` slope array produced by `_var_ols` and
 returning a corrected array of the same shape.
 """
 function _pope_biascorrect(A::Array{Float64, 3}, Σu::AbstractMatrix{Float64}, T::Real)
@@ -2387,6 +2548,11 @@ function varbootstrap(lp_result::LocalProjection, data::AbstractDataFrame;
     kind in (:leads, :cumul) || throw(ArgumentError(
         "the VAR bootstrap supports `leads` and `cumul` responses; got " *
         "$(kind === :anchor ? "an anchored response" : "an unrecognized LHS")"))
+    _rhs_tracks_horizon(lp_result.base_formula) && throw(ArgumentError(
+        "the VAR bootstrap centers its t-statistic on the VAR-implied impulse " *
+        "response to the shock, which is not the estimand of a local projection " *
+        "with a horizon-tracking right-hand-side term (a bare `cumul(x)` or " *
+        "`leads(x)`); use a horizon-invariant regressor set"))
 
     Y = _var_data(data, varlist)
     T = size(Y, 1)
@@ -2532,7 +2698,7 @@ end
 
 Bootstrap confidence bands for a local projection. `method` selects the
 interval construction: `:hall_t` (Hall percentile-`t`, the recommended one),
-`:hall`, or `:efron` — see [`_boot_interval`](@ref).
+`:hall`, or `:efron` — see `_boot_interval`.
 
 The bands are **pointwise across horizons**, not simultaneous, and are
 generally asymmetric around the point estimate. Note that a percentile-`t` or
@@ -2588,7 +2754,7 @@ _critical_distribution(estimator::CovarianceMatrices.EWC) = TDist(estimator.B)
     _critical_value(estimator, level::Real)
 
 Two-sided critical value at confidence `level` from the reference
-distribution paired with `estimator` (see [`_critical_distribution`](@ref)).
+distribution paired with `estimator` (see `_critical_distribution`).
 """
 function _critical_value(estimator, level::Real)
     quantile(_critical_distribution(estimator), 0.5 + level / 2)

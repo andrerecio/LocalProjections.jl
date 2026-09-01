@@ -1608,3 +1608,197 @@ end
     @test st.lower[1] == 1.0 && st.upper[1] == 1.0
     @test all(isfinite, st.lower) && all(isfinite, st.upper)
 end
+
+@testitem "horizon-tracking cumul() on the lpiv right-hand side" tags = [
+    :lpiv, :cumul, :verification] begin
+    using LocalProjections
+    using DataFrames, LinearAlgebra, StableRNGs, StatsModels, Test
+
+    rng = StableRNG(20260901)
+    T = 240
+    z = zeros(T)
+    g = zeros(T)
+    y = zeros(T)
+    for t in 3:T
+        z[t] = 0.4 * z[t - 1] + randn(rng)
+        g[t] = 0.6 * g[t - 1] + 0.8 * z[t] + 0.3 * randn(rng)
+        y[t] = 0.5 * y[t - 1] + 0.7 * g[t] + randn(rng)
+    end
+    df = DataFrame(y = y, g = g, z = z)
+
+    H = 6
+    res = lpiv(@formula(cumul(y) ~ (cumul(g) ~ z) + lags(y, 2) + lags(g, 2)),
+        df; horizon = H)
+
+    # Coefficient names must stay horizon-invariant, otherwise coefpath /
+    # summarize / the plot recipes cannot follow the path.
+    @test res.coef_names == ["(Intercept)", "y_lag1", "y_lag2", "g_lag1", "g_lag2",
+        "cumul(g)"]
+    @test res.shock == Symbol("cumul(g)")
+    @test res.horizon == H
+
+    path = coefpath(res; term = res.shock)
+    @test length(path) == H + 1
+    @test all(isfinite, path)
+
+    # Reference: build the cumulative columns by hand and run one just-identified
+    # 2SLS per horizon, the way jordagk.do does.
+    function manual(h)
+        cum(v) = Union{Missing, Float64}[t + h <= T ? sum(v[t:(t + h)]) : missing
+                                         for t in 1:T]
+        L(v, k) = Union{Missing, Float64}[i - k >= 1 ? v[i - k] : missing for i in 1:T]
+        cy, cg = cum(y), cum(g)
+        ctrl = [L(y, 1), L(y, 2), L(g, 1), L(g, 2)]
+        cols = vcat([cy, cg, z], ctrl)
+        idx = findall(t -> all(c -> !ismissing(c[t]), cols), 1:T)
+        W = hcat(ones(length(idx)), [Float64.(c[idx]) for c in ctrl]...)
+        X = hcat(W, Float64.(cg[idx]))
+        Z = hcat(W, Float64.(z[idx]))
+        b = (Z'X) \ (Z'Float64.(cy[idx]))
+        (nobs = length(idx), coef = b[end])
+    end
+
+    for h in 0:H
+        m = manual(h)
+        @test path[h + 1] ≈ m.coef rtol=1e-10
+        @test res.models[h + 1].nobs == m.nobs
+    end
+
+    # The usable sample shrinks by one observation per horizon: the cumulative
+    # response and regressor both need y_{t+h}, g_{t+h}.
+    @test [m.nobs for m in res.models] == [res.models[1].nobs - h for h in 0:H]
+end
+
+@testitem "horizon-tracking cumul()/leads() on the lp right-hand side" tags = [
+    :cumul, :leads, :verification] begin
+    using LocalProjections
+    using DataFrames, StableRNGs, StatsModels, Test
+
+    rng = StableRNG(4242)
+    T = 200
+    x = randn(rng, T)
+    y = zeros(T)
+    for t in 2:T
+        y[t] = 0.4 * y[t - 1] + 0.9 * x[t] + randn(rng)
+    end
+    df = DataFrame(y = y, x = x)
+
+    H = 4
+    res = lp(@formula(cumul(y) ~ cumul(x) + lags(y, 1)), df; horizon = H)
+    @test res.coef_names == ["(Intercept)", "cumul(x)", "y_lag1"]
+
+    path = coefpath(res; term = Symbol("cumul(x)"))
+    for h in 0:H
+        cum(v) = Union{Missing, Float64}[t + h <= T ? sum(v[t:(t + h)]) : missing
+                                         for t in 1:T]
+        cy, cx = cum(y), cum(x)
+        ly = Union{Missing, Float64}[i > 1 ? y[i - 1] : missing for i in 1:T]
+        idx = findall(t -> !ismissing(cy[t]) && !ismissing(cx[t]) && !ismissing(ly[t]), 1:T)
+        X = hcat(ones(length(idx)), Float64.(cx[idx]), Float64.(ly[idx]))
+        b = X \ Float64.(cy[idx])
+        @test path[h + 1] ≈ b[2] rtol=1e-10
+    end
+
+    # leads() on the RHS tracks the horizon in the same way.
+    resl = lp(@formula(leads(y) ~ leads(x) + lags(y, 1)), df; horizon = 2)
+    @test resl.coef_names == ["(Intercept)", "leads(x)", "y_lag1"]
+    pl = coefpath(resl; term = Symbol("leads(x)"))
+    # y_{t+h} on x_{t+h} reproduces the static contemporaneous regression at every h.
+    static = lp(@formula(leads(y) ~ x + lags(y, 1)), df; horizon = 0)
+    @test pl[1] ≈ coefpath(static; term = :x)[1] rtol=1e-10
+    @test all(isfinite, pl)
+end
+
+@testitem "explicit horizons pin RHS terms and leave the static path intact" tags = [
+    :cumul, :api] begin
+    using LocalProjections
+    using DataFrames, StableRNGs, StatsModels, Test
+
+    rng = StableRNG(77)
+    T = 160
+    x = randn(rng, T)
+    y = cumsum(randn(rng, T)) .+ 0.5 .* x
+    df = DataFrame(y = y, x = x)
+
+    # cumul(x, 2) carries its own horizon, so the column is the SAME at every h
+    # and the coefficient name records the pinned horizon.
+    pinned = lp(@formula(cumul(y) ~ cumul(x, 2)), df; horizon = 3)
+    @test pinned.coef_names == ["(Intercept)", "cumul(x, 2)"]
+
+    # Reference: the pinned column is the same at every horizon, only the
+    # cumulative response moves.
+    cx2 = Union{Missing, Float64}[t + 2 <= T ? sum(x[t:(t + 2)]) : missing for t in 1:T]
+    path = coefpath(pinned; term = Symbol("cumul(x, 2)"))
+    for h in 0:3
+        cy = Union{Missing, Float64}[t + h <= T ? sum(y[t:(t + h)]) : missing
+                                     for t in 1:T]
+        idx = findall(t -> !ismissing(cy[t]) && !ismissing(cx2[t]), 1:T)
+        X = hcat(ones(length(idx)), Float64.(cx2[idx]))
+        @test path[h + 1] ≈ (X \ Float64.(cy[idx]))[2] rtol=1e-10
+    end
+
+    # A formula with no horizon-tracking RHS term is unaffected by the change.
+    plain = lp(@formula(leads(y) ~ x), df; horizon = 3)
+    @test plain.coef_names == ["(Intercept)", "x"]
+    @test length(coefpath(plain; term = :x)) == 4
+end
+
+@testitem "horizon-tracking RHS terms are rejected by biascorrect and varbootstrap" tags = [
+    :biascorr, :bootstrap, :cumul] begin
+    using LocalProjections
+    using DataFrames, Random, StatsModels, Test
+
+    rng = Xoshiro(20260901)
+    T = 240
+    x = randn(rng, T)
+    y = zeros(T)
+    for t in 2:T
+        y[t] = 0.5 * y[t - 1] + 0.8 * x[t] + randn(rng)
+    end
+    df = DataFrame(y = y, x = x)
+
+    # The raw-formula detector: bare cumul()/leads() on the RHS, anywhere.
+    tracks = LocalProjections._rhs_tracks_horizon
+    @test tracks(@formula(leads(y) ~ x + cumul(x)))
+    @test tracks(@formula(leads(y) ~ leads(x) + lags(y, 2)))
+    @test tracks(@formula(cumul(y) ~ (cumul(x) ~ z) + lags(y, 2)))   # IV block
+    @test tracks(@formula(leads(y) ~ x & cumul(x)))                 # interaction
+    @test !tracks(@formula(cumul(y) ~ x + lags(y, 2)))               # LHS only
+    @test !tracks(@formula(leads(y) ~ cumul(x, 3) + leads(x, 2)))    # pinned
+
+    m_dyn = lp(@formula(leads(y) ~ x + cumul(x) + lags(y, 2)), df;
+        horizon = 6, shock = :x)
+    @test_throws ArgumentError biascorrect(m_dyn)
+    err = try
+        biascorrect(m_dyn)
+    catch e
+        e
+    end
+    @test occursin("horizon-tracking", err.msg)
+
+    # Without the guard the bootstrap would run and center the t-statistic on
+    # the VAR impulse response, which is not what this regression estimates.
+    @test_throws ArgumentError varbootstrap(m_dyn, df; vars = [:x, :y], nlags = 2,
+        nboot = 5, biascorrect = false, rng = Xoshiro(1))
+    err = try
+        varbootstrap(m_dyn, df; vars = [:x, :y], nlags = 2, nboot = 5,
+            biascorrect = false, rng = Xoshiro(1))
+    catch e
+        e
+    end
+    @test occursin("horizon-tracking", err.msg)
+
+    # A pinned horizon is not horizon-tracking. It still fails the correction,
+    # but on the structural sample check (cumul(x, 2) loses its last two rows
+    # at every horizon, so the sample is not the h = 0 one truncated by h).
+    m_pin = lp(@formula(leads(y) ~ x + cumul(x, 2) + lags(y, 2)), df;
+        horizon = 3, shock = :x)
+    err = try
+        biascorrect(m_pin)
+    catch e
+        e
+    end
+    @test err isa ArgumentError
+    @test !occursin("horizon-tracking", err.msg)
+    @test occursin("truncated", err.msg)
+end
