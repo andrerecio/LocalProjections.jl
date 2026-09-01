@@ -37,6 +37,7 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
+          mkdir -p asv-results
           benchpkg LocalProjections --path=. \
             --rev="$BASE,$HEAD" \
             --script=benchmark/benchmarks.jl \
