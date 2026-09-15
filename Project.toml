@@ -32,7 +32,7 @@ LocalProjectionsMakieExt = "Makie"
 [compat]
 Aqua = "0.8"
 AxisArrays = "0.4"
-CovarianceMatrices = "0.30"
+CovarianceMatrices = "0.31"
 DataFrames = "1"
 Distributions = "0.25"
 LinearAlgebra = "1.10"
