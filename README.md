@@ -290,13 +290,13 @@ rz.bp = rz.g                       # Blanchard–Perotti shock: current spending
 # Impulse responses of government spending and GDP to the military-news shock
 irf = lp(@formula(leads(g) ~ newsy + lags(newsy, 4) + lags(y, 4) + lags(g, 4)),
          rz; horizon = 20)
-summarize(irf, Bartlett(30.0); term = :newsy, level = 0.90)
+summarize(irf, Bartlett{NeweyWest}(); term = :newsy, level = 0.90)
 
 # One-step cumulative multiplier: cumulative GDP on cumulative spending through
 # the same horizon, spending instrumented by the news shock.
 mult = lpiv(@formula(cumul(y) ~ (cumul(g) ~ newsy) +
                      lags(newsy, 4) + lags(y, 4) + lags(g, 4)), rz; horizon = 20)
-summarize(mult, Bartlett(30.0); level = 0.90)
+summarize(mult, Bartlett{NeweyWest}(); level = 0.90)
 
 # Weak-instrument diagnostic at the two-year horizon
 weakivtest(mult + vcov(Bartlett{NeweyWest}()), 8)
@@ -309,12 +309,11 @@ errors of the authors' value. The news instrument never clears the Montiel
 Olea–Pflueger 5% critical value (the effective *F* peaks at 19.6 at five
 quarters), and Blanchard–Perotti falls below it from horizon 11 on.
 
-The figure uses the automatic Newey–West bandwidth; the fixed `Bartlett(30.0)`
-above is what reproduces the published standard errors, for the reasons given
-in section 8 of the inference guide. Regenerate the figure with
-`julia --project=docs docs/make_rz_figure.jl`. The full walkthrough, including
-the two-step multiplier and a table against the published numbers, is in
-[the tutorial](docs/src/tutorials/ramey_zubairy.md).
+Standard errors, confidence bands and the weak-instrument test all use the
+automatic Newey–West bandwidth, and so does the figure, which
+`julia --project=docs docs/make_rz_figure.jl` regenerates. The full
+walkthrough, including the two-step multiplier and a table against the
+published numbers, is in [the tutorial](docs/src/tutorials/ramey_zubairy.md).
 
 ## Plotting
 
