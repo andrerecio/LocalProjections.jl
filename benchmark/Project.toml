@@ -16,7 +16,7 @@ LocalProjections = {path = ".."}
 AirspeedVelocity = "0.6"
 AppleAccelerate = "0.7"
 BenchmarkTools = "1"
-CovarianceMatrices = "0.30"
+CovarianceMatrices = "0.31"
 DataFrames = "1"
 StableRNGs = "1"
 StatsModels = "0.7"

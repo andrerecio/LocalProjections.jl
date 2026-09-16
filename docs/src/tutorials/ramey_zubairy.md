@@ -97,8 +97,8 @@ news = lpiv(@formula(cumul(y) ~ (cumul(g) ~ newsy) +
 bp   = lpiv(@formula(cumul(y) ~ (cumul(g) ~ bp) +
                      lags(y, 4) + lags(g, 4)), rz; horizon = 20)
 
-summarize(news, vcov(Bartlett(30.0), news))   # multiplier path, s.e. and bands
-summarize(bp,   vcov(Bartlett(30.0), bp))
+summarize(news, vcov(Bartlett{NeweyWest}(), news))   # multiplier path, s.e. and bands
+summarize(bp,   vcov(Bartlett{NeweyWest}(), bp))
 ```
 
 The multiplier is the coefficient on `cumul(g)`, which is what `shock` picks by
@@ -135,25 +135,24 @@ Those sample sizes are Stata's exactly: 1890Q1 through 2015Q4 minus the horizon.
 Full sample, 1889Q1–2015Q4, four lags, no trends, no tax controls, WWII
 rationing *not* omitted — the shipped defaults of `jordagk.do`. `RZ` is the
 authors' published `multlin1`/`seylin` from
-`Multiplier-Standard-Errors.xlsx`. Standard errors are shown both with the
-automatic Newey–West bandwidth (`auto`) and with a fixed bandwidth of 30
-(`fix`); the next section explains why.
+`Multiplier-Standard-Errors.xlsx`. Standard errors use the automatic
+Newey–West bandwidth.
 
-| h | news | s.e. auto | s.e. fix | RZ | RZ s.e. | BP | s.e. auto | s.e. fix | RZ | RZ s.e. |
-|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 0 | 1.306 | 0.321 | 0.348 | 1.255 | 0.329 | 0.179 | 0.149 | 0.163 | 0.208 | 0.155 |
-| 1 | 1.060 | 0.261 | 0.247 | 1.035 | 0.235 | 0.223 | 0.119 | 0.145 | 0.235 | 0.143 |
-| 2 | 0.847 | 0.173 | 0.173 | 0.820 | 0.155 | 0.257 | 0.106 | 0.133 | 0.257 | 0.133 |
-| 3 | 0.706 | 0.124 | 0.130 | 0.695 | 0.123 | 0.254 | 0.101 | 0.134 | 0.251 | 0.133 |
-| 4 | 0.680 | 0.100 | 0.099 | 0.674 | 0.097 | 0.272 | 0.105 | 0.134 | 0.271 | 0.132 |
-| 6 | 0.677 | 0.076 | 0.074 | 0.673 | 0.074 | 0.356 | 0.098 | 0.119 | 0.353 | 0.119 |
-| **8** | **0.669** | 0.061 | 0.059 | 0.667 | 0.060 | **0.413** | 0.089 | 0.105 | 0.411 | 0.104 |
-| 10 | 0.706 | 0.055 | 0.053 | 0.705 | 0.053 | 0.442 | 0.089 | 0.102 | 0.439 | 0.102 |
-| 12 | 0.719 | 0.051 | 0.051 | 0.717 | 0.052 | 0.461 | 0.091 | 0.102 | 0.458 | 0.102 |
-| 14 | 0.717 | 0.045 | 0.045 | 0.716 | 0.046 | 0.473 | 0.094 | 0.104 | 0.471 | 0.105 |
-| **16** | **0.710** | 0.043 | 0.044 | 0.708 | 0.046 | **0.469** | 0.107 | 0.119 | 0.467 | 0.119 |
-| 18 | 0.715 | 0.046 | 0.050 | 0.713 | 0.053 | 0.456 | 0.119 | 0.134 | 0.453 | 0.133 |
-| 20 | 0.729 | 0.054 | 0.060 | 0.727 | 0.063 | 0.443 | 0.125 | 0.139 | 0.440 | 0.139 |
+| h | news | s.e. | RZ | RZ s.e. | BP | s.e. | RZ | RZ s.e. |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 1.306 | 0.321 | 1.255 | 0.329 | 0.179 | 0.149 | 0.208 | 0.155 |
+| 1 | 1.060 | 0.261 | 1.035 | 0.235 | 0.223 | 0.119 | 0.235 | 0.143 |
+| 2 | 0.847 | 0.173 | 0.820 | 0.155 | 0.257 | 0.106 | 0.257 | 0.133 |
+| 3 | 0.706 | 0.124 | 0.695 | 0.123 | 0.254 | 0.101 | 0.251 | 0.133 |
+| 4 | 0.680 | 0.100 | 0.674 | 0.097 | 0.272 | 0.105 | 0.271 | 0.132 |
+| 6 | 0.677 | 0.076 | 0.673 | 0.074 | 0.356 | 0.098 | 0.353 | 0.119 |
+| **8** | **0.669** | 0.061 | 0.667 | 0.060 | **0.413** | 0.089 | 0.411 | 0.104 |
+| 10 | 0.706 | 0.055 | 0.705 | 0.053 | 0.442 | 0.089 | 0.439 | 0.102 |
+| 12 | 0.719 | 0.051 | 0.717 | 0.052 | 0.461 | 0.091 | 0.458 | 0.102 |
+| 14 | 0.717 | 0.045 | 0.716 | 0.046 | 0.473 | 0.094 | 0.471 | 0.105 |
+| **16** | **0.710** | 0.043 | 0.708 | 0.046 | **0.469** | 0.107 | 0.467 | 0.119 |
+| 18 | 0.715 | 0.046 | 0.713 | 0.053 | 0.456 | 0.119 | 0.453 | 0.133 |
+| 20 | 0.729 | 0.054 | 0.727 | 0.063 | 0.443 | 0.125 | 0.440 | 0.139 |
 
 Horizons 8 and 16 are the two-year and four-year multipliers reported in the
 paper. The headline finding reproduces: the multiplier is well below one over
@@ -166,35 +165,17 @@ shocks and 21 horizons. The residual gap is most likely a data-vintage
 difference: `Multiplier-Standard-Errors.xlsx` is dated 21 November 2016 while
 the shipped `RZDAT.xlsx` was revised on 28 November 2016.
 
-## Why not the automatic bandwidth
+## Standard errors
 
-Ramey and Zubairy run `ivreg2 …, robust bw(auto)`. Both that and
-`CovarianceMatrices.Bartlett{NeweyWest}` claim to implement the Newey–West
-(1994) automatic bandwidth, and they agree on the kernel, on what the bandwidth
-parameter means, and on the absence of a degrees-of-freedom correction — but
-not on the number:
-
-| h | ``S_T`` selected by `Bartlett{NeweyWest}` | bandwidth implied by RZ's published s.e. |
-|---:|---:|---:|
-| 0 | 15.6 | 19.5 |
-| 2 | 3.1 | 30.0 |
-| 4 | 8.3 | 28.5 |
-| 8 | 14.3 | 29.0 |
-| 12 | 15.9 | 30.5 |
-| 16 | 16.5 | 30.0 |
-| 20 | 16.7 | 29.5 |
-
-The implied bandwidth is flat at ``\approx 30`` while the data-driven one
-swings between 3 and 17, even though the horizon-``h`` residual is MA(``h``) by
-construction. Over the full grid the automatic rule gives standard errors
-0.76–1.12 times the published ones; a fixed `Bartlett(30.0)` narrows that to
-0.99–1.05 (Blanchard–Perotti) and 0.95–1.11 (military news).
-
-Section 8 of [the inference guide](../inference_procedures_guide.md) gives the
-exact formula each side implements and the evidence behind this table. For
-local projections a fixed, horizon-aware bandwidth is the defensible default:
-the MA(``h``) truncation is known a priori, so there is little to gain from
-estimating it.
+The published standard errors come from `ivreg2 …, robust bw(auto)`. Both that
+and `CovarianceMatrices.Bartlett{NeweyWest}` implement the Newey–West (1994)
+automatic bandwidth, and they agree on the kernel, on what the bandwidth
+parameter means, and on the absence of a degrees-of-freedom correction, but
+the two implementations select different bandwidths on the same regression.
+Over the full grid the standard errors above are 0.76–1.12 times the published
+ones. Section 8 of [the inference guide](../inference_procedures_guide.md)
+gives the exact formula each side implements and measures the difference
+horizon by horizon.
 
 ## The two-step multiplier
 
@@ -223,10 +204,105 @@ impulse-response regressions. Ramey and Zubairy note that in other
 specifications the two diverge, and the reason is precisely that the samples
 differ.
 
+## Bias correction and bootstrap bands for the impulse responses
+
+The impulse responses behind the two-step multiplier are OLS local projections,
+so they can be run through the procedure the Montiel Olea, Plagborg-Møller,
+Qian & Wolf (2025) replication suite recommends: the Herbst–Johannsen
+[`biascorrect`](@ref) applied to the path, and [`varbootstrap`](@ref), the VAR
+residual moving-block bootstrap with a Pope-corrected data-generating process
+and Hall percentile-``t`` bands. Both corrections are on by default. The
+multiplier regressions themselves are out of scope: `varbootstrap` rejects
+`lpiv` results and horizon-tracking regressors.
+
+The VAR columns must be free of `missing` values. `newsy` starts in 1890Q1, so
+the four leading rows are dropped; the local-projection samples are unchanged
+because those rows never enter any regression.
+
+### Four lags: the Ramey–Zubairy specification
+
+![Bias-corrected bootstrap, 4 lags](../assets/ramey_zubairy_bootstrap_lags4.png)
+
+```julia
+using Random, Plots
+
+rzc = dropmissing(rz, [:newsy, :y, :g])
+
+irf_y = lp(@formula(leads(y) ~ newsy + lags(newsy, 4) + lags(y, 4) + lags(g, 4)),
+           rzc; horizon = 20)
+irf_g = lp(@formula(leads(g) ~ newsy + lags(newsy, 4) + lags(y, 4) + lags(g, 4)),
+           rzc; horizon = 20)
+
+# Same seed for both responses: identical artificial samples.
+boot_y = varbootstrap(irf_y, rzc; vars = [:newsy, :y, :g], nlags = 4,
+                      nboot = 1000, rng = Xoshiro(20260916))
+boot_g = varbootstrap(irf_g, rzc; vars = [:newsy, :y, :g], nlags = 4,
+                      nboot = 1000, rng = Xoshiro(20260916))
+
+summarize(boot_y; level = 0.90)     # bias-corrected path, Hall percentile-t bands
+plot(boot_g; levels = [0.68, 0.90])
+```
+
+`vars` is the VAR data vector in identification order, shock first. It must
+contain every variable the formula refers to, since the complete local
+projection is re-estimated in each draw.
+
+Both responses are hump-shaped: GDP peaks at about 0.30 ten quarters after the
+shock, spending at about 0.38 after eleven. The bias correction raises the
+paths by at most 0.02 on this long sample, which is the gap between the solid
+and dashed lines in the figure. The 90% band for GDP excludes zero through
+horizon 13, the one for spending from horizon 1 to 17. All 1000 draws estimate
+successfully (`boot_y.nfail == 0`) and the Pope correction applies in full
+(`boot_y.pope_delta == 1.0`).
+
+### Lag order selected by AIC
+
+The reference selects the VAR order by AIC over ``p = 1, \dots, 10`` and uses
+it both for the local-projection controls and for the bootstrap VAR.
+[`lagselect`](@ref) ports that rule:
+
+![Bias-corrected bootstrap, 9 lags](../assets/ramey_zubairy_bootstrap_lags9.png)
+
+```julia
+sel = lagselect(rzc, [:newsy, :y, :g]; maxlags = 10, criterion = :aic)
+nlags(sel)                          # 9  (BIC would pick 2)
+DataFrame(sel)                      # the AIC and BIC paths over p = 1:10
+
+irf_y = lp(@formula(leads(y) ~ newsy + lags(newsy, 9) + lags(y, 9) + lags(g, 9)),
+           rzc; horizon = 20)
+irf_g = lp(@formula(leads(g) ~ newsy + lags(newsy, 9) + lags(y, 9) + lags(g, 9)),
+           rzc; horizon = 20)
+
+boot_y = varbootstrap(irf_y, rzc; vars = [:newsy, :y, :g], nlags = 9,
+                      nboot = 1000, rng = Xoshiro(20260916))
+boot_g = varbootstrap(irf_g, rzc; vars = [:newsy, :y, :g], nlags = 9,
+                      nboot = 1000, rng = Xoshiro(20260916))
+
+summarize(boot_y; level = 0.90)
+plot(boot_g; levels = [0.68, 0.90])
+```
+
+`@formula` takes a literal lag count, so the selected order is read off
+`nlags(sel)` and written into the formula by hand; the same value goes to
+`nlags` in `varbootstrap` so the controls and the bootstrap VAR agree.
+
+The extra lags leave the shape intact. Both responses now peak eleven quarters
+out, at about 0.29 for GDP and 0.39 for spending. The bands widen at long
+horizons and become right-skewed: at the GDP peak the upper half-width is
+nearly twice the lower one. The GDP band excludes zero through horizon 19 and
+the spending band from horizon 1 to 16. Again no draw fails and the Pope
+correction applies in full.
+
+Bands are pointwise across horizons, not simultaneous. Each bootstrap of 1000
+draws takes a few seconds. The figures are regenerated by
+`julia --project=docs docs/make_rz_bootstrap_figure.jl`.
+
 ## Caveats
 
-* `varbootstrap` does not apply to this specification: it supports OLS local
-  projections only, and rejects `lpiv`.
+* `varbootstrap` and `biascorrect` do not apply to the multiplier regressions:
+  both support OLS local projections only and reject `lpiv` results and
+  horizon-tracking regressors. The impulse responses are covered in the
+  section above.
 * The Kleibergen–Paap rk Wald *F* reported by `ivreg2` is not implemented here.
   `weakivtest` returns the Montiel Olea–Pflueger effective *F* and a robust
   first-stage *F*; for the just-identified case the latter is the closer

@@ -290,13 +290,13 @@ rz.bp = rz.g                       # Blanchard–Perotti shock: current spending
 # Impulse responses of government spending and GDP to the military-news shock
 irf = lp(@formula(leads(g) ~ newsy + lags(newsy, 4) + lags(y, 4) + lags(g, 4)),
          rz; horizon = 20)
-summarize(irf, Bartlett(30.0); term = :newsy, level = 0.90)
+summarize(irf, Bartlett{NeweyWest}(); term = :newsy, level = 0.90)
 
 # One-step cumulative multiplier: cumulative GDP on cumulative spending through
 # the same horizon, spending instrumented by the news shock.
 mult = lpiv(@formula(cumul(y) ~ (cumul(g) ~ newsy) +
                      lags(newsy, 4) + lags(y, 4) + lags(g, 4)), rz; horizon = 20)
-summarize(mult, Bartlett(30.0); level = 0.90)
+summarize(mult, Bartlett{NeweyWest}(); level = 0.90)
 
 # Weak-instrument diagnostic at the two-year horizon
 weakivtest(mult + vcov(Bartlett{NeweyWest}()), 8)
@@ -309,12 +309,90 @@ errors of the authors' value. The news instrument never clears the Montiel
 Olea–Pflueger 5% critical value (the effective *F* peaks at 19.6 at five
 quarters), and Blanchard–Perotti falls below it from horizon 11 on.
 
-The figure uses the automatic Newey–West bandwidth; the fixed `Bartlett(30.0)`
-above is what reproduces the published standard errors, for the reasons given
-in section 8 of the inference guide. Regenerate the figure with
-`julia --project=docs docs/make_rz_figure.jl`. The full walkthrough, including
-the two-step multiplier and a table against the published numbers, is in
-[the tutorial](docs/src/tutorials/ramey_zubairy.md).
+Standard errors, confidence bands and the weak-instrument test all use the
+automatic Newey–West bandwidth, and so does the figure, which
+`julia --project=docs docs/make_rz_figure.jl` regenerates. The full
+walkthrough, including the two-step multiplier and a table against the
+published numbers, is in [the tutorial](docs/src/tutorials/ramey_zubairy.md).
+
+### Bias correction and bootstrap bands
+
+The same impulse responses with the procedure the reference recommends:
+Herbst–Johannsen bias correction and the VAR moving-block bootstrap with a
+Pope-corrected data-generating process, first with the four lags of the
+Ramey–Zubairy specification and then with the VAR order chosen by `lagselect`.
+The procedure is defined for OLS local projections, so it covers the impulse
+responses but not the IV multiplier or the weak-instrument test above, which
+stay on analytical HAC inference.
+
+**Four lags, the Ramey–Zubairy specification.** Same regressions as `irf`
+above, now for both responses. The VAR columns must be free of `missing`
+values, so the four leading rows without a news observation are dropped; the
+estimation samples are unchanged.
+
+![Ramey–Zubairy bootstrap, 4 lags](docs/src/assets/ramey_zubairy_bootstrap_lags4.png)
+
+```julia
+using Random, Plots
+
+rzc = dropmissing(rz, [:newsy, :y, :g])
+
+irf_y = lp(@formula(leads(y) ~ newsy + lags(newsy, 4) + lags(y, 4) + lags(g, 4)),
+           rzc; horizon = 20)
+irf_g = lp(@formula(leads(g) ~ newsy + lags(newsy, 4) + lags(y, 4) + lags(g, 4)),
+           rzc; horizon = 20)
+
+# Moving-block bootstrap; popecorrect and biascorrect are both on by default.
+# The same seed gives both responses the same artificial samples.
+boot_y = varbootstrap(irf_y, rzc; vars = [:newsy, :y, :g], nlags = 4,
+                      nboot = 1000, rng = Xoshiro(20260916))
+boot_g = varbootstrap(irf_g, rzc; vars = [:newsy, :y, :g], nlags = 4,
+                      nboot = 1000, rng = Xoshiro(20260916))
+
+summarize(boot_y; level = 0.90)     # bias-corrected path, Hall percentile-t bands
+plot(boot_g; levels = [0.68, 0.90])
+```
+
+Both responses are hump-shaped, peaking at about **0.30** for GDP after ten
+quarters and **0.38** for spending after eleven, per unit of news. The bias
+correction raises the paths by at most 0.02 on this long sample. The 90% band
+for GDP excludes zero through horizon 13, the one for spending from horizon 1
+to 17. All 1000 draws estimate successfully (`nfail = 0`) and the Pope
+correction applies in full (`pope_delta = 1.0`).
+
+**Lag order selected by AIC.** The reference selects the VAR order by AIC over
+`p = 1:10` and uses it for the local-projection controls and the bootstrap VAR
+alike. On the (news, GDP, spending) system that gives nine lags; BIC would pick
+two.
+
+![Ramey–Zubairy bootstrap, 9 lags](docs/src/assets/ramey_zubairy_bootstrap_lags9.png)
+
+```julia
+sel = lagselect(rzc, [:newsy, :y, :g]; maxlags = 10, criterion = :aic)
+nlags(sel)                          # 9
+
+irf_y = lp(@formula(leads(y) ~ newsy + lags(newsy, 9) + lags(y, 9) + lags(g, 9)),
+           rzc; horizon = 20)
+irf_g = lp(@formula(leads(g) ~ newsy + lags(newsy, 9) + lags(y, 9) + lags(g, 9)),
+           rzc; horizon = 20)
+
+boot_y = varbootstrap(irf_y, rzc; vars = [:newsy, :y, :g], nlags = 9,
+                      nboot = 1000, rng = Xoshiro(20260916))
+boot_g = varbootstrap(irf_g, rzc; vars = [:newsy, :y, :g], nlags = 9,
+                      nboot = 1000, rng = Xoshiro(20260916))
+
+summarize(boot_y; level = 0.90)
+plot(boot_g; levels = [0.68, 0.90])
+```
+
+The extra lags leave the shape intact: both responses now peak eleven quarters
+out, at about **0.29** for GDP and **0.39** for spending. The bands widen at
+long horizons and become right-skewed, with the upper half-width at the GDP
+peak nearly twice the lower one; the GDP band excludes zero through horizon 19
+and the spending band from horizon 1 to 16. Again no draw fails and the Pope
+correction applies in full. Each bootstrap of 1000 draws takes a few seconds.
+Both figures are regenerated by `julia --project=docs docs/make_rz_bootstrap_figure.jl`,
+with the uncorrected OLS path dashed.
 
 ## Plotting
 

@@ -1267,13 +1267,13 @@ horizon as the cumulative response.
 res = lpiv(@formula(cumul(y) ~ (cumul(g) ~ bp) + lags(y, 4) + lags(g, 4)),
            rz; horizon = 20)
 
-summarize(res, vcov(Bartlett(30.0), res))   # multiplier path with s.e. and bands
+summarize(res, vcov(Bartlett{NeweyWest}(), res))   # multiplier path with s.e. and bands
 ```
 
 The multiplier is the coefficient on `cumul(g)`, which `shock` picks up by
-default. On the choice of HAC bandwidth here — and why the automatic
-Newey-West rule does *not* reproduce Stata `ivreg2, bw(auto)` output — see
-section 8 of `docs/src/inference_procedures_guide.md`.
+default. On how the automatic Newey-West bandwidth selected here compares with
+Stata `ivreg2, bw(auto)` output, see section 8 of
+`docs/src/inference_procedures_guide.md`.
 
 # Arguments
 - `formula::FormulaTerm`: A formula with IV specification using `(endo ~ instruments)` syntax
