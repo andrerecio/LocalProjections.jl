@@ -315,6 +315,43 @@ automatic Newey–West bandwidth, and so does the figure, which
 walkthrough, including the two-step multiplier and a table against the
 published numbers, is in [the tutorial](docs/src/tutorials/ramey_zubairy.md).
 
+### HAR inference with EWC
+
+The news-shock impulse responses again, now with the HAR inference Lazarus,
+Lewis, Stock and Watson (2018) recommend: the equal-weighted-cosine (EWC)
+variance estimator with `B = ⌊0.41·T₀^(2/3)⌋` cosine terms, paired with
+Student-`t_B` critical values from fixed-smoothing asymptotics. The point
+estimates are those of the first figure; only the bands change. The dashed
+lines are the 90% automatic Newey–West band with normal critical values, for
+comparison.
+
+![Ramey–Zubairy EWC bands](docs/src/assets/ramey_zubairy_ewc.png)
+
+```julia
+using Plots
+
+irf_g = lp(@formula(leads(g) ~ newsy + lags(newsy, 4) + lags(y, 4) + lags(g, 4)),
+           rz; horizon = 20)
+irf_y = lp(@formula(leads(y) ~ newsy + lags(newsy, 4) + lags(y, 4) + lags(g, 4)),
+           rz; horizon = 20)
+
+B = ewc_bandwidth(irf_g)            # 25, from the T₀ = 500 rows of the h = 0 sample
+
+summarize(irf_y, EWC(B); term = :newsy, level = 0.90)     # Student-t₂₅ bands
+plot(irf_g, EWC(B); term = :newsy, levels = [0.68, 0.90])
+```
+
+With `B = 25` the 90% critical value is 1.708 instead of the normal 1.645. At
+the peaks the EWC standard errors are 2–5% above the Newey–West ones, so the
+band around the GDP peak of **0.29** at ten quarters widens from [0.16, 0.42]
+to [0.16, 0.43], and the one around the spending peak of **0.37** at eleven
+quarters from [0.15, 0.58] to [0.13, 0.60]. At short horizons the ranking
+reverses: between two and five quarters the EWC standard errors are 13–45%
+smaller. The conclusions barely move. The spending band excludes zero through
+horizon 18 under both procedures, and the GDP band through horizon 14; after
+that it includes zero at horizons 15–16, where Newey–West only does so at 15.
+`julia --project=docs docs/make_rz_ewc_figure.jl` regenerates the figure.
+
 ### Bias correction and bootstrap bands
 
 The same impulse responses with the procedure the reference recommends:
