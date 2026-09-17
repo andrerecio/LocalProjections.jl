@@ -16,7 +16,8 @@ using JuliaFormatter
 
 const ROOT = dirname(@__DIR__)
 const TARGETS = ["src", "ext", "test", "benchmark", "dev",
-    "docs/make.jl", "docs/make_rz_figure.jl", "docs/make_rz_bootstrap_figure.jl"]
+    "docs/make.jl", "docs/make_rz_figure.jl", "docs/make_rz_bootstrap_figure.jl",
+    "docs/make_rz_ewc_figure.jl"]
 
 function main()
     allclean = true
