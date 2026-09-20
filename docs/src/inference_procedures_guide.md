@@ -1195,6 +1195,18 @@ Two consequences matter for replication:
   without `small`, where the help file gives $q_c = 1$; it does **not** match
   `ivreg2, robust small`, where $q_c = N/(N-K)$.
 
+**Scope note (added 2026-09-20).** Items 2 and the second consequence describe
+the **IV** path (`lpiv`, the Ramey--Zubairy case this section is about), where
+Regress.jl builds the moment matrix itself --- as $\hat x_t\hat u_t$, which for
+a fixed bandwidth gives the same covariance as $z_t\hat u_t$ --- and calls
+`aVar` on it directly. On **OLS** models (`lp`) the generic path is used
+instead: `setkernelweights!` is called on the *model matrix*, so the intercept
+gets weight $0$, and the $T/(T-K)$ factor **is** applied (OLS kernel HAC equals
+Stata's `newey` to 15 digits). The two paths therefore select different
+bandwidths and use different finite-sample conventions for the same estimator;
+see REG-2 in `CLAUDE.md`. Stata applies weight $0$ to the constant and one
+$q_c$ convention on both.
+
 ### 8.2 What `ivreg2, bw(auto)` documents
 
 From the `ivreg2` help file (Baum, Schaffer and Stillman):
@@ -1240,6 +1252,39 @@ local-projection residual is MA($h$) by construction, so the two procedures
 respond very differently to a moving-average structure that is known a priori.
 This is not a constant-factor convention mismatch that could be absorbed into a
 scaling.
+
+**The mechanism (source-level check, 2026-09-20).** The flat $\approx 29$--$30$
+is what `ivreg2`'s selector returns when it sits on its own cap. Its Mata
+routine `s_abw` (`ivreg2.ado` 4.1.11; official `ivregress` agrees with it to
+$10^{-18}$) uses the same plug-in formula as §8.1 but a pilot truncation five
+times longer, and caps the selected lag at that pilot value:
+
+\[
+m^* = \left\lfloor 20\left(\tfrac{T}{100}\right)^{2/9}\right\rfloor,
+\qquad
+\text{lag} = \min\!\left(\lfloor \hat\gamma\, T^{1/3}\rfloor,\; m^*\right),
+\qquad
+\text{bw} = \text{lag} + 1 ,
+\]
+
+against $n=\lfloor 4(T/100)^{2/9}\rfloor$ and no cap in `CovarianceMatrices`
+(and in R's `sandwich::bwNeweyWest`). For every sample size in the table,
+$T = 484,\dots,504$, this gives $m^* = 28$, i.e. a maximum bandwidth of **29**
+--- the value the published standard errors imply at all horizons $h \ge 2$. A
+long pilot sum $\hat s_1 = 2\sum_{j\le m^*} j\,\hat\sigma_j$ puts weight $j$ on
+noisy long-lag autocovariances, so the selected lag is large and hits the cap
+often: in a Monte Carlo on an AR(1) design with $T = 300$ ($m^* = 25$) the Stata
+rule selected a median of 23 lags and sat exactly on the cap in 48% of draws,
+while the $4(\cdot)$ rule selected a median bandwidth of 6.2. Only $h = 0$
+(implied 19.5), where the LP residual has no built-in moving-average component,
+falls below the cap. The implied bandwidths are reverse-engineered, not read off
+a Stata log, so this is an explanation consistent with the source code and the
+numbers rather than a run of the authors' do-file; but it accounts for both the
+level and the flatness, and it means the two "Newey--West automatic" rules
+cannot be reconciled by any setting on the Julia side other than a fixed
+bandwidth (§8.4). `ivreg2` also gives the constant weight $0$ in the scalar
+series and builds it from the instrument moments $z_t\hat u_t$; see the scope
+note in §8.1.
 
 Across both shocks and all 21 horizons the automatic rule gives standard errors
 **0.76 to 1.12 times** the published ones.

@@ -65,3 +65,6 @@ test_pkg/
 AGENTS.md
 GEMINI.md
 JULIA.md
+
+# Stata cross-check material for the upstream Regress.jl issue drafts (local only)
+stata_test/
