@@ -1802,3 +1802,167 @@ end
     @test !occursin("horizon-tracking", err.msg)
     @test occursin("truncated", err.msg)
 end
+
+@testitem "state-dependent lp equals the hand-built regime interactions" tags = [
+    :state, :core, :verification] begin
+    using LocalProjections
+    using DataFrames, StatsModels, StatsBase, Test, Random
+    using CovarianceMatrices: HR0, Bartlett
+    using Regress: ols
+
+    rng = Random.Xoshiro(20260921)
+    n = 240
+    x = randn(rng, n)
+    s = Float64.(rand(rng, n) .< 0.4)
+    y = zeros(n)
+    for t in 2:n
+        y[t] = 0.5y[t - 1] + (s[t - 1] == 1 ? 1.5 : 0.5) * x[t] + randn(rng)
+    end
+    df = DataFrame(y = y, x = x, s = s)
+
+    r = lp(@formula(leads(y) ~ x + lags(y, 2)), df; horizon = 4, state = :s)
+    @test coefnames(r) == ["(Intercept)_s0", "x_s0", "y_lag1_s0", "y_lag2_s0",
+        "(Intercept)_s1", "x_s1", "y_lag1_s1", "y_lag2_s1"]
+    @test r.shock === :x_s0
+    @test r.state == LPState(:s, 1, ("s0", "s1"), :x)
+    @test Int.(nobs.(r.models)) == [n - 2 - h for h in 0:4]
+
+    # Same column space as the Ramey-Zubairy lists: L.state, a constant and the
+    # regressors interacted with L.state and 1 - L.state
+    for h in (0, 3)
+        ts = 3:(n - h)
+        I1 = s[ts .- 1]
+        Xh = hcat(ones(length(ts)), I1, x[ts] .* (1 .- I1), x[ts] .* I1,
+            y[ts .- 1] .* (1 .- I1), y[ts .- 1] .* I1, y[ts .- 2] .* (1 .- I1), y[ts .- 2] .*
+                                                                                I1)
+        mh = ols(Xh, y[ts .+ h]; has_intercept = false)
+        @test coefpath(r; term = :x_s0)[h + 1] ≈ coef(mh)[3] rtol = 1e-10
+        @test coefpath(r; term = :x_s1)[h + 1] ≈ coef(mh)[4] rtol = 1e-10
+        se = sqrt.(vcov(HR0(), r).variances[:x_s1])
+        @test se[h + 1] ≈ sqrt(vcov(HR0(), mh)[4, 4]) rtol = 1e-8
+    end
+
+    # ... and as two separate regressions, one per regime
+    ts = 3:n
+    for (k, term) in ((0.0, :x_s0), (1.0, :x_s1))
+        keep = ts[s[ts .- 1] .== k]
+        mk = ols(hcat(ones(length(keep)), x[keep], y[keep .- 1], y[keep .- 2]), y[keep];
+            has_intercept = false)
+        @test coefpath(r; term)[1] ≈ coef(mk)[2] rtol = 1e-10
+    end
+
+    # labels, shock designation, state already timed
+    df.sl = [missing; s[1:(end - 1)]]
+    r2 = lp(@formula(leads(y) ~ lags(y, 2) + x), df; horizon = 4, state = :sl,
+        statelag = 0, regimes = ("lo", "hi"), shock = :x)
+    @test r2.shock === :x_lo
+    @test coefpath(r2; term = :x_hi) ≈ coefpath(r; term = :x_s1) rtol = 1e-10
+    r3 = lp(@formula(leads(y) ~ lags(y, 2) + x), df; horizon = 2, state = :s, shock = :x_s1)
+    @test r3.shock === :x_s1 && r3.state.shock === :x
+
+    # statetest uses the covariance between the regimes
+    st = statetest(r, Bartlett(4))
+    @test st.diff ≈ coefpath(r; term = :x_s1) .- coefpath(r; term = :x_s0)
+    @test all(0 .<= st.pvalue .<= 1)
+    @test st.pvalue[1] < 0.01                     # 1.5 vs 0.5 on impact
+    @test size(DataFrame(st)) == (5, 5)
+    @test (r + vcov(Bartlett(4))).state == r.state
+
+    # tautological h = 0: the shock is the response, in both regimes
+    rt = lp(@formula(leads(x) ~ x + lags(y, 1)), df; horizon = 2, state = :s)
+    @test rt.tautological_h0
+    @test coefpath(rt; term = :x_s0)[1] == 1.0 && coefpath(rt; term = :x_s1)[1] == 1.0
+    @test vcov(HR0(), rt).variances[:x_s1][1] == 0.0
+    @test isnan(statetest(rt, HR0()).stat[1])
+end
+
+@testitem "state-dependent lp/lpiv reproduce Ramey-Zubairy (ivreg2, Stata 19.5)" tags = [
+    :state, :iv, :weakiv, :verification] begin
+    using LocalProjections
+    using DataFrames, StatsModels, StatsBase, Test
+    using CovarianceMatrices: Bartlett
+
+    # docs/src/data/ramey_zubairy.csv, read without CSV.jl
+    path = joinpath(@__DIR__, "..", "docs", "src", "data", "ramey_zubairy.csv")
+    lines = readlines(path)
+    hdr = Symbol.(split(lines[1], ","))
+    cols = [Union{Missing, Float64}[] for _ in hdr]
+    for l in lines[2:end], (j, v) in enumerate(split(l, ","; keepempty = true))
+
+        push!(cols[j], isempty(v) ? missing : parse(Float64, v))
+    end
+    rz = DataFrame(cols, hdr)
+
+    # Reference: stata_test/rz_compare.do, -ivreg2 ..., robust bw(6)-, h = 8, news shock
+    r = lp(@formula(leads(y) ~ newsy + lags(newsy, 4) + lags(y, 4) + lags(g, 4)), rz;
+        horizon = 8, state = :slack, regimes = ("exp", "rec"))
+    n = nobs(r.models[9])
+    @test n == 492
+    @test coefpath(r; term = :newsy_exp)[9] ≈ 8.98901816161449e-02 rtol = 1e-9
+    @test coefpath(r; term = :newsy_rec)[9] ≈ 3.70392317221167e-01 rtol = 1e-9
+    # ivreg2 applies no n/(n-k) to an OLS kernel HAC; Regress does (REG-2)
+    se = sqrt.(vcov(Bartlett(6), r).variances[:newsy_rec] .* (n - 28) ./ n)
+    @test se[9] ≈ 8.10147008674164e-02 rtol = 1e-8
+
+    m = lpiv(
+        @formula(cumul(y) ~ (cumul(g) ~ newsy) + lags(newsy, 4) + lags(y, 4) +
+                            lags(g, 4)),
+        rz;
+        horizon = 8, state = :slack, regimes = ("exp", "rec"))
+    gexp, grec = Symbol("cumul(g)_exp"), Symbol("cumul(g)_rec")
+    @test m.shock === gexp
+    @test m.endogenous_names == ["cumul(g)_exp", "cumul(g)_rec"]
+    @test m.instrument_names == ["newsy_exp", "newsy_rec"]
+    @test coefpath(m; term = gexp)[9] ≈ 5.90610510995029e-01 rtol = 1e-9
+    @test coefpath(m; term = grec)[9] ≈ 6.20128665175688e-01 rtol = 1e-9
+    V = vcov(Bartlett(6), m)
+    @test sqrt(V.variances[gexp][9]) ≈ 1.00411664695866e-01 rtol = 1e-8
+    @test sqrt(V.variances[grec][9]) ≈ 1.14414760866032e-01 rtol = 1e-8
+
+    st = statetest(m, Bartlett(6))
+    @test st.stat[9] ≈ 3.49868427322225e-02 rtol = 1e-7
+    @test st.pvalue[9] ≈ 8.51623232302201e-01 rtol = 1e-7
+
+    # Montiel Olea-Pflueger effective F of the one-regime regression (-weakivtest-)
+    mh = m + vcov(Bartlett(6))
+    @test weakivtest(mh, 8; regime = "rec").F_eff ≈ 1.86280736822122e+02 rtol = 1e-8
+    @test weakivtest(mh, 8; regime = 2).F_eff == weakivtest(mh, 8; regime = :rec).F_eff
+    @test length(weakivtest(mh; regime = 1)) == 9
+    @test_throws ArgumentError weakivtest(mh, 8)
+    @test_throws ArgumentError weakivtest(mh, 8; regime = "boom")
+end
+
+@testitem "state-dependent projections: guards" tags = [:state, :api] begin
+    using LocalProjections
+    using DataFrames, StatsModels, Test, Random
+    using CovarianceMatrices: HR0
+
+    rng = Random.Xoshiro(7)
+    n = 120
+    df = DataFrame(y = randn(rng, n), x = randn(rng, n), z = randn(rng, n),
+        s = Float64.(rand(rng, n) .< 0.5), bad = 2 .* rand(rng, n), w = rand(rng, n))
+    f = @formula(leads(y) ~ x + lags(y, 1))
+
+    @test_throws ArgumentError lp(f, df; horizon = 2, state = :bad)
+    @test_throws ArgumentError lp(f, df; horizon = 2, state = :s, statelag = -1)
+    @test_throws ArgumentError lp(f, df; horizon = 2, state = :s, regimes = ("a",))
+    @test_throws ArgumentError lp(f, df; horizon = 2, state = :s, regimes = ("a", "a"))
+    @test_throws ArgumentError lp(f, df; horizon = 2, state = :s, shock = :nope)
+
+    # a smooth weight in [0, 1] (Auerbach-Gorodnichenko) is accepted
+    rw = lp(f, df; horizon = 2, state = :w)
+    @test length(coefnames(rw)) == 6
+
+    r = lp(f, df; horizon = 2, state = :s)
+    @test_throws ArgumentError biascorrect(r)
+    @test_throws ArgumentError varbootstrap(r, df; vars = [:x, :y], nlags = 1, nboot = 5)
+    @test_throws ArgumentError statetest(lp(f, df; horizon = 2), HR0())
+    @test_throws ArgumentError statetest(r, HR0(); term = :nope)
+
+    # linear results are untouched, and `regime` is rejected there
+    @test lp(f, df; horizon = 2).state === nothing
+    miv = lpiv(@formula(leads(y) ~ (x ~ z) + lags(y, 1)), df; horizon = 2)
+    @test miv.state === nothing
+    @test_throws ArgumentError weakivtest(miv, 1; regime = 1)
+    @test occursin("State:", sprint(show, MIME("text/plain"), r))
+end
