@@ -348,19 +348,22 @@ which replaces the hand-built `rec*`/`exp*` interactions of `jordagk.do`.
 ```julia
 mult_s = lpiv(@formula(cumul(y) ~ (cumul(g) ~ newsy) +
                        lags(newsy, 4) + lags(y, 4) + lags(g, 4)), rz;
-              horizon = 20, state = :slack, regimes = ("low", "slack"))
+              horizon = 20, state = :slack, regimes = ("expansion", "slack"))
 
 hac = Bartlett{NeweyWest}()
+summarize(mult_s, hac; term = Symbol("cumul(g)_expansion"), level = 0.90)
 summarize(mult_s, hac; term = Symbol("cumul(g)_slack"), level = 0.90)
 statetest(mult_s, hac)                            # H0: equal multipliers, by horizon
-weakivtest(mult_s + vcov(hac), 8; regime = "slack")
+weakivtest(mult_s + vcov(hac), 8; regime = "expansion")
 ```
 
-With the news shock the two-year multiplier is **0.62** under slack and
-**0.59** otherwise (p = 0.82); with Blanchard–Perotti it is **0.70** against
-**0.33** (p = 0.007), larger under slack but still below one — the paper's
-result. The news instrument is weak outside slack (effective *F* below 10 at
-every horizon). `state` works the same way in `lp` for impulse responses, and
+`regimes` names the two states, here expansion (no slack) and slack, and each
+gets its own coefficient path; the dashed line in the figure is the linear
+multiplier of the previous section. With the news shock the two-year multiplier
+is **0.59** in expansion and **0.62** under slack (p = 0.82); with
+Blanchard–Perotti it is **0.33** against **0.70** (p = 0.007), larger under
+slack but still below one — the paper's result. The news instrument is weak in
+expansion (effective *F* below 10 at every horizon). `state` works the same way in `lp` for impulse responses, and
 also accepts a weight in [0, 1] such as the Auerbach–Gorodnichenko transition
 function. `julia --project=docs docs/make_rz_state_figure.jl` regenerates the
 figure, which omits the first two quarters, where the instrument is weakest.
@@ -498,8 +501,8 @@ result into the `LocalProjectionIRFResult` type of MacroEconometricTools.jl.
   - **Bootstrap and bias correction scope.** Both are defined for OLS local
     projections with `leads` or `cumul` responses and a horizon-invariant
     regressor set. Anchored responses, `lpiv` results, horizon-tracking
-    regressors and state-dependent projections are rejected with an explanation. The VAR columns must be free
-    of `missing` and `NaN`.
+    regressors and state-dependent projections are rejected with an
+    explanation. The VAR columns must be free of `missing` and `NaN`.
   - **HAC keyword forwarding.** `vcov` does not forward keyword arguments such
     as `dofadjust` to the per-horizon models, and the upstream estimators ignore
     it for HAC and EWC in any case.

@@ -4,10 +4,11 @@
 #     julia --project=docs -e 'using Pkg; Pkg.instantiate()'
 #     julia --project=docs docs/make_rz_state_figure.jl
 #
-# The figure shows the one-step cumulative multiplier by state of the economy
-# (slack: unemployment at or above 6.5% in the previous quarter) for the
-# military-news and the Blanchard–Perotti shock, with 90% bands from the
-# automatic Newey–West bandwidth. Horizons 0 and 1 are left out: the news
+# The figure shows the one-step cumulative multiplier by state of the economy,
+# one row per state — expansion (unemployment below 6.5% in the previous
+# quarter) and slack — for the military-news and the Blanchard–Perotti shock,
+# with 68% and 90% bands from the automatic Newey–West bandwidth. The linear
+# (state-independent) multiplier is dashed for reference. Horizons 0 and 1 are left out: the news
 # instrument is very weak there (effective F of about 2) and the bands dwarf
 # the rest of the path. The README states the numbers this figure is built from.
 
@@ -44,19 +45,25 @@ rz.bp = rz.g
 
 # ---------------------------------------------------------------- estimation
 
-const REGIMES = ("low", "slack")
+const REGIMES = ("expansion", "slack")
 
-news = lpiv(
-    @formula(cumul(y) ~ (cumul(g) ~ newsy) +
-                        lags(newsy, 4) + lags(y, 4) + lags(g, 4)), rz;
-    horizon = HMAX, state = :slack, regimes = REGIMES)
-bp = lpiv(@formula(cumul(y) ~ (cumul(g) ~ bp) + lags(y, 4) + lags(g, 4)), rz;
-    horizon = HMAX, state = :slack, regimes = REGIMES)
+const F_NEWS = @formula(cumul(y) ~
+                        (cumul(g) ~ newsy) +
+                        lags(newsy, 4) + lags(y, 4) + lags(g, 4))
+const F_BP = @formula(cumul(y) ~ (cumul(g) ~ bp) + lags(y, 4) + lags(g, 4))
+
+function fit(f)
+    (linear = lpiv(f, rz; horizon = HMAX),
+        state = lpiv(f, rz; horizon = HMAX, state = :slack, regimes = REGIMES))
+end
+
+news = fit(F_NEWS)
+bp = fit(F_BP)
 
 # ---------------------------------------------------------------- plotting
 
 const INK = RGB(0.106, 0.180, 0.310)          # slack
-const ACCENT = RGB(0.760, 0.290, 0.235)       # low unemployment
+const ACCENT = RGB(0.760, 0.290, 0.235)       # expansion
 const RULE = RGB(0.62, 0.63, 0.66)            # axes and reference lines
 const TEXT = RGB(0.20, 0.22, 0.26)
 
@@ -68,35 +75,39 @@ function base()
         guidefontcolor = RULE, legend = false, ylabel = "")
 end
 
-function statepanel(m; title)
+function statepanel(m, regime, color; title, xlab = "")
     # A `Bartlett{NeweyWest}` instance is stateful: build a fresh one per model.
-    cov = vcov(Bartlett{NeweyWest}(), m)
-    test = statetest(m, Bartlett{NeweyWest}())
+    cov = vcov(Bartlett{NeweyWest}(), m.state)
+    term = Symbol("cumul(g)_", regime)
+    s90 = summarize(m.state, cov; term, level = 0.90)
+    s68 = summarize(m.state, cov; term, level = 0.68)
+    pval = statetest(m.state, Bartlett{NeweyWest}()).pvalue
+    @info title two_year=round(s90.coef[9]; digits = 3) four_year=round(
+        s90.coef[17]; digits = 3) p_equal_two_year=round(pval[9]; digits = 3)
     idx = collect(HSHOW) .+ 1
-    p = plot(; title = title, xlabel = "quarters", ylims = (-0.1, 1.25), base()...)
+    p = plot(HSHOW, s90.lower[idx]; fillrange = s90.upper[idx], linealpha = 0,
+        fillcolor = color, fillalpha = 0.14, label = "", title = title,
+        xlabel = xlab, ylims = (-0.1, 1.25), base()...)
+    plot!(p, HSHOW, s68.lower[idx]; fillrange = s68.upper[idx], linealpha = 0,
+        fillcolor = color, fillalpha = 0.20, label = "")
     hline!(p, [0.0, 1.0]; c = RULE, ls = :dot, lw = 0.8, label = "")
-    for (regime, color) in zip(REGIMES, (ACCENT, INK))
-        s = summarize(m, cov; term = Symbol("cumul(g)_", regime), level = 0.90)
-        @info title regime two_year=round(s.coef[9]; digits = 3) four_year=round(
-            s.coef[17]; digits = 3) p_two_year=round(test.pvalue[9]; digits = 3)
-        plot!(p, HSHOW, s.lower[idx]; fillrange = s.upper[idx], linealpha = 0,
-            fillcolor = color, fillalpha = 0.14, label = "")
-        plot!(p, HSHOW, s.coef[idx]; c = color, lw = 1.8, label = "")
-        annotate!(p, HMAX, s.coef[end] + (regime == "slack" ? 0.11 : -0.11),
-            text(regime == "slack" ? "slack" : "low unemployment", 7, color, :right))
-    end
+    plot!(p, HSHOW, coefpath(m.linear)[idx]; c = TEXT, ls = :dash, lw = 1.0, label = "")
+    plot!(p, HSHOW, s90.coef[idx]; c = color, lw = 1.8, label = "")
     return p
 end
 
 panels = [
-    statepanel(news; title = "Cumulative multiplier · news"),
-    statepanel(bp; title = "Cumulative multiplier · Blanchard–Perotti")
+    statepanel(news, "expansion", ACCENT; title = "Expansion · news"),
+    statepanel(bp, "expansion", ACCENT; title = "Expansion · Blanchard–Perotti"),
+    statepanel(news, "slack", INK; title = "Slack · news", xlab = "quarters"),
+    statepanel(bp, "slack", INK; title = "Slack · Blanchard–Perotti", xlab = "quarters")
 ]
 
-fig = plot(panels...; layout = (1, 2), size = (1000, 340), dpi = 150,
+fig = plot(panels...; layout = (2, 2), size = (1000, 620), dpi = 150,
     background_color = :white, left_margin = 6Plots.mm, right_margin = 4Plots.mm,
     top_margin = 1Plots.mm, bottom_margin = 3Plots.mm,
-    plot_title = "Ramey–Zubairy multipliers by state · 90% Newey–West bands",
+    plot_title = "Ramey–Zubairy cumulative multipliers by state · 68/90% " *
+                 "Newey–West bands, dashed = linear model",
     plot_titlefontsize = 9, plot_titlefontcolor = TEXT,
     plot_titlelocation = :left)
 
