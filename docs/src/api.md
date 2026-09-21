@@ -18,6 +18,17 @@ summarize
 ewc_bandwidth
 ```
 
+## State dependence
+
+`lp` and `lpiv` take `state`, `statelag` and `regimes` keywords; see their
+docstrings and the [Ramey–Zubairy tutorial](tutorials/ramey_zubairy.md).
+
+```@docs
+statetest
+StateTestResult
+LPState
+```
+
 ## Bias correction
 
 ```@docs

@@ -11,7 +11,8 @@ This is a fork of [gragusa/LocalProjections.jl](https://github.com/gragusa/Local
 that extends the inference procedures: equal-weighted-cosine (EWC) HAR
 inference with Student-`t` critical values, the Herbst–Johannsen bias
 correction, the VAR residual moving-block bootstrap with VAR lag selection,
-and horizon-tracking regressors for cumulative multipliers.
+horizon-tracking regressors for cumulative multipliers, and state-dependent
+local projections.
 
 ## Contents
 
@@ -279,7 +280,26 @@ fixed-smoothing estimators do not provide.
 The baseline linear model of Ramey and Zubairy (2018, *JPE*) on US quarterly
 data, 1889Q1–2015Q4. The cleaned dataset ships as
 `docs/src/data/ramey_zubairy.csv`, with the variable definitions of the
-authors' `jordagk.do`:
+authors' `jordagk.do`.
+
+The authors' Stata code builds the leads, cumulated variables and state
+interactions by hand and loops `ivreg2` over horizons. Rerun in Stata on their
+data with a fixed bandwidth, it agrees with this package to about `1e-10` on
+every coefficient, IV standard error, first-stage *F* and state-equality test.
+Three small differences remain, none in the point estimates of the linear
+model:
+
+  - **Bandwidth.** The published standard errors use `ivreg2, bw(auto)`, whose
+    Newey–West rule selects a different bandwidth than `Bartlett{NeweyWest}()`;
+    use a fixed `Bartlett(b)` ↔ `bw(b)` for a digit-level match.
+  - **Degrees of freedom.** `ivreg2` applies no small-sample factor; OLS
+    (impulse-response) HAC standard errors here carry `n/(n−k)` and are 1–3%
+    larger. IV (multiplier) standard errors carry none on either side.
+  - **One quarter.** Stata evaluates `unemp >= 6.5` to true where `unemp` is
+    missing (1889), which places 1890Q1 in the slack regime of the
+    state-dependent Blanchard–Perotti regressions. The shipped data has
+    `missing` there, so that quarter drops out; the slack multiplier moves by
+    at most 0.004. `rz.slack = coalesce.(rz.slack, 1)` restores Stata's sample.
 
 ```julia
 using LocalProjections, DataFrames, CSV, StatsModels, CovarianceMatrices
@@ -314,6 +334,39 @@ automatic Newey–West bandwidth, and so does the figure, which
 `julia --project=docs docs/make_rz_figure.jl` regenerates. The full
 walkthrough, including the two-step multiplier and a table against the
 published numbers, is in [the tutorial](docs/src/tutorials/ramey_zubairy.md).
+
+### State dependence
+
+Is the multiplier larger when there is slack? `state = :slack` lets every
+coefficient depend on the state of the previous quarter (unemployment at or
+above 6.5%): the intercept, the controls, the endogenous regressor and the
+instrument are each split by regime and both regimes are estimated jointly,
+which replaces the hand-built `rec*`/`exp*` interactions of `jordagk.do`.
+
+![Ramey–Zubairy multipliers by state](docs/src/assets/ramey_zubairy_state.png)
+
+```julia
+mult_s = lpiv(@formula(cumul(y) ~ (cumul(g) ~ newsy) +
+                       lags(newsy, 4) + lags(y, 4) + lags(g, 4)), rz;
+              horizon = 20, state = :slack, regimes = ("expansion", "slack"))
+
+hac = Bartlett{NeweyWest}()
+summarize(mult_s, hac; term = Symbol("cumul(g)_expansion"), level = 0.90)
+summarize(mult_s, hac; term = Symbol("cumul(g)_slack"), level = 0.90)
+statetest(mult_s, hac)                            # H0: equal multipliers, by horizon
+weakivtest(mult_s + vcov(hac), 8; regime = "expansion")
+```
+
+`regimes` names the two states, here expansion (no slack) and slack, and each
+gets its own coefficient path; the dashed line in the figure is the linear
+multiplier of the previous section. With the news shock the two-year multiplier
+is **0.59** in expansion and **0.62** under slack (p = 0.82); with
+Blanchard–Perotti it is **0.33** against **0.70** (p = 0.007), larger under
+slack but still below one — the paper's result. The news instrument is weak in
+expansion (effective *F* below 10 at every horizon). `state` works the same way in `lp` for impulse responses, and
+also accepts a weight in [0, 1] such as the Auerbach–Gorodnichenko transition
+function. `julia --project=docs docs/make_rz_state_figure.jl` regenerates the
+figure, which omits the first two quarters, where the instrument is weakest.
 
 ### HAR inference with EWC
 
@@ -447,9 +500,9 @@ result into the `LocalProjectionIRFResult` type of MacroEconometricTools.jl.
     gaps as `NaN` instead; rows are then masked per horizon.
   - **Bootstrap and bias correction scope.** Both are defined for OLS local
     projections with `leads` or `cumul` responses and a horizon-invariant
-    regressor set. Anchored responses, `lpiv` results and horizon-tracking
-    regressors are rejected with an explanation. The VAR columns must be free
-    of `missing` and `NaN`.
+    regressor set. Anchored responses, `lpiv` results, horizon-tracking
+    regressors and state-dependent projections are rejected with an
+    explanation. The VAR columns must be free of `missing` and `NaN`.
   - **HAC keyword forwarding.** `vcov` does not forward keyword arguments such
     as `dofadjust` to the per-horizon models, and the upstream estimators ignore
     it for HAC and EWC in any case.
@@ -472,7 +525,7 @@ julia --project=benchmark -t 4 benchmark/coverage_study.jl   # bootstrap coverag
 ```
 
 Test items are tagged (`:vcov`, `:ewc`, `:biascorr`, `:bootstrap`,
-`:lagselect`, `:lpiv`, …) and can be run in isolation with TestItemRunner.
+`:lagselect`, `:lpiv`, `:state`, …) and can be run in isolation with TestItemRunner.
 
 ## License
 

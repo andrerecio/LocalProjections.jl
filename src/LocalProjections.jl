@@ -2,6 +2,7 @@ module LocalProjections
 
 export LocalProjection, LocalProjectionIV, LocalProjectionCovariance, IRFSummary
 export lp, lpiv, coefpath, stderror, vcov, summarize, first_stage, weakivtest
+export LPState, statetest, StateTestResult
 export ewc_bandwidth
 export biascorrect, BiasCorrectedLP
 export lagselect, VARLagSelection, nlags
@@ -577,6 +578,24 @@ function StatsModels.apply_schema(t::FunctionTerm{typeof(|)}, sch::StatsModels.S
 end
 
 """
+    LPState
+
+State-dependence specification attached to a local projection estimated with
+the `state` keyword of [`lp`](@ref) / [`lpiv`](@ref).
+
+- `var`: the state column, an indicator (or a weight in ``[0, 1]``)
+- `lag`: the state enters the horizon-``h`` regression as ``I_{t-lag}``
+- `labels`: coefficient-name suffixes of the regimes `1 - I` and `I`
+- `shock`: the shock term before it was split by regime
+"""
+struct LPState
+    var::Symbol
+    lag::Int
+    labels::NTuple{2, String}
+    shock::Symbol
+end
+
+"""
     LocalProjection
 
 Stack of horizon-specific OLS models produced by [`lp`](@ref).
@@ -589,6 +608,13 @@ struct LocalProjection{M <: OLSMatrixEstimator}
     base_formula::FormulaTerm
     coef_names::Vector{String}  # Coefficient names (constant across all horizons)
     tautological_h0::Bool       # true when response == shock (h=0 is trivial: coef=1, SE=0)
+    state::Union{Nothing, LPState}  # `nothing` for a linear projection
+end
+
+function LocalProjection(models::Vector{M}, horizon, response, shock, base_formula,
+        coef_names, tautological_h0) where {M <: OLSMatrixEstimator}
+    return LocalProjection{M}(models, horizon, response, shock, base_formula,
+        coef_names, tautological_h0, nothing)
 end
 
 """
@@ -617,6 +643,7 @@ function Base.show(io::IO, ::MIME"text/plain", lp::LocalProjection)
     println(io, "  Shock:      $(lp.shock)")
     println(io, "  Horizon:    0:$(lp.horizon)")
     println(io, "  Formula:    $(lp.base_formula)")
+    lp.state === nothing || println(io, "  State:      ", _describe_state(lp.state))
     println(io, "  Coef names: $(lp.coef_names)")
 end
 
@@ -654,7 +681,7 @@ function Base.:+(lp::LocalProjection{M}, v::VcovSpec{V}) where {M <: OLSMatrixEs
     return LocalProjection{M_new}(
         convert(Vector{M_new}, new_models),
         lp.horizon, lp.response, lp.shock, lp.base_formula, lp.coef_names,
-        lp.tautological_h0
+        lp.tautological_h0, lp.state
     )
 end
 
@@ -812,6 +839,77 @@ function _extract_base_variables(t::StatsModels.InteractionTerm)
     return unique(all_vars)
 end
 
+# ============================================================================
+# State-dependent local projections (Ramey & Zubairy 2018)
+# ============================================================================
+
+function _describe_state(st::LPState)
+    return "$(st.var) lagged $(st.lag); regimes $(st.labels[1]) (1 - I) and $(st.labels[2]) (I)"
+end
+
+function _state_labels(state::Symbol, regimes)
+    regimes === nothing && return ("$(state)0", "$(state)1")
+    length(regimes) == 2 ||
+        throw(ArgumentError("`regimes` must hold two labels, for the regimes 1 - I and I"))
+    labels = (String(regimes[1]), String(regimes[2]))
+    labels[1] == labels[2] && throw(ArgumentError("`regimes` labels must differ"))
+    return labels
+end
+
+"""
+    _state_weights(df, state, lag) -> Vector{Float64}
+
+The state column lagged `lag` periods on the rows of `df`, as the weight
+``I_{t-lag}`` of the second regime. Rows where the lag is unavailable are `NaN`
+and drop out through the usual complete-row mask.
+"""
+function _state_weights(df::AbstractDataFrame, state::Symbol, lag::Integer)
+    lag >= 0 || throw(ArgumentError("`statelag` must be non-negative"))
+    raw = df[!, state]
+    eltype(raw) <: Union{Missing, Real} ||
+        throw(ArgumentError("state column $state must be numeric or Bool"))
+    n = length(raw)
+    s = fill(NaN, n)
+    for t in (lag + 1):n
+        v = raw[t - lag]
+        s[t] = ismissing(v) ? NaN : Float64(v)
+    end
+    all(v -> isnan(v) || 0.0 <= v <= 1.0, s) || throw(ArgumentError(
+        "state column $state must be an indicator or a weight in [0, 1]"))
+    return s
+end
+
+# Every column once per regime: [X .* (1 - I), X .* I]
+_split_by_state(X::Matrix{Float64}, s::Vector{Float64}) = hcat(X .* (1.0 .- s), X .* s)
+
+function _state_names(names::Vector{String}, labels::NTuple{2, String})
+    return vcat(names .* "_" .* labels[1], names .* "_" .* labels[2])
+end
+
+# `shock` may be the term before the split (both regimes are then the shock) or
+# one of the split names; the stored shock is a split name so that `coefpath`
+# and `summarize` keep a usable default.
+function _resolve_state_shock(shock::Union{Symbol, Nothing}, default::String,
+        names::Vector{String}, labels::NTuple{2, String})
+    shock === nothing && return Symbol(default, "_", labels[1]), Symbol(default)
+    str = String(shock)
+    for label in labels
+        suffix = "_" * label
+        if endswith(str, suffix) && chop(str; tail = length(suffix)) in names
+            return shock, Symbol(chop(str; tail = length(suffix)))
+        end
+    end
+    str in names || throw(ArgumentError("shock term $shock not present in model"))
+    return Symbol(str, "_", labels[1]), shock
+end
+
+# The terms whose h = 0 coefficient is 1 by construction when response == shock
+function _shock_terms(lp)
+    st = lp.state
+    st === nothing && return (lp.shock,)
+    return (Symbol(st.shock, "_", st.labels[1]), Symbol(st.shock, "_", st.labels[2]))
+end
+
 """
     lp(formula, data; horizon, shock=nothing)
 
@@ -832,11 +930,46 @@ The coefficient keeps the horizon-free name (`"cumul(x)"`, not `"cumul(x, 0)"`,
 unchanged. When no horizon-tracking term appears on the RHS the design matrix
 is still built exactly once, as before.
 
+# State-dependent projections
+
+`state = :s` estimates the state-dependent local projection of Ramey and
+Zubairy (2018),
+
+```math
+y_{t+h} = (1 - I_{t-1})\\,[\\alpha_{0,h} + \\beta_{0,h} x_t + \\gamma_{0,h}' w_t]
+        + I_{t-1}\\,[\\alpha_{1,h} + \\beta_{1,h} x_t + \\gamma_{1,h}' w_t] + u_{t+h},
+```
+
+where `s` is an indicator column of `data` (a weight in ``[0, 1]``, such as the
+Auerbach–Gorodnichenko transition function, is also accepted). *Every*
+regressor, the intercept included, is split by regime, which spans the same
+column space as the hand-built `L.state rec* exp*` lists of `jordagk.do`.
+`statelag` (default 1) is the lag at which the state enters; pass 0 when the
+column is already timed.
+
+Coefficient names get a regime suffix: `x_s0` for the regime ``1 - I`` and
+`x_s1` for the regime ``I``, or `regimes = ("exp", "rec")` for `x_exp` / `x_rec`.
+`shock = :x` designates both; the default term of `coefpath` and `summarize` is
+then the first regime, and the second is `term = :x_s1`. Everything downstream
+(`vcov`, `summarize`, the plot recipes) works per term, and
+[`statetest`](@ref) tests equality of the two regimes horizon by horizon.
+`biascorrect` and `varbootstrap` reject state-dependent projections: both rest
+on a linear VAR.
+
+```julia
+r = lp(@formula(leads(y) ~ newsy + lags(newsy, 4) + lags(y, 4) + lags(g, 4)), rz;
+       horizon = 20, state = :slack, regimes = ("exp", "rec"))
+summarize(r, Bartlett(6); term = :newsy_rec)
+statetest(r, Bartlett(6))
+```
+
 See also [`lpiv`](@ref), whose endogenous and instrument blocks accept the same
 terms.
 """
 function lp(formula::FormulaTerm, data::AbstractDataFrame;
-        horizon::Integer, shock::Union{Symbol, Nothing} = nothing)
+        horizon::Integer, shock::Union{Symbol, Nothing} = nothing,
+        state::Union{Symbol, Nothing} = nothing, statelag::Integer = 1,
+        regimes = nothing)
     horizon < 0 && throw(ArgumentError("horizon must be non-negative"))
     df_base = DataFrame(data)  # avoid mutating caller's data
 
@@ -884,7 +1017,9 @@ function lp(formula::FormulaTerm, data::AbstractDataFrame;
     base_vars_rhs = _extract_base_variables(formula.rhs)
     base_vars = unique(vcat(base_vars_lhs, base_vars_rhs))
 
-    # Keep only complete cases (remove rows with missing base variables)
+    # Keep only complete cases (remove rows with missing base variables). The
+    # state column is masked through its NaN weights instead: it is typically
+    # undefined over a few leading rows that no regression reaches.
     df_base_complete = dropmissing(df_base, base_vars, disallowmissing = true)
 
     # ========================================================================
@@ -914,6 +1049,27 @@ function lp(formula::FormulaTerm, data::AbstractDataFrame;
         let X = _as_float_matrix(StatsModels.modelcols(rhs_applied, mf_base.data))
             h -> X
         end
+    end
+
+    if state !== nothing
+        length(coef_names_base) >= 2 || throw(ArgumentError(
+            "Cannot select a shock term: only an intercept found in the model."))
+        labels = _state_labels(state, regimes)
+        shock_symbol, base_shock = _resolve_state_shock(
+            shock, coef_names_base[2], coef_names_base, labels)
+        weights = _state_weights(df_base_complete, state, statelag)
+        Xstate = let Xof = Xof, weights = weights
+            h -> _split_by_state(Xof(h)::Matrix{Float64}, weights)
+        end
+        if !_has_dynamic_horizon(rhs_applied)
+            Xstate = let X = Xstate(0)
+                h -> X
+            end
+        end
+        return _lp_estimate_horizons(Xstate, _state_names(coef_names_base, labels),
+            df_base_complete, horizon, response, shock_symbol, formula,
+            is_anchor, is_cumulative, is_leads, anchor_term, cumul_term, leads_term,
+            LPState(state, statelag, labels, base_shock))
     end
 
     # Set shock variable: use provided shock or default to first RHS coefficient
@@ -950,7 +1106,7 @@ every time unless the RHS carries a horizon-tracking `cumul`/`leads` term.
 function _lp_estimate_horizons(Xof::F, coef_names_base::Vector{String},
         df_base_complete, horizon, response, shock_symbol, formula,
         is_anchor, is_cumulative, is_leads, anchor_term, cumul_term,
-        leads_term) where {F}
+        leads_term, state::Union{Nothing, LPState} = nothing) where {F}
     # Helper to estimate one horizon
     function _estimate_horizon(h)
         X = Xof(h)::Matrix{Float64}
@@ -984,9 +1140,9 @@ function _lp_estimate_horizons(Xof::F, coef_names_base::Vector{String},
         models[i + 1] = _estimate_horizon(h)
     end
 
-    return LocalProjection(
+    return LocalProjection{eltype(models)}(
         models, horizon, response, shock_symbol, formula, coef_names_base,
-        response === shock_symbol)
+        response === (state === nothing ? shock_symbol : state.shock), state)
 end
 
 """
@@ -1105,6 +1261,14 @@ struct LocalProjectionIV{M <: IVMatrixEstimator}
     endogenous_names::Vector{String}
     instrument_names::Vector{String}
     tautological_h0::Bool       # true when response == shock (h=0 is trivial: coef=1, SE=0)
+    state::Union{Nothing, LPState}  # `nothing` for a linear projection
+end
+
+function LocalProjectionIV(models::Vector{M}, horizon, response, shock, base_formula,
+        coef_names, endogenous_names, instrument_names,
+        tautological_h0) where {M <: IVMatrixEstimator}
+    return LocalProjectionIV{M}(models, horizon, response, shock, base_formula,
+        coef_names, endogenous_names, instrument_names, tautological_h0, nothing)
 end
 
 """
@@ -1137,6 +1301,7 @@ function Base.show(io::IO, ::MIME"text/plain", lpiv::LocalProjectionIV)
     println(io, "  Shock:        $(lpiv.shock)")
     println(io, "  Horizon:      0:$(lpiv.horizon)")
     println(io, "  Formula:      $(lpiv.base_formula)")
+    lpiv.state === nothing || println(io, "  State:        ", _describe_state(lpiv.state))
     println(io, "  Endogenous:   $(lpiv.endogenous_names)")
     println(io, "  Instruments:  $(lpiv.instrument_names)")
     println(io, "  Coef names:   $(lpiv.coef_names)")
@@ -1162,7 +1327,7 @@ function Base.:+(lpiv::LocalProjectionIV{M}, v::VcovSpec{V}) where {
         convert(Vector{M_new}, new_models),
         lpiv.horizon, lpiv.response, lpiv.shock, lpiv.base_formula,
         lpiv.coef_names, lpiv.endogenous_names, lpiv.instrument_names,
-        lpiv.tautological_h0
+        lpiv.tautological_h0, lpiv.state
     )
 end
 
@@ -1275,6 +1440,24 @@ default. On how the automatic Newey-West bandwidth selected here compares with
 Stata `ivreg2, bw(auto)` output, see section 8 of
 `docs/src/inference_procedures_guide.md`.
 
+# State-dependent projections
+
+`state = :s` splits the whole regression by the lagged state ``I_{t-1}``, as in
+[`lp`](@ref): exogenous controls (intercept included), endogenous regressors and
+instruments each appear once per regime, so both regimes are estimated jointly
+— the `ivreg2 … (expf·cumulg recf·cumulg = exp0shock rec0shock)` regression of
+`jordagk.do`. Because the two blocks never overlap, the estimates and standard
+errors equal those of Ramey and Zubairy's one-regime-at-a-time regressions.
+`statelag` and `regimes` work as in `lp`.
+
+```julia
+m = lpiv(@formula(cumul(y) ~ (cumul(g) ~ newsy) + lags(newsy, 4) + lags(y, 4) + lags(g, 4)),
+         rz; horizon = 20, state = :slack, regimes = ("exp", "rec"))
+summarize(m, Bartlett(6); term = Symbol("cumul(g)_rec"))   # multiplier in slack
+statetest(m, Bartlett(6))                                   # H0: equal multipliers
+weakivtest(m + vcov(Bartlett(6)), 8; regime = 2)            # first stage, slack regime
+```
+
 # Arguments
 - `formula::FormulaTerm`: A formula with IV specification using `(endo ~ instruments)` syntax
 - `data::AbstractDataFrame`: DataFrame containing the variables
@@ -1313,7 +1496,9 @@ println("First-stage coefs: ", coef(fs[1]))
 ```
 """
 function lpiv(formula::FormulaTerm, data::AbstractDataFrame;
-        horizon::Integer, shock::Union{Symbol, Nothing} = nothing)
+        horizon::Integer, shock::Union{Symbol, Nothing} = nothing,
+        state::Union{Symbol, Nothing} = nothing, statelag::Integer = 1,
+        regimes = nothing)
     horizon < 0 && throw(ArgumentError("horizon must be non-negative"))
     df_base = DataFrame(data)
 
@@ -1404,6 +1589,22 @@ function lpiv(formula::FormulaTerm, data::AbstractDataFrame;
     dynamic = _has_dynamic_horizon(endo_terms) || _has_dynamic_horizon(instr_terms) ||
               (exo_applied !== nothing && _has_dynamic_horizon(exo_applied))
 
+    # State dependence: every block is split by regime, [B .* (1 - I), B .* I]
+    state_spec = nothing
+    state_weights = nothing
+    if state !== nothing
+        labels = _state_labels(state, regimes)
+        shock_split, base_shock = _resolve_state_shock(
+            shock, endo_names[1], coef_names_base, labels)
+        shock = shock_split
+        state_spec = LPState(state, statelag, labels, base_shock)
+        state_weights = _state_weights(df_base_complete, state, statelag)
+        coef_names_exo = _state_names(coef_names_exo, labels)
+        endo_names = _state_names(endo_names, labels)
+        instr_names = _state_names(instr_names, labels)
+        coef_names_base = Vector{String}(vcat(coef_names_exo, endo_names))
+    end
+
     # `h === nothing` builds the (horizon-invariant) design directly; an Int
     # pins every horizon-tracking term to that horizon first.
     function _build_design(h::Union{Int, Nothing})
@@ -1416,6 +1617,11 @@ function lpiv(formula::FormulaTerm, data::AbstractDataFrame;
         Z_instr = reduce(hcat,
             (_as_float_matrix(StatsModels.modelcols(spec(t), df_base_complete))
             for t in instr_terms))::Matrix{Float64}
+        if state_weights !== nothing
+            X_exo = _split_by_state(X_exo, state_weights)
+            X_endo = _split_by_state(X_endo, state_weights)
+            Z_instr = _split_by_state(Z_instr, state_weights)
+        end
         return (hcat(X_exo, X_endo)::Matrix{Float64},
             hcat(X_exo, Z_instr)::Matrix{Float64})
     end
@@ -1450,7 +1656,8 @@ function lpiv(formula::FormulaTerm, data::AbstractDataFrame;
     return _lpiv_estimate_horizons(XZof, coef_names_base, df_base_complete,
         horizon, n_endogenous, response, shock_symbol, formula,
         endo_names, instr_names,
-        is_anchor, is_cumulative, is_leads, anchor_term, cumul_term, leads_term)
+        is_anchor, is_cumulative, is_leads, anchor_term, cumul_term, leads_term,
+        state_spec)
 end
 
 """
@@ -1465,7 +1672,7 @@ function _lpiv_estimate_horizons(XZof::F,
         horizon, n_endogenous, response, shock_symbol, formula,
         endo_names, instr_names,
         is_anchor, is_cumulative, is_leads, anchor_term, cumul_term,
-        leads_term) where {F}
+        leads_term, state::Union{Nothing, LPState} = nothing) where {F}
     # Helper to estimate one horizon
     function _estimate_iv_horizon(h)
         X_full, Z_full = XZof(h)::Tuple{Matrix{Float64}, Matrix{Float64}}
@@ -1502,9 +1709,10 @@ function _lpiv_estimate_horizons(XZof::F,
         models[i + 1] = _estimate_iv_horizon(h)
     end
 
-    return LocalProjectionIV(
+    return LocalProjectionIV{eltype(models)}(
         models, horizon, response, shock_symbol, formula, coef_names_base,
-        endo_names, instr_names, response === shock_symbol)
+        endo_names, instr_names,
+        response === (state === nothing ? shock_symbol : state.shock), state)
 end
 
 """
@@ -1598,15 +1806,29 @@ assume (see `_warn_unsupported_weakiv_estimator`).
 - `level::Real=0.05`: Confidence level alpha
 - `eps::Real=0.001`: Convergence tolerance for bias optimization
 - `benchmark::Symbol=:nagar`: Bias benchmark (`:nagar` or `:ols`)
+- `regime`: required for a state-dependent projection (`lpiv(...; state = ...)`), where
+  the test covers one regime at a time — `1`/`2` or the regime label. It runs on
+  Ramey and Zubairy's one-regime regression: that regime's endogenous regressor
+  and instrument, with the exogenous controls of both regimes.
 
 # Returns
 A `WeakIVTestResult` containing effective F, robust F, critical values, etc.
 
 See also: [`lpiv`](@ref), [`first_stage`](@ref)
 """
-function Regress.weakivtest(lpiv::LocalProjectionIV, h::Int; kwargs...)
+function Regress.weakivtest(lpiv::LocalProjectionIV, h::Int; regime = nothing, kwargs...)
     0 <= h <= lpiv.horizon ||
         throw(BoundsError("horizon $h out of range 0:$(lpiv.horizon)"))
+    if lpiv.state !== nothing
+        r = _regime_index(lpiv.state, regime)
+        if h == 0 && lpiv.tautological_h0
+            return _tautological_weakivtest(_regime_iv_model(lpiv.models[1], r); kwargs...)
+        end
+        _warn_unsupported_weakiv_estimator(lpiv.models[h + 1].vcov_estimator)
+        return Regress.weakivtest(_regime_iv_model(lpiv.models[h + 1], r); kwargs...)
+    end
+    regime === nothing ||
+        throw(ArgumentError("`regime` applies to state-dependent projections only"))
     if h == 0 && lpiv.tautological_h0
         @info "weakivtest at h=0 skipped: response == shock (tautological)"
         return _tautological_weakivtest(lpiv.models[1]; kwargs...)
@@ -1624,7 +1846,18 @@ Returns a vector of `WeakIVTestResult`, one per horizon (0 to `lpiv.horizon`).
 The covariance estimator attached to the models is used for the weight
 matrix; see [`weakivtest(::LocalProjectionIV, ::Int)`](@ref) for details.
 """
-function Regress.weakivtest(lpiv::LocalProjectionIV; kwargs...)
+function Regress.weakivtest(lpiv::LocalProjectionIV; regime = nothing, kwargs...)
+    if lpiv.state !== nothing
+        r = _regime_index(lpiv.state, regime)
+        _warn_unsupported_weakiv_estimator(lpiv.models[1].vcov_estimator)
+        return map(enumerate(lpiv.models)) do (i, m)
+            aux = _regime_iv_model(m, r)
+            i == 1 && lpiv.tautological_h0 ?
+            _tautological_weakivtest(aux; kwargs...) : Regress.weakivtest(aux; kwargs...)
+        end
+    end
+    regime === nothing ||
+        throw(ArgumentError("`regime` applies to state-dependent projections only"))
     _warn_unsupported_weakiv_estimator(lpiv.models[1].vcov_estimator)
     results = Vector{WeakIVTestResult{Float64}}(undef, lpiv.horizon + 1)
     for (i, m) in enumerate(lpiv.models)
@@ -1635,6 +1868,42 @@ function Regress.weakivtest(lpiv::LocalProjectionIV; kwargs...)
         end
     end
     return results
+end
+
+# Regime of a state-dependent projection, given as 1/2 or as its label
+function _regime_index(st::LPState, regime)
+    regime === nothing && throw(ArgumentError(
+        "state-dependent projection: pass `regime = 1` ($(st.labels[1])) or " *
+        "`regime = 2` ($(st.labels[2])); the Montiel Olea–Pflueger test covers one " *
+        "endogenous regressor at a time"))
+    regime isa Integer && regime in (1, 2) && return Int(regime)
+    idx = findfirst(==(String(regime)), collect(st.labels))
+    idx === nothing && throw(ArgumentError(
+        "unknown regime $regime; use 1, 2, \"$(st.labels[1])\" or \"$(st.labels[2])\""))
+    return idx
+end
+
+"""
+    _regime_iv_model(model, r)
+
+The one-regime regression of Ramey and Zubairy: the endogenous regressors and
+instruments of regime `r` only, with the exogenous controls of *both* regimes.
+The regime blocks of a state-dependent design do not overlap, so this has the
+same regime-`r` coefficients as the joint model; it is what the weak-instrument
+test, defined for a single endogenous regressor, is run on.
+"""
+function _regime_iv_model(model::IVMatrixEstimator, r::Int)
+    pe = model.postestimation
+    n_endo = pe.n_endogenous
+    n_exo = size(pe.X, 2) - n_endo
+    n_instr = size(pe.Z, 2) - n_exo
+    k, q = n_endo ÷ 2, n_instr ÷ 2
+    endo_cols = n_exo .+ (((r - 1) * k + 1):(r * k))
+    instr_cols = n_exo .+ (((r - 1) * q + 1):(r * q))
+    X = hcat(pe.X[:, 1:n_exo], pe.X[:, endo_cols])
+    Z = hcat(pe.Z[:, 1:n_exo], pe.Z[:, instr_cols])
+    aux = iv(TSLS(), Z, X, pe.y; has_intercept = false, n_endogenous = k)
+    return aux + vcov(model.vcov_estimator)
 end
 
 # Sentinel WeakIVTestResult for tautological h=0 (response == shock)
@@ -1680,9 +1949,92 @@ function coefpath(lp::LPResult; term::Symbol = lp.shock)
     # At h=0 when response == shock, the coefficient is known exactly:
     # 1.0 for the shock term, 0.0 for all others
     if lp.tautological_h0
-        coefficients[1] = term === lp.shock ? 1.0 : 0.0
+        coefficients[1] = term in _shock_terms(lp) ? 1.0 : 0.0
     end
     return coefficients
+end
+
+# ============================================================================
+# Test of equal responses across regimes (state-dependent projections)
+# ============================================================================
+
+"""
+    StateTestResult
+
+Horizon-by-horizon Wald test that a coefficient is the same in the two regimes
+of a state-dependent local projection; see [`statetest`](@ref). `diff` is the
+second regime minus the first, `se` its standard error, `stat = (diff / se)^2`
+and `pvalue` refers to ``\\chi^2_1`` (``F_{1,B}`` for an `EWC(B)` estimator).
+`DataFrame(result)` gives the table.
+"""
+struct StateTestResult
+    term::Symbol
+    labels::NTuple{2, String}
+    horizon::Vector{Int}
+    diff::Vector{Float64}
+    se::Vector{Float64}
+    stat::Vector{Float64}
+    pvalue::Vector{Float64}
+end
+
+function DataFrames.DataFrame(r::StateTestResult)
+    return DataFrame(horizon = r.horizon, diff = r.diff, se = r.se, stat = r.stat,
+        pvalue = r.pvalue)
+end
+
+function Base.show(io::IO, r::StateTestResult)
+    print(io, "StateTestResult(term=$(r.term), $(r.labels[2]) - $(r.labels[1]), ",
+        "horizon=$(first(r.horizon)):$(last(r.horizon)))")
+end
+
+function Base.show(io::IO, ::MIME"text/plain", r::StateTestResult)
+    pretty_table(io, hcat(r.horizon, r.diff, r.se, r.stat, r.pvalue);
+        column_labels = ["Horizon", "Diff", "Std.Err.", "Wald", "p-value"],
+        title = "H0: $(r.term)_$(r.labels[2]) = $(r.term)_$(r.labels[1])",
+        formatters = [fmt__round(4)], alignment = [:r, :r, :r, :r, :r],
+        table_format = TextTableFormat(borders = text_table_borders__unicode_rounded))
+end
+
+"""
+    statetest(lp, estimator; term = <shock>)
+
+Test, at every horizon, that `term` has the same coefficient in the two regimes
+of a state-dependent [`lp`](@ref) or [`lpiv`](@ref) result, using the full
+covariance matrix from `estimator` (the covariance between the two regime
+coefficients is needed, which [`LocalProjectionCovariance`](@ref) does not
+keep). `term` is the name before the regime split and defaults to the shock.
+
+This is `test expf·cumulg = recf·cumulg` after the joint `ivreg2` regression of
+`jordagk.do`. With a tautological `h = 0` (response equal to the shock) the
+difference is identically zero and the statistic is `NaN`.
+"""
+function statetest(lp::LPResult,
+        estimator::CovarianceMatrices.AbstractAsymptoticVarianceEstimator;
+        term::Union{Symbol, Nothing} = nothing)
+    st = lp.state
+    st === nothing &&
+        throw(ArgumentError("statetest needs a projection estimated with `state = ...`"))
+    base = term === nothing ? st.shock : term
+    i1 = findfirst(==(string(base, "_", st.labels[1])), lp.coef_names)
+    i2 = findfirst(==(string(base, "_", st.labels[2])), lp.coef_names)
+    (i1 === nothing || i2 === nothing) &&
+        throw(ArgumentError("term $base not present in model"))
+    n = lp.horizon + 1
+    diff, se = Vector{Float64}(undef, n), Vector{Float64}(undef, n)
+    for (i, model) in enumerate(lp.models)
+        if i == 1 && lp.tautological_h0
+            diff[i], se[i] = 0.0, 0.0
+            continue
+        end
+        b = coef(model)
+        V = CovarianceMatrices.vcov(estimator, model)
+        diff[i] = b[i2] - b[i1]
+        se[i] = sqrt(V[i1, i1] + V[i2, i2] - 2 * V[i1, i2])
+    end
+    stat = (diff ./ se) .^ 2
+    dist = estimator isa CovarianceMatrices.EWC ? FDist(1, estimator.B) : Chisq(1)
+    pvalue = [isnan(w) ? NaN : ccdf(dist, w) for w in stat]
+    return StateTestResult(base, st.labels, collect(0:lp.horizon), diff, se, stat, pvalue)
 end
 
 # ============================================================================
@@ -1823,6 +2175,9 @@ summarize(bc, HC1(); level = 0.90) # bands centered on θ̂ᶜ, SEs of θ̂
 ```
 """
 function biascorrect(lp_result::LocalProjection)
+    lp_result.state === nothing || throw(ArgumentError(
+        "the Herbst–Johannsen correction is derived for a linear projection and " *
+        "does not apply to a state-dependent one"))
     _rhs_tracks_horizon(lp_result.base_formula) && throw(ArgumentError(
         "the Herbst–Johannsen correction assumes the same regressors at every " *
         "horizon, but the formula has a horizon-tracking right-hand-side term " *
@@ -2548,6 +2903,9 @@ function varbootstrap(lp_result::LocalProjection, data::AbstractDataFrame;
     kind in (:leads, :cumul) || throw(ArgumentError(
         "the VAR bootstrap supports `leads` and `cumul` responses; got " *
         "$(kind === :anchor ? "an anchored response" : "an unrecognized LHS")"))
+    lp_result.state === nothing || throw(ArgumentError(
+        "the VAR bootstrap simulates from a linear VAR, which is not the " *
+        "data-generating process of a state-dependent local projection"))
     _rhs_tracks_horizon(lp_result.base_formula) && throw(ArgumentError(
         "the VAR bootstrap centers its t-statistic on the VAR-implied impulse " *
         "response to the shock, which is not the estimand of a local projection " *
