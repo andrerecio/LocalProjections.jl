@@ -2235,15 +2235,15 @@ function coefpath(bc::BiasCorrectedLP; term::Symbol = bc.lp.shock)
 end
 
 """
-    vcov(estimator, bc::BiasCorrectedLP)
+    vcov(estimator, bc::BiasCorrectedLP; kwargs...)
 
 Covariance of the *uncorrected* per-horizon OLS coefficients (the
 reference convention pairs the corrected path with the ordinary LP
 standard errors; see [`BiasCorrectedLP`](@ref)).
 """
 function vcov(estimator::CovarianceMatrices.AbstractAsymptoticVarianceEstimator,
-        bc::BiasCorrectedLP)
-    return vcov(estimator, bc.lp)
+        bc::BiasCorrectedLP; kwargs...)
+    return vcov(estimator, bc.lp; kwargs...)
 end
 
 """
@@ -2257,13 +2257,20 @@ function Base.:+(bc::BiasCorrectedLP, v::VcovSpec)
 end
 
 """
-    vcov(estimator, lp)
+    vcov(estimator, lp; kwargs...)
 
 Compute diagonal covariance entries horizon-by-horizon using `estimator`
 from `CovarianceMatrices.jl`. Works for both `LocalProjection` and `LocalProjectionIV`.
+
+Keyword arguments are forwarded to `CovarianceMatrices.vcov` on each horizon's
+model. The one that matters is `dofadjust`: on `lpiv` results kernel HAC and
+EWC omit the `n/(n-k)` factor that `lp` applies, and `dofadjust = true` adds
+it, so `vcov(Bartlett(6), lpiv_result; dofadjust = true)` is on the same
+convention as `vcov(Bartlett(6), lp_result)`. On `lp` results Regress.jl
+ignores `dofadjust = false` for HAC/EWC, so the factor cannot be removed there.
 """
 function vcov(estimator::CovarianceMatrices.AbstractAsymptoticVarianceEstimator,
-        lp::LPResult)
+        lp::LPResult; kwargs...)
     n = lp.horizon + 1
     variances = Dict{Symbol, Vector{Float64}}()
     names = Symbol.(lp.coef_names)
@@ -2279,7 +2286,7 @@ function vcov(estimator::CovarianceMatrices.AbstractAsymptoticVarianceEstimator,
             end
             continue
         end
-        cov = CovarianceMatrices.vcov(estimator, model)
+        cov = CovarianceMatrices.vcov(estimator, model; kwargs...)
         for (j, name) in enumerate(names)
             vec = get!(variances, name) do
                 fill(NaN, n)
