@@ -503,12 +503,11 @@ result into the `LocalProjectionIRFResult` type of MacroEconometricTools.jl.
     regressor set. Anchored responses, `lpiv` results, horizon-tracking
     regressors and state-dependent projections are rejected with an
     explanation. The VAR columns must be free of `missing` and `NaN`.
-  - **HAC keyword forwarding.** `vcov` does not forward keyword arguments such
-    as `dofadjust` to the per-horizon models, and the upstream estimators ignore
-    it for HAC and EWC in any case.
-  - **Stateful HAC estimators.** A `Bartlett{NeweyWest}()` instance caches one
-    kernel weight per moment column on first use. Create a fresh instance for
-    every model with a different regressor count rather than sharing one.
+  - **Finite-sample factor on `lpiv`.** Kernel HAC and EWC on `lpiv` results
+    omit the `n/(n−k)` factor that `lp` applies. `vcov(Bartlett(6), lpiv_result;
+    dofadjust = true)` adds it to kernel HAC, putting `lp` and `lpiv` on one
+    convention; EWC is left unscaled. On `lp` results `dofadjust = false` is
+    still ignored upstream for HAC and EWC.
 
 The mathematical background, the mapping to the reference MATLAB
 implementation, and the audit behind these notes are in

@@ -1003,6 +1003,18 @@ arguments to the horizon-specific `Regress.jl` models. Even after
 REG-1 is fixed, disabling the adjustment through the LP wrapper would require
 that wrapper to accept and forward the keyword.
 
+**Update (2026-09-22, Regress.jl 0.2.0 / CovarianceMatrices.jl 0.32.0).** The
+wrapper now forwards keyword arguments to every horizon. On `lp` (OLS) models
+`dofadjust = false` is still ignored for HAC and EWC, so the part of REG-1 that
+concerns disabling the factor is unchanged. On `lpiv` models any keyword
+routes the call to CovarianceMatrices' generic sandwich, which Regress 0.2 now
+supports. There `dofadjust = false` reproduces the default IV covariance
+exactly for HR0--HR3, kernel HAC and EWC, and `dofadjust = true` multiplies
+only kernel HAC by $n/(n-k)$: the generic `dofcorrect!` is defined for `HAC`
+alone. So `vcov(Bartlett(6), lpiv_obj; dofadjust = true)` equals the `lp`
+convention to machine precision, and EWC stays on the unscaled Lazarus et al.
+convention.
+
 ### 6.4 EWC-1: covariance is correct, but the canonical critical value is not used
 
 **Status: confirmed inference mismatch for canonical EWC testing.**
@@ -1206,6 +1218,17 @@ Stata's `newey` to 15 digits). The two paths therefore select different
 bandwidths and use different finite-sample conventions for the same estimator;
 see REG-2 in `CLAUDE.md`. Stata applies weight $0$ to the constant and one
 $q_c$ convention on both.
+
+**Update (2026-09-22).** Regress.jl 0.2.0 fixes the bandwidth half of this
+note: the IV path now passes the model-matrix kernel weights, so the intercept
+gets weight $0$ on `lp` and `lpiv` alike. A self-instrumented `lpiv` selects
+the same automatic bandwidth as the matching `lp`, and their standard errors
+differ only by $\sqrt{T/(T-K)}$. Item 2 above therefore holds for both paths.
+The finite-sample difference remains (see §6.3 for `dofadjust = true`).
+CovarianceMatrices.jl 0.32 also removes `setkernelweights!` and the mutable
+`bw`/`kw` fields; the selected bandwidth is read from the result with
+`bandwidth(vcov(estimator, model))`. The pilot-length difference from Stata is
+unchanged.
 
 ### 8.2 What `ivreg2, bw(auto)` documents
 

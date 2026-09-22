@@ -489,6 +489,46 @@ end
     @test length(irf_w) == horizon + 1
 end
 
+@testitem "lp/lpiv HAC conventions and dofadjust forwarding" tags = [
+    :lpiv, :vcov, :api] begin
+    using LocalProjections
+    using DataFrames, StatsModels, StatsBase, Test
+    using CovarianceMatrices: HR1, Bartlett, NeweyWest, EWC
+    using StableRNGs
+
+    # Self-instrumented lpiv: TSLS ≡ OLS, so every covariance must agree with lp
+    # up to the finite-sample convention (REG-2).
+    rng = StableRNG(11)
+    T = 250
+    x = zeros(T)
+    y = zeros(T)
+    for t in 2:T
+        x[t] = 0.5x[t - 1] + randn(rng)
+        y[t] = 0.6y[t - 1] + 0.8x[t] + randn(rng)
+    end
+    df = DataFrame(y = y, x = x, xz = copy(x))
+    L = lp(@formula(leads(y) ~ x + lags(y, 2)), df; horizon = 4)
+    V = lpiv(@formula(leads(y) ~ (x ~ xz) + lags(y, 2)), df; horizon = 4)
+    @test coefpath(L; term = :x) ≈ coefpath(V; term = :x) atol = 1e-12
+    sqrt_nk = [sqrt(nobs(m) / (nobs(m) - length(coef(m)))) for m in L.models]
+
+    ratio(est; kw...) = stderror(vcov(est, L); term = :x) ./
+                        stderror(vcov(est, V; kw...); term = :x)
+    # Default: IV kernel HAC and EWC omit n/(n-k); HR1 applies it on both paths.
+    @test ratio(HR1()) ≈ ones(5) rtol = 1e-12
+    @test ratio(Bartlett(6)) ≈ sqrt_nk rtol = 1e-12
+    @test ratio(EWC(20)) ≈ sqrt_nk rtol = 1e-12
+    # The automatic bandwidth excludes the intercept on both paths (REG-2b fixed
+    # upstream in Regress 0.2), so only the d.o.f. factor separates them.
+    @test ratio(Bartlett{NeweyWest}()) ≈ sqrt_nk rtol = 1e-12
+    # `dofadjust = true` is forwarded to each horizon and puts IV kernel HAC on
+    # the lp convention; EWC stays unscaled (LLSW / harreg convention).
+    @test ratio(Bartlett(6); dofadjust = true) ≈ ones(5) rtol = 1e-12
+    @test ratio(Bartlett{NeweyWest}(); dofadjust = true) ≈ ones(5) rtol = 1e-12
+    @test ratio(EWC(20); dofadjust = true) ≈ sqrt_nk rtol = 1e-12
+    @test ratio(HR1(); dofadjust = true) ≈ ones(5) rtol = 1e-12
+end
+
 @testitem "lpiv plus vcov operator" tags = [:lpiv, :vcov, :api] begin
     using LocalProjections
     using LocalProjections: VcovSpec
