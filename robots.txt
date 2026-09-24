@@ -1,1 +1,1 @@
-Sitemap: https://andrerecio.github.io/LocalProjections.jl/sitemap.xml
+Sitemap: https://andrearecine.me/LocalProjections.jl/sitemap.xml
