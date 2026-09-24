@@ -1,0 +1,34 @@
+project:
+  type: website
+  output-dir: _site
+
+execute:
+  freeze: auto
+  echo: true
+
+website:
+  title: "LocalProjections.jl"
+  site-url: "https://andrearecine.me/LocalProjections.jl"
+  navbar:
+    left:
+      - href: index.qmd
+        text: Overview
+      - href: ramey-zubairy.qmd
+        text: "Ramey–Zubairy (2018)"
+    right:
+      - icon: github
+        href: https://github.com/andrerecio/LocalProjections.jl
+  page-footer:
+    left: "LocalProjections.jl · every number and figure on these pages is computed when the site is rendered"
+  search: true
+
+format:
+  html:
+    theme: [cosmo, theme.scss]
+    toc: true
+    toc-depth: 2
+    code-copy: true
+    code-overflow: wrap
+    highlight-style: github
+    fig-align: center
+    df-print: kable

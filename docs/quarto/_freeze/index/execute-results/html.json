@@ -1,0 +1,12 @@
+{
+  "hash": "23e76c4524bdc570003daff7a872f0dc",
+  "result": {
+    "engine": "julia",
+    "markdown": "---\ntitle: \"LocalProjections.jl\"\nsubtitle: \"Local projection impulse responses and multipliers in Julia, with a formula interface\"\nengine: julia\ntoc: false\n---\n\n\n\n\nThese pages work through the package's examples in full. Every number, table\nand figure is computed from the package when the site is rendered, so the text\ncannot drift from the code.\n\n::: {.example-grid}\n\n::: {.example-card}\n### [Ramey–Zubairy (2018)](ramey-zubairy.qmd)\nGovernment spending multipliers on US data from 1889. Impulse responses, the\none-step and two-step cumulative multipliers, the published numbers, and the\nweak-instrument diagnostic.\n\n[two-year multiplier: news 0\\.67 · Blanchard–Perotti 0\\.41]{.figs}\n:::\n\n:::\n\n## Install\n\n```julia\nusing Pkg\nPkg.add(url = \"https://github.com/andrerecio/LocalProjections.jl\")\n```\n\nThis is a fork of Giuseppe Ragusa's\n[LocalProjections.jl](https://github.com/gragusa/LocalProjections.jl). It\nadds HAR inference with equal-weighted-cosine (EWC) variances and Student-$t$\ncritical values, the Herbst–Johannsen bias correction, the VAR moving-block\nbootstrap, VAR lag selection, and state-dependent projections.\n\n## The workflow in a few lines\n\n```julia\nusing LocalProjections, StatsModels, CovarianceMatrices, Plots\nr = lp(@formula(leads(y) ~ shock + lags(y, 4) + lags(shock, 4)), df; horizon = 20)\nsummarize(r, Bartlett{NeweyWest}(); level = 0.90)   # path, s.e. and bands\nplot(r, EWC(ewc_bandwidth(r)); levels = [0.68, 0.90])\n```\n\nThe left-hand side sets the response: `leads(y)` for $y_{t+h}$, `cumul(y)` for\n$\\sum_{j \\le h} y_{t+j}$, `anchor(y, z)` for $y_{t+h} - z_t$. `lpiv` takes an\ninstrumented regressor, `(cumul(g) ~ z)`, and the covariance estimator is any\nestimator from CovarianceMatrices.jl.\n\n## Rebuilding these pages\n\nFrom `docs/quarto/`:\n\n```sh\njulia --project=. -e 'using Pkg; Pkg.instantiate()'\nquarto render\n```\n\nComputed results are frozen in `_freeze/`, so a page is re-run only when its\nsource changes. A change to the package itself does not invalidate them:\nre-render a page explicitly (`quarto render ramey-zubairy.qmd` always\nexecutes) or delete `_freeze/`. This build:\nLocalProjections at commit 2209628, Julia 1\\.12\\.6.\n\n",
+    "supporting": [
+      "index_files"
+    ],
+    "filters": [],
+    "includes": {}
+  }
+}
