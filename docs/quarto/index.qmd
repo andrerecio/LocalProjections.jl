@@ -1,0 +1,77 @@
+---
+title: "LocalProjections.jl"
+subtitle: "Local projection impulse responses and multipliers in Julia, with a formula interface"
+engine: julia
+toc: false
+---
+
+```{julia}
+#| echo: false
+#| output: false
+include("_setup.jl")
+rz = rz_data()
+m_news = lpiv(@formula(cumul(y) ~ (cumul(g) ~ newsy) +
+                       lags(newsy, 4) + lags(y, 4) + lags(g, 4)), rz; horizon = 8)
+m_bp = lpiv(@formula(cumul(y) ~ (cumul(g) ~ bp) + lags(y, 4) + lags(g, 4)),
+    rz; horizon = 8)
+commit = try strip(read(`git -C $ROOT rev-parse --short HEAD`, String)) catch; "unknown" end
+```
+
+These pages work through the package's examples in full. Every number, table
+and figure is computed from the package when the site is rendered, so the text
+cannot drift from the code.
+
+::: {.example-grid}
+
+::: {.example-card}
+### [Ramey–Zubairy (2018)](ramey-zubairy.qmd)
+Government spending multipliers on US data from 1889. Impulse responses, the
+one-step and two-step cumulative multipliers, the published numbers, and the
+weak-instrument diagnostic.
+
+[two-year multiplier: news `{julia} f2(coefpath(m_news)[9])` · Blanchard–Perotti `{julia} f2(coefpath(m_bp)[9])`]{.figs}
+:::
+
+:::
+
+## Install
+
+```julia
+using Pkg
+Pkg.add(url = "https://github.com/andrerecio/LocalProjections.jl")
+```
+
+This is a fork of Giuseppe Ragusa's
+[LocalProjections.jl](https://github.com/gragusa/LocalProjections.jl). It
+adds HAR inference with equal-weighted-cosine (EWC) variances and Student-$t$
+critical values, the Herbst–Johannsen bias correction, the VAR moving-block
+bootstrap, VAR lag selection, and state-dependent projections.
+
+## The workflow in a few lines
+
+```julia
+using LocalProjections, StatsModels, CovarianceMatrices, Plots
+r = lp(@formula(leads(y) ~ shock + lags(y, 4) + lags(shock, 4)), df; horizon = 20)
+summarize(r, Bartlett{NeweyWest}(); level = 0.90)   # path, s.e. and bands
+plot(r, EWC(ewc_bandwidth(r)); levels = [0.68, 0.90])
+```
+
+The left-hand side sets the response: `leads(y)` for $y_{t+h}$, `cumul(y)` for
+$\sum_{j \le h} y_{t+j}$, `anchor(y, z)` for $y_{t+h} - z_t$. `lpiv` takes an
+instrumented regressor, `(cumul(g) ~ z)`, and the covariance estimator is any
+estimator from CovarianceMatrices.jl.
+
+## Rebuilding these pages
+
+From `docs/quarto/`:
+
+```sh
+julia --project=. -e 'using Pkg; Pkg.instantiate()'
+quarto render
+```
+
+Computed results are frozen in `_freeze/`, so a page is re-run only when its
+source changes. A change to the package itself does not invalidate them:
+re-render a page explicitly (`quarto render ramey-zubairy.qmd` always
+executes) or delete `_freeze/`. This build:
+LocalProjections at commit `{julia} commit`, Julia `{julia} string(VERSION)`.

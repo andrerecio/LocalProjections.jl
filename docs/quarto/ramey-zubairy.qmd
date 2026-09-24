@@ -1,0 +1,224 @@
+---
+title: "Government spending multipliers"
+subtitle: "Ramey and Zubairy (2018), linear model: US quarterly data, 1889Q1–2015Q4"
+engine: julia
+---
+
+```{julia}
+#| echo: false
+#| output: false
+include("_setup.jl")
+```
+
+Ramey and Zubairy (2018, *JPE*) estimate how much GDP rises when government
+spending rises, using more than a century of US quarterly data. This page
+replicates the baseline linear model from their Stata program `jordagk.do`:
+the impulse responses, the one-step cumulative multiplier, the two-step
+multiplier and the weak-instrument diagnostic. The authors build every lead,
+cumulated sum and lag by hand and loop `ivreg2` over horizons. Here each is a
+single call.
+
+## Data and specification
+
+The cleaned dataset ships with the package as
+`docs/src/data/ramey_zubairy.csv`, built from the replication package with the
+variable definitions of `jordagk.do`. GDP and spending are divided by
+potential GDP (the Gordon–Krenn normalization), so regression coefficients are
+already in dollars of GDP per dollar of spending.
+
+```{julia}
+rz = rz_data()
+first(rz[:, [:quarter, :y, :g, :newsy, :unemp]], 3)
+```
+
+Two shocks identify spending changes:
+
+| Shock | Instrument $s_t$ | Controls $w_{t-1}$ |
+|---|---|---|
+| Military news | `newsy`: news about future military spending, over lagged potential GDP | 4 lags of `newsy`, `y`, `g` |
+| Blanchard–Perotti | `bp`: current spending, taken as predetermined | 4 lags of `y`, `g` |
+
+`newsy` starts in 1890Q1: the file begins in 1889Q1, and its first lag does
+not exist.
+
+## Impulse responses
+
+The responses of spending and GDP at horizon $h$ are the coefficients on the
+shock in $x_{t+h} = \alpha_h + \beta_h s_t + \gamma_h' w_{t-1} + u_{t+h}$.
+`leads(x)` puts $x_{t+h}$ on the left and `lp` runs the regression for every
+$h$ up to `horizon`:
+
+```{julia}
+irf_y_news = lp(@formula(leads(y) ~ newsy + lags(newsy, 4) + lags(y, 4) + lags(g, 4)),
+    rz; horizon = 20)
+irf_g_news = lp(@formula(leads(g) ~ newsy + lags(newsy, 4) + lags(y, 4) + lags(g, 4)),
+    rz; horizon = 20)
+irf_y_bp = lp(@formula(leads(y) ~ bp + lags(y, 4) + lags(g, 4)), rz; horizon = 20)
+irf_g_bp = lp(@formula(leads(g) ~ bp + lags(y, 4) + lags(g, 4)), rz; horizon = 20)
+
+hac = Bartlett{NeweyWest}()      # Newey–West, automatic bandwidth
+summarize(irf_y_news, hac; term = :newsy, level = 0.90)
+```
+
+```{julia}
+#| echo: false
+#| fig-cap: "Responses of government spending and GDP. 90% bands, Newey–West automatic bandwidth."
+s_irf = (g_news = summarize(irf_g_news, hac; term = :newsy, level = 0.90),
+    g_bp = summarize(irf_g_bp, hac; term = :bp, level = 0.90),
+    y_news = summarize(irf_y_news, hac; term = :newsy, level = 0.90),
+    y_bp = summarize(irf_y_bp, hac; term = :bp, level = 0.90))
+plot(irfpanel(s_irf.g_news; title = "Government spending · news"),
+    irfpanel(s_irf.g_bp; title = "Government spending · Blanchard–Perotti"),
+    irfpanel(s_irf.y_news; title = "GDP · news", xlab = "quarters"),
+    irfpanel(s_irf.y_bp; title = "GDP · Blanchard–Perotti", xlab = "quarters");
+    layout = (2, 2), size = (900, 560), FIGKW...)
+```
+
+```{julia}
+#| echo: false
+#| output: false
+peak(s) = (i = argmax(s.coef); (h = s.horizon[i], b = s.coef[i]))
+pk_y, pk_g, pk_gbp = peak(s_irf.y_news), peak(s_irf.g_news), peak(s_irf.g_bp)
+```
+
+After a news shock both responses are hump-shaped: spending peaks at
+`{julia} f2(pk_g.b)` after `{julia} pk_g.h` quarters, GDP at
+`{julia} f2(pk_y.b)` after `{julia} pk_y.h`. Under Blanchard–Perotti the shock
+*is* current spending, so spending moves one for one on impact, keeps rising
+to `{julia} f2(pk_gbp.b)` after `{julia} pk_gbp.h` quarters, then declines.
+
+## The one-step cumulative multiplier
+
+The multiplier at horizon $h$ is cumulative extra GDP per cumulative extra
+dollar of spending. Ramey and Zubairy estimate it in one step, as $m_h$ in
+
+$$
+\sum_{j=0}^{h} y_{t+j} = \alpha_h + m_h \sum_{j=0}^{h} g_{t+j} + \gamma_h' w_{t-1} + u_{t+h},
+$$
+
+with cumulative spending instrumented by the shock $s_t$. Both sides move with
+the horizon, and `cumul` handles either side, so `lpiv` returns the whole
+multiplier path at once:
+
+```{julia}
+mult_news = lpiv(@formula(cumul(y) ~ (cumul(g) ~ newsy) +
+                          lags(newsy, 4) + lags(y, 4) + lags(g, 4)), rz; horizon = 20)
+mult_bp = lpiv(@formula(cumul(y) ~ (cumul(g) ~ bp) + lags(y, 4) + lags(g, 4)),
+    rz; horizon = 20)
+
+s_news = summarize(mult_news, hac; level = 0.90)   # the multiplier is `shock`, no `term`
+s_bp = summarize(mult_bp, hac; level = 0.90)
+[m.nobs for m in mult_bp.models][[1, 9, 21]]       # h = 0, 8, 20: Stata's samples
+```
+
+```{julia}
+#| echo: false
+#| fig-cap: "One-step cumulative multipliers. 90% bands, Newey–West automatic bandwidth; the dotted line is a multiplier of one."
+plot(irfpanel(s_news; title = "Cumulative multiplier · news", reference = 1.0,
+        xlab = "quarters"),
+    irfpanel(s_bp; title = "Cumulative multiplier · Blanchard–Perotti",
+        reference = 1.0, xlab = "quarters");
+    layout = (1, 2), size = (900, 300), FIGKW...)
+```
+
+::: {.lead-in}
+The two-year multiplier is **`{julia} f2(s_news.coef[9])`** for the news shock
+and **`{julia} f2(s_bp.coef[9])`** for Blanchard–Perotti. Both are below one,
+the paper's headline result.
+:::
+
+### Against the published numbers
+
+`RZ` is the authors' published multiplier from
+`Multiplier-Standard-Errors.xlsx` in the replication package. Horizons 8 and 16
+are the two-year and four-year multipliers in the paper.
+
+```{julia}
+#| echo: false
+#| output: asis
+P = RZ_PUBLISHED
+ix = P.h .+ 1
+mdtable(["h", "news", "s.e.", "RZ", "RZ s.e.", "BP", "s.e.", "RZ", "RZ s.e."],
+    [[string(P.h[k]), f3(s_news.coef[ix[k]]), f3(s_news.se[ix[k]]), f3(P.news[k]),
+        f3(P.news_se[k]), f3(s_bp.coef[ix[k]]), f3(s_bp.se[ix[k]]), f3(P.bp[k]),
+        f3(P.bp_se[k])] for k in eachindex(P.h)])
+gap = vcat(abs.(s_news.coef[ix] .- P.news) ./ P.news_se,
+    abs.(s_bp.coef[ix] .- P.bp) ./ P.bp_se)
+se_ratio = vcat(s_news.se[ix] ./ P.news_se, s_bp.se[ix] ./ P.bp_se)
+nothing
+```
+
+At these `{julia} length(P.h)` horizons, for both shocks, every point estimate
+is within `{julia} f2(maximum(gap))` published standard errors of the
+authors' value, with a median gap of `{julia} f2(median(gap))`. The remaining
+difference is most likely the data vintage: the spreadsheet of published
+numbers predates the last revision of the shipped data by a week.
+
+The standard errors differ more, `{julia} f2(minimum(se_ratio))` to
+`{julia} f2(maximum(se_ratio))` times the published ones, for two reasons:
+
+- **Bandwidth.** The paper uses `ivreg2, robust bw(auto)`. Both sides implement
+  the Newey–West (1994) automatic rule, but they select different bandwidths on
+  the same regression. With a fixed bandwidth, `Bartlett(b)` here and `bw(b)`
+  in Stata, coefficients and IV standard errors agree to about $10^{-10}$.
+- **Degrees of freedom.** `ivreg2` applies no small-sample factor, and neither
+  do the IV standard errors here. The OLS impulse-response standard errors
+  above carry $n/(n-k)$ and are 1–3% larger than Stata's `ivreg2` equivalents.
+
+## The two-step multiplier
+
+The paper's alternative estimator is the ratio of the cumulative sums of the
+two impulse responses, $\sum_{j \le h} \hat\beta^y_j \,/\, \sum_{j \le h} \hat\beta^g_j$:
+
+```{julia}
+twostep(ry, rg, shock) = cumsum(coefpath(ry; term = shock)) ./
+                         cumsum(coefpath(rg; term = shock))
+two_news = twostep(irf_y_news, irf_g_news, :newsy)
+two_bp = twostep(irf_y_bp, irf_g_bp, :bp)
+(news = maximum(abs.(two_news .- s_news.coef)), bp = maximum(abs.(two_bp .- s_bp.coef)))
+```
+
+The two estimators agree to within `{julia} f4(maximum(abs.(two_news .- s_news.coef)))`
+(news) and `{julia} f4(maximum(abs.(two_bp .- s_bp.coef)))` (Blanchard–Perotti)
+at every horizon, because here the one-step regressions use the same sample as
+the impulse-response regressions. Ramey and Zubairy note that the two can
+diverge in other specifications, precisely when the samples differ.
+
+## Is the instrument strong enough?
+
+A multiplier estimated with a weak instrument is biased and its bands
+undercover. `weakivtest` computes the Montiel Olea–Pflueger effective *F* at
+each horizon, from the HAC covariance attached to the model:
+
+```{julia}
+mop(m) = [weakivtest(m + vcov(hac), h) for h in 0:20]
+w_news, w_bp = mop(mult_news), mop(mult_bp)
+w_news[9]                                          # two years out
+```
+
+```{julia}
+#| echo: false
+#| fig-cap: "Montiel Olea–Pflueger effective F, log scale. The dashed line is the 5% critical value for a worst-case bias of 10%."
+F_news = [w.F_eff for w in w_news]
+F_bp = [w.F_eff for w in w_bp]
+cv = w_news[1].cv_TSLS[2]
+plot(fpanel(0:20, F_news, cv; title = "Effective F · news", xlab = "quarters"),
+    fpanel(0:20, F_bp, cv; title = "Effective F · Blanchard–Perotti",
+        labelpos = :bottom, xlab = "quarters");
+    layout = (1, 2), size = (900, 300), FIGKW...)
+```
+
+```{julia}
+#| echo: false
+#| output: false
+hpk = argmax(F_news) - 1
+weak_from = findfirst(h -> all(F_bp[(h + 1):end] .< cv), 0:20) - 1
+```
+
+The news instrument never clears the critical value of
+`{julia} f2(cv)`: its effective *F* peaks at `{julia} f2(F_news[hpk + 1])` at
+`{julia} hpk` quarters. Blanchard–Perotti is strong at short horizons and falls
+below the threshold from horizon `{julia} weak_from` on. At $h = 0$ its
+instrument *is* the regressor, so the first stage is exact and the figure
+omits that point. Ramey and Zubairy respond to weak instruments with
+Anderson–Rubin inference, which the package does not implement yet.
