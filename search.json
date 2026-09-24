@@ -1,0 +1,72 @@
+[
+  {
+    "objectID": "ramey-zubairy.html",
+    "href": "ramey-zubairy.html",
+    "title": "Government spending multipliers",
+    "section": "",
+    "text": "Ramey and Zubairy (2018, JPE) estimate how much GDP rises when government spending rises, using more than a century of US quarterly data. This page replicates the baseline linear model from their Stata program jordagk.do: the impulse responses, the one-step cumulative multiplier, the two-step multiplier and the weak-instrument diagnostic. The authors build every lead, cumulated sum and lag by hand and loop ivreg2 over horizons. Here each is a single call."
+  },
+  {
+    "objectID": "ramey-zubairy.html#data-and-specification",
+    "href": "ramey-zubairy.html#data-and-specification",
+    "title": "Government spending multipliers",
+    "section": "Data and specification",
+    "text": "Data and specification\nThe cleaned dataset ships with the package as docs/src/data/ramey_zubairy.csv, built from the replication package with the variable definitions of jordagk.do. GDP and spending are divided by potential GDP (the Gordon–Krenn normalization), so regression coefficients are already in dollars of GDP per dollar of spending.\n\nrz = rz_data()\nfirst(rz[:, [:quarter, :y, :g, :newsy, :unemp]], 3)\n\n3×5 DataFrame\n\n\n\nRow\nquarter\ny\ng\nnewsy\nunemp\n\n\n\nFloat64\nFloat64\nFloat64\nFloat64?\nFloat64?\n\n\n\n\n1\n1889.0\n1.09647\n0.0559437\nmissing\nmissing\n\n\n2\n1889.25\n1.07006\n0.0466937\nmissing\nmissing\n\n\n3\n1889.5\n1.05811\n0.0538831\nmissing\nmissing\n\n\n\n\n\n\nTwo shocks identify spending changes:\n\n\n\n\n\n\n\n\nShock\nInstrument \\(s_t\\)\nControls \\(w_{t-1}\\)\n\n\n\n\nMilitary news\nnewsy: news about future military spending, over lagged potential GDP\n4 lags of newsy, y, g\n\n\nBlanchard–Perotti\nbp: current spending, taken as predetermined\n4 lags of y, g\n\n\n\nnewsy starts in 1890Q1: the file begins in 1889Q1, and its first lag does not exist."
+  },
+  {
+    "objectID": "ramey-zubairy.html#impulse-responses",
+    "href": "ramey-zubairy.html#impulse-responses",
+    "title": "Government spending multipliers",
+    "section": "Impulse responses",
+    "text": "Impulse responses\nThe responses of spending and GDP at horizon \\(h\\) are the coefficients on the shock in \\(x_{t+h} = \\alpha_h + \\beta_h s_t + \\gamma_h' w_{t-1} + u_{t+h}\\). leads(x) puts \\(x_{t+h}\\) on the left and lp runs the regression for every \\(h\\) up to horizon:\n\nirf_y_news = lp(@formula(leads(y) ~ newsy + lags(newsy, 4) + lags(y, 4) + lags(g, 4)),\n    rz; horizon = 20)\nirf_g_news = lp(@formula(leads(g) ~ newsy + lags(newsy, 4) + lags(y, 4) + lags(g, 4)),\n    rz; horizon = 20)\nirf_y_bp = lp(@formula(leads(y) ~ bp + lags(y, 4) + lags(g, 4)), rz; horizon = 20)\nirf_g_bp = lp(@formula(leads(g) ~ bp + lags(y, 4) + lags(g, 4)), rz; horizon = 20)\n\nhac = Bartlett{NeweyWest}()      # Newey–West, automatic bandwidth\nsummarize(irf_y_news, hac; term = :newsy, level = 0.90)\n\n\n                Impulse Response: newsy\n╭─────────┬────────┬──────────┬───────────┬───────────╮\n│ Horizon │   Coef │ Std.Err. │ Lower 90% │ Upper 90% │\n├─────────┼────────┼──────────┼───────────┼───────────┤\n│     0.0 │  0.051 │   0.0169 │    0.0232 │    0.0788 │\n│     1.0 │ 0.0747 │   0.0334 │    0.0198 │    0.1297 │\n│     2.0 │ 0.1069 │   0.0338 │    0.0513 │    0.1624 │\n│     3.0 │ 0.1134 │   0.0274 │    0.0684 │    0.1584 │\n│     4.0 │ 0.1612 │   0.0378 │    0.0991 │    0.2233 │\n│     5.0 │ 0.1945 │   0.0454 │    0.1198 │    0.2692 │\n│     6.0 │  0.221 │   0.0484 │    0.1413 │    0.3007 │\n│     7.0 │ 0.2035 │   0.0512 │    0.1193 │    0.2877 │\n│     8.0 │ 0.2295 │   0.0661 │    0.1208 │    0.3381 │\n│     9.0 │ 0.2759 │   0.0719 │    0.1576 │    0.3941 │\n│    10.0 │ 0.2938 │   0.0793 │    0.1633 │    0.4242 │\n│    11.0 │ 0.2884 │   0.0852 │    0.1482 │    0.4286 │\n│    12.0 │ 0.2563 │     0.09 │    0.1083 │    0.4044 │\n│    13.0 │ 0.2282 │    0.099 │    0.0653 │    0.3911 │\n│    14.0 │ 0.2084 │   0.1103 │     0.027 │    0.3897 │\n│       ⋮ │      ⋮ │        ⋮ │         ⋮ │         ⋮ │\n╰─────────┴────────┴──────────┴───────────┴───────────╯\n                                         6 rows omitted\n\n\n\n\n\n\n\nResponses of government spending and GDP. 90% bands, Newey–West automatic bandwidth.\n\n\nAfter a news shock both responses are hump-shaped: spending peaks at 0.37 after 11 quarters, GDP at 0.29 after 10. Under Blanchard–Perotti the shock is current spending, so spending moves one for one on impact, keeps rising to 2.25 after 3 quarters, then declines."
+  },
+  {
+    "objectID": "ramey-zubairy.html#the-one-step-cumulative-multiplier",
+    "href": "ramey-zubairy.html#the-one-step-cumulative-multiplier",
+    "title": "Government spending multipliers",
+    "section": "The one-step cumulative multiplier",
+    "text": "The one-step cumulative multiplier\nThe multiplier at horizon \\(h\\) is cumulative extra GDP per cumulative extra dollar of spending. Ramey and Zubairy estimate it in one step, as \\(m_h\\) in\n\\[\n\\sum_{j=0}^{h} y_{t+j} = \\alpha_h + m_h \\sum_{j=0}^{h} g_{t+j} + \\gamma_h' w_{t-1} + u_{t+h},\n\\]\nwith cumulative spending instrumented by the shock \\(s_t\\). Both sides move with the horizon, and cumul handles either side, so lpiv returns the whole multiplier path at once:\n\nmult_news = lpiv(@formula(cumul(y) ~ (cumul(g) ~ newsy) +\n                          lags(newsy, 4) + lags(y, 4) + lags(g, 4)), rz; horizon = 20)\nmult_bp = lpiv(@formula(cumul(y) ~ (cumul(g) ~ bp) + lags(y, 4) + lags(g, 4)),\n    rz; horizon = 20)\n\ns_news = summarize(mult_news, hac; level = 0.90)   # the multiplier is `shock`, no `term`\ns_bp = summarize(mult_bp, hac; level = 0.90)\n[m.nobs for m in mult_bp.models][[1, 9, 21]]       # h = 0, 8, 20: Stata's samples\n\n3-element Vector{Int64}:\n 504\n 496\n 484\n\n\n\n\n\nOne-step cumulative multipliers. 90% bands, Newey–West automatic bandwidth; the dotted line is a multiplier of one.\n\n\n\nThe two-year multiplier is 0.67 for the news shock and 0.41 for Blanchard–Perotti. Both are below one, the paper’s headline result.\n\n\nAgainst the published numbers\nRZ is the authors’ published multiplier from Multiplier-Standard-Errors.xlsx in the replication package. Horizons 8 and 16 are the two-year and four-year multipliers in the paper.\n\n\n\nh\nnews\ns.e.\nRZ\nRZ s.e.\nBP\ns.e.\nRZ\nRZ s.e.\n\n\n\n\n0\n1.306\n0.321\n1.255\n0.329\n0.179\n0.149\n0.208\n0.155\n\n\n1\n1.060\n0.261\n1.035\n0.235\n0.223\n0.120\n0.235\n0.143\n\n\n2\n0.847\n0.174\n0.820\n0.155\n0.257\n0.105\n0.257\n0.133\n\n\n3\n0.706\n0.126\n0.695\n0.123\n0.254\n0.101\n0.251\n0.133\n\n\n4\n0.680\n0.100\n0.674\n0.097\n0.272\n0.105\n0.271\n0.132\n\n\n6\n0.677\n0.076\n0.673\n0.074\n0.356\n0.098\n0.353\n0.119\n\n\n8\n0.669\n0.061\n0.667\n0.060\n0.413\n0.089\n0.411\n0.104\n\n\n10\n0.706\n0.055\n0.705\n0.053\n0.442\n0.089\n0.439\n0.102\n\n\n12\n0.719\n0.051\n0.717\n0.052\n0.461\n0.091\n0.458\n0.102\n\n\n14\n0.717\n0.045\n0.716\n0.046\n0.473\n0.094\n0.471\n0.105\n\n\n16\n0.710\n0.043\n0.708\n0.046\n0.469\n0.107\n0.467\n0.119\n\n\n18\n0.715\n0.046\n0.713\n0.053\n0.456\n0.119\n0.453\n0.133\n\n\n20\n0.729\n0.054\n0.727\n0.063\n0.443\n0.125\n0.440\n0.139\n\n\n\nAt these 13 horizons, for both shocks, every point estimate is within 0.19 published standard errors of the authors’ value, with a median gap of 0.03. The remaining difference is most likely the data vintage: the spreadsheet of published numbers predates the last revision of the shipped data by a week.\nThe standard errors differ more, 0.76 to 1.12 times the published ones, for two reasons:\n\nBandwidth. The paper uses ivreg2, robust bw(auto). Both sides implement the Newey–West (1994) automatic rule, but they select different bandwidths on the same regression. With a fixed bandwidth, Bartlett(b) here and bw(b) in Stata, coefficients and IV standard errors agree to about \\(10^{-10}\\).\nDegrees of freedom. ivreg2 applies no small-sample factor, and neither do the IV standard errors here. The OLS impulse-response standard errors above carry \\(n/(n-k)\\) and are 1–3% larger than Stata’s ivreg2 equivalents."
+  },
+  {
+    "objectID": "ramey-zubairy.html#the-two-step-multiplier",
+    "href": "ramey-zubairy.html#the-two-step-multiplier",
+    "title": "Government spending multipliers",
+    "section": "The two-step multiplier",
+    "text": "The two-step multiplier\nThe paper’s alternative estimator is the ratio of the cumulative sums of the two impulse responses, \\(\\sum_{j \\le h} \\hat\\beta^y_j \\,/\\, \\sum_{j \\le h} \\hat\\beta^g_j\\):\n\ntwostep(ry, rg, shock) = cumsum(coefpath(ry; term = shock)) ./\n                         cumsum(coefpath(rg; term = shock))\ntwo_news = twostep(irf_y_news, irf_g_news, :newsy)\ntwo_bp = twostep(irf_y_bp, irf_g_bp, :bp)\n(news = maximum(abs.(two_news .- s_news.coef)), bp = maximum(abs.(two_bp .- s_bp.coef)))\n\n(news = 0.003135302083235758, bp = 0.0003613935994520867)\n\n\nThe two estimators agree to within 0.0031 (news) and 0.0004 (Blanchard–Perotti) at every horizon, because here the one-step regressions use the same sample as the impulse-response regressions. Ramey and Zubairy note that the two can diverge in other specifications, precisely when the samples differ."
+  },
+  {
+    "objectID": "ramey-zubairy.html#is-the-instrument-strong-enough",
+    "href": "ramey-zubairy.html#is-the-instrument-strong-enough",
+    "title": "Government spending multipliers",
+    "section": "Is the instrument strong enough?",
+    "text": "Is the instrument strong enough?\nA multiplier estimated with a weak instrument is biased and its bands undercover. weakivtest computes the Montiel Olea–Pflueger effective F at each horizon, from the HAC covariance attached to the model:\n\nmop(m) = [weakivtest(m + vcov(hac), h) for h in 0:20]\nw_news, w_bp = mop(mult_news), mop(mult_bp)\nw_news[9]                                          # two years out\n\n\nMontiel-Pflueger robust weak instrument test\n──────────────────────────────────────────────────────\nTSLS coefficient (SE):          0.6690 (  0.0625)\nLIML coefficient (SE):          0.6690 (  0.0625)\nGMMf coefficient (SE):          0.6690 (  0.0625)\nkappa:                              1.0000\nF[nonrobust]:                       71.863\nF[effective]:                       18.087\nF[robust]:                          18.087\nConfidence level alpha:               5%\n──────────────────────────────────────────────────────\n\nUse:\n  Compare F[effective] or F[robust] to the common critical values below.\n  If F exceeds the critical value at tau, weak-IV bias is below that tau bound.\n\n──────────────────────────────────────────────────────\ntau              Common\n──────────────────────────────────────────────────────\ntau=5%           37.418\ntau=10%          23.109\ntau=20%          15.062\ntau=30%          12.045\n──────────────────────────────────────────────────────\n\n\n\n\n\nMontiel Olea–Pflueger effective F, log scale. The dashed line is the 5% critical value for a worst-case bias of 10%.\n\n\nThe news instrument never clears the critical value of 23.11: its effective F peaks at 19.57 at 5 quarters. Blanchard–Perotti is strong at short horizons and falls below the threshold from horizon 11 on. At \\(h = 0\\) its instrument is the regressor, so the first stage is exact and the figure omits that point. Ramey and Zubairy respond to weak instruments with Anderson–Rubin inference, which the package does not implement yet."
+  },
+  {
+    "objectID": "index.html",
+    "href": "index.html",
+    "title": "LocalProjections.jl",
+    "section": "",
+    "text": "These pages work through the package’s examples in full. Every number, table and figure is computed from the package when the site is rendered, so the text cannot drift from the code."
+  },
+  {
+    "objectID": "index.html#install",
+    "href": "index.html#install",
+    "title": "LocalProjections.jl",
+    "section": "Install",
+    "text": "Install\nusing Pkg\nPkg.add(url = \"https://github.com/andrerecio/LocalProjections.jl\")\nThis is a fork of Giuseppe Ragusa’s LocalProjections.jl. It adds HAR inference with equal-weighted-cosine (EWC) variances and Student-\\(t\\) critical values, the Herbst–Johannsen bias correction, the VAR moving-block bootstrap, VAR lag selection, and state-dependent projections."
+  },
+  {
+    "objectID": "index.html#the-workflow-in-a-few-lines",
+    "href": "index.html#the-workflow-in-a-few-lines",
+    "title": "LocalProjections.jl",
+    "section": "The workflow in a few lines",
+    "text": "The workflow in a few lines\nusing LocalProjections, StatsModels, CovarianceMatrices, Plots\nr = lp(@formula(leads(y) ~ shock + lags(y, 4) + lags(shock, 4)), df; horizon = 20)\nsummarize(r, Bartlett{NeweyWest}(); level = 0.90)   # path, s.e. and bands\nplot(r, EWC(ewc_bandwidth(r)); levels = [0.68, 0.90])\nThe left-hand side sets the response: leads(y) for \\(y_{t+h}\\), cumul(y) for \\(\\sum_{j \\le h} y_{t+j}\\), anchor(y, z) for \\(y_{t+h} - z_t\\). lpiv takes an instrumented regressor, (cumul(g) ~ z), and the covariance estimator is any estimator from CovarianceMatrices.jl."
+  },
+  {
+    "objectID": "index.html#rebuilding-these-pages",
+    "href": "index.html#rebuilding-these-pages",
+    "title": "LocalProjections.jl",
+    "section": "Rebuilding these pages",
+    "text": "Rebuilding these pages\nFrom docs/quarto/:\njulia --project=. -e 'using Pkg; Pkg.instantiate()'\nquarto render\nComputed results are frozen in _freeze/, so a page is re-run only when its source changes. A change to the package itself does not invalidate them: re-render a page explicitly (quarto render ramey-zubairy.qmd always executes) or delete _freeze/. This build: LocalProjections at commit 2209628, Julia 1.12.6."
+  }
+]
