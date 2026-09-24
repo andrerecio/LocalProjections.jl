@@ -8,7 +8,7 @@ execute:
 
 website:
   title: "LocalProjections.jl"
-  site-url: "https://andrerecio.github.io/LocalProjections.jl"
+  site-url: "https://andrearecine.me/LocalProjections.jl"
   navbar:
     left:
       - href: index.qmd
