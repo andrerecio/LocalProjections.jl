@@ -73,15 +73,22 @@ LocalProjections.LPEstimate
 
 ## Transformation terms
 
-The left-hand side of an `lp`/`lpiv` formula must be one of `leads`, `cumul`
-or `anchor` (`leads(y)|z` is sugar for `anchor(y, z)`). On the right-hand side,
-`lags(x, n)` comes from Regress.jl, and a bare `cumul(x)` or `leads(x)`
-tracks the projection horizon.
+The left-hand side of an `lp`/`lpiv` formula must be one of `leads`, `cumul`,
+`anchor` (`leads(y)|z` is sugar for `anchor(y, z)`), `ldiff`, `hbr`, or
+`cumul` of the last two. On the right-hand side, `lags(x, n)` comes from
+Regress.jl, `lags(firstdiff(x), n)` gives lagged first differences, and a
+bare `cumul(x)`, `leads(x)`, `ldiff(x)` or `hbr(x, y)` tracks the projection
+horizon.
 
 ```@docs
 leads
 cumul
 anchor
+ldiff
+hbr
+firstdiff
+LongDiffTerm
+DiffTerm
 ```
 
 ## Plotting and conversion
