@@ -50,17 +50,21 @@ end
 # ---------------------------------------------------------------- estimation
 
 level = Dict(
-    :mp => @formula(leads(y) ~ mp + lags(lip, 12) + lags(lcpi, 12) + lags(lsp500, 12) +
-                               lags(ebp, 12) + lags(gs1, 12)),
-    :cbi => @formula(leads(y) ~ cbi + lags(lip, 12) + lags(lcpi, 12) + lags(lsp500, 12) +
-                                lags(ebp, 12) + lags(gs1, 12)))
+    :mp => @formula(leads(y) ~
+             mp + lags(lip, 12) + lags(lcpi, 12) + lags(lsp500, 12) +
+             lags(ebp, 12) + lags(gs1, 12)),
+    :cbi => @formula(leads(y) ~
+             cbi + lags(lip, 12) + lags(lcpi, 12) + lags(lsp500, 12) +
+             lags(ebp, 12) + lags(gs1, 12)))
 longdiff = Dict(
-    :mp => @formula(ldiff(y) ~ mp + lags(firstdiff(lip), 12) + lags(firstdiff(lcpi), 12) +
-                               lags(firstdiff(lsp500), 12) + lags(firstdiff(ebp), 12) +
-                               lags(firstdiff(gs1), 12)),
-    :cbi => @formula(ldiff(y) ~ cbi + lags(firstdiff(lip), 12) + lags(firstdiff(lcpi), 12) +
-                                lags(firstdiff(lsp500), 12) + lags(firstdiff(ebp), 12) +
-                                lags(firstdiff(gs1), 12)))
+    :mp => @formula(ldiff(y) ~
+             mp + lags(firstdiff(lip), 12) + lags(firstdiff(lcpi), 12) +
+             lags(firstdiff(lsp500), 12) + lags(firstdiff(ebp), 12) +
+             lags(firstdiff(gs1), 12)),
+    :cbi => @formula(ldiff(y) ~
+             cbi + lags(firstdiff(lip), 12) + lags(firstdiff(lcpi), 12) +
+             lags(firstdiff(lsp500), 12) + lags(firstdiff(ebp), 12) +
+             lags(firstdiff(gs1), 12)))
 
 function paths(shock, resp)
     d = copy(ps)
@@ -92,7 +96,7 @@ function panel(shock, resp; title, xlab = "")
     s = paths(shock, resp)
     for (k, v) in pairs(s)
         @info title k coef_12_24_36=round.(v.coef[[13, 25, 37]]; digits = 3) se_ratio_36=round(
-            s.longdiff.se[37] / s.level.se[37]; digits = 2)
+            s.longdiff.se[37]/s.level.se[37]; digits = 2)
     end
     p = plot(H, s.level.lower; fillrange = s.level.upper, linealpha = 0,
         fillcolor = ACCENT, fillalpha = 0.14, title = title, xlabel = xlab, base()...)
