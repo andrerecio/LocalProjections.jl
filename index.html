@@ -163,6 +163,10 @@ window.Quarto = {
     <a class="nav-link" href="./ramey-zubairy.html"> 
 <span class="menu-text">Ramey–Zubairy (2018)</span></a>
   </li>  
+  <li class="nav-item">
+    <a class="nav-link" href="./piger-stockwell.html"> 
+<span class="menu-text">Piger–Stockwell (2025)</span></a>
+  </li>  
 </ul>
             <ul class="navbar-nav navbar-nav-scroll ms-auto">
   <li class="nav-item compact">
@@ -212,12 +216,17 @@ window.Quarto = {
 <p>Government spending multipliers on US data from 1889. Impulse responses, the one-step and two-step cumulative multipliers, the published numbers, and the weak-instrument diagnostic.</p>
 <p><span class="figs">two-year multiplier: news 0.67 · Blanchard–Perotti 0.41</span></p>
 </section>
+<section id="pigerstockwell-2025" class="level3 example-card">
+<h3 class="anchored" data-anchor-id="pigerstockwell-2025"><a href="./piger-stockwell.html">Piger–Stockwell (2025)</a></h3>
+<p>Local projections in levels or in long differences? Responses of industrial production and prices to monetary-policy shocks, 1990–2019, estimated both ways with <code>ldiff</code>.</p>
+<p><span class="figs">industrial production after 36 months: long differences -0.33 · levels 0.09</span></p>
+</section>
 </div>
 <section id="install" class="level2">
 <h2 class="anchored" data-anchor-id="install">Install</h2>
 <div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb1"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">using</span> <span class="bu">Pkg</span></span>
 <span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="bu">Pkg</span>.<span class="fu">add</span>(url <span class="op">=</span> <span class="st">"https://github.com/andrerecio/LocalProjections.jl"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<p>This is a fork of Giuseppe Ragusa’s <a href="https://github.com/gragusa/LocalProjections.jl">LocalProjections.jl</a>. It adds HAR inference with equal-weighted-cosine (EWC) variances and Student-<span class="math inline">\(t\)</span> critical values, the Herbst–Johannsen bias correction, the VAR moving-block bootstrap, VAR lag selection, and state-dependent projections.</p>
+<p>This is a fork of Giuseppe Ragusa’s <a href="https://github.com/gragusa/LocalProjections.jl">LocalProjections.jl</a>. It adds HAR inference with equal-weighted-cosine (EWC) variances and Student-<span class="math inline">\(t\)</span> critical values, the Herbst–Johannsen bias correction, the VAR moving-block bootstrap, VAR lag selection, state-dependent projections, long-difference projections, and the Hall–Barro–Redlick transformation for fiscal multipliers.</p>
 </section>
 <section id="the-workflow-in-a-few-lines" class="level2">
 <h2 class="anchored" data-anchor-id="the-workflow-in-a-few-lines">The workflow in a few lines</h2>
@@ -225,14 +234,14 @@ window.Quarto = {
 <span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a>r <span class="op">=</span> <span class="fu">lp</span>(<span class="pp">@formula</span>(<span class="fu">leads</span>(y) <span class="op">~</span> shock <span class="op">+</span> <span class="fu">lags</span>(y, <span class="fl">4</span>) <span class="op">+</span> <span class="fu">lags</span>(shock, <span class="fl">4</span>)), df; horizon <span class="op">=</span> <span class="fl">20</span>)</span>
 <span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a><span class="fu">summarize</span>(r, <span class="fu">Bartlett</span><span class="dt">{NeweyWest}</span>(); level <span class="op">=</span> <span class="fl">0.90</span>)   <span class="co"># path, s.e. and bands</span></span>
 <span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a><span class="fu">plot</span>(r, <span class="fu">EWC</span>(<span class="fu">ewc_bandwidth</span>(r)); levels <span class="op">=</span> [<span class="fl">0.68</span>, <span class="fl">0.90</span>])</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<p>The left-hand side sets the response: <code>leads(y)</code> for <span class="math inline">\(y_{t+h}\)</span>, <code>cumul(y)</code> for <span class="math inline">\(\sum_{j \le h} y_{t+j}\)</span>, <code>anchor(y, z)</code> for <span class="math inline">\(y_{t+h} - z_t\)</span>. <code>lpiv</code> takes an instrumented regressor, <code>(cumul(g) ~ z)</code>, and the covariance estimator is any estimator from CovarianceMatrices.jl.</p>
+<p>The left-hand side sets the response: <code>leads(y)</code> for <span class="math inline">\(y_{t+h}\)</span>, <code>cumul(y)</code> for <span class="math inline">\(\sum_{j \le h} y_{t+j}\)</span>, <code>anchor(y, z)</code> for <span class="math inline">\(y_{t+h} - z_t\)</span>, <code>ldiff(y)</code> for <span class="math inline">\(y_{t+h} - y_{t-1}\)</span>, <code>hbr(x, y)</code> for <span class="math inline">\((x_{t+h} - x_{t-1}) / y_{t-1}\)</span>. <code>lpiv</code> takes an instrumented regressor, <code>(cumul(g) ~ z)</code>, and the covariance estimator is any estimator from CovarianceMatrices.jl.</p>
 </section>
 <section id="rebuilding-these-pages" class="level2">
 <h2 class="anchored" data-anchor-id="rebuilding-these-pages">Rebuilding these pages</h2>
 <p>From <code>docs/quarto/</code>:</p>
 <div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb3"><pre class="sourceCode sh code-with-copy"><code class="sourceCode bash"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="ex">julia</span> <span class="at">--project</span><span class="op">=</span>. <span class="at">-e</span> <span class="st">'using Pkg; Pkg.instantiate()'</span></span>
 <span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="ex">quarto</span> render</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<p>Computed results are frozen in <code>_freeze/</code>, so a page is re-run only when its source changes. A change to the package itself does not invalidate them: re-render a page explicitly (<code>quarto render ramey-zubairy.qmd</code> always executes) or delete <code>_freeze/</code>. This build: LocalProjections at commit 2209628, Julia 1.12.6.</p>
+<p>Computed results are frozen in <code>_freeze/</code>, so a page is re-run only when its source changes. A change to the package itself does not invalidate them: re-render a page explicitly (<code>quarto render ramey-zubairy.qmd</code> always executes) or delete <code>_freeze/</code>. This build: LocalProjections at commit 84b96ee, Julia 1.12.6.</p>
 
 
 </section>
