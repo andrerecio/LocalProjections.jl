@@ -14,6 +14,12 @@ m_news = lpiv(@formula(cumul(y) ~ (cumul(g) ~ newsy) +
                        lags(newsy, 4) + lags(y, 4) + lags(g, 4)), rz; horizon = 8)
 m_bp = lpiv(@formula(cumul(y) ~ (cumul(g) ~ bp) + lags(y, 4) + lags(g, 4)),
     rz; horizon = 8)
+ps = ps_data()
+ld = lp(@formula(ldiff(lip) ~ mp + lags(firstdiff(lip), 12) + lags(firstdiff(lcpi), 12) +
+                 lags(firstdiff(lsp500), 12) + lags(firstdiff(ebp), 12) +
+                 lags(firstdiff(gs1), 12)), ps; horizon = 36)
+lv = lp(@formula(leads(lip) ~ mp + lags(lip, 12) + lags(lcpi, 12) + lags(lsp500, 12) +
+                 lags(ebp, 12) + lags(gs1, 12)), ps; horizon = 36)
 commit = try strip(read(`git -C $ROOT rev-parse --short HEAD`, String)) catch; "unknown" end
 ```
 
@@ -32,6 +38,15 @@ weak-instrument diagnostic.
 [two-year multiplier: news `{julia} f2(coefpath(m_news)[9])` · Blanchard–Perotti `{julia} f2(coefpath(m_bp)[9])`]{.figs}
 :::
 
+::: {.example-card}
+### [Piger–Stockwell (2025)](piger-stockwell.qmd)
+Local projections in levels or in long differences? Responses of industrial
+production and prices to monetary-policy shocks, 1990–2019, estimated both
+ways with `ldiff`.
+
+[industrial production after 36 months: long differences `{julia} f2(coefpath(ld)[37])` · levels `{julia} f2(coefpath(lv)[37])`]{.figs}
+:::
+
 :::
 
 ## Install
@@ -45,7 +60,8 @@ This is a fork of Giuseppe Ragusa's
 [LocalProjections.jl](https://github.com/gragusa/LocalProjections.jl). It
 adds HAR inference with equal-weighted-cosine (EWC) variances and Student-$t$
 critical values, the Herbst–Johannsen bias correction, the VAR moving-block
-bootstrap, VAR lag selection, and state-dependent projections.
+bootstrap, VAR lag selection, state-dependent projections, long-difference
+projections, and the Hall–Barro–Redlick transformation for fiscal multipliers.
 
 ## The workflow in a few lines
 
@@ -57,7 +73,8 @@ plot(r, EWC(ewc_bandwidth(r)); levels = [0.68, 0.90])
 ```
 
 The left-hand side sets the response: `leads(y)` for $y_{t+h}$, `cumul(y)` for
-$\sum_{j \le h} y_{t+j}$, `anchor(y, z)` for $y_{t+h} - z_t$. `lpiv` takes an
+$\sum_{j \le h} y_{t+j}$, `anchor(y, z)` for $y_{t+h} - z_t$, `ldiff(y)` for
+$y_{t+h} - y_{t-1}$, `hbr(x, y)` for $(x_{t+h} - x_{t-1}) / y_{t-1}$. `lpiv` takes an
 instrumented regressor, `(cumul(g) ~ z)`, and the covariance estimator is any
 estimator from CovarianceMatrices.jl.
 

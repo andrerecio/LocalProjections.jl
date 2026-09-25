@@ -1,6 +1,6 @@
 # Shared by every page of the site: packages, data, and small formatting helpers.
 using LocalProjections, CSV, DataFrames, Plots, Printf, Statistics
-using StatsModels: @formula
+using StatsModels: @formula, term
 using CovarianceMatrices: Bartlett, NeweyWest
 
 gr()
@@ -44,6 +44,20 @@ const RZ_PUBLISHED = (
     bp_se = [0.155, 0.143, 0.133, 0.133, 0.132, 0.119, 0.104, 0.102, 0.102, 0.105,
         0.119, 0.133, 0.139])
 
+# ── Piger & Stockwell (2025): US monthly, 1989:1–2024:9 ─────────────────────
+# Sample through 2019:12 as in their application code; shocks standardized. The
+# shocks are `missing` before 1990:2 and recoded as NaN, so that those months
+# still supply the lagged controls (`lp` drops rows with `missing` before it
+# builds lags).
+function ps_data()
+    ps = CSV.read(datafile("piger_stockwell.csv"), DataFrame; missingstring = "")
+    ps = ps[1:(nrow(ps) - 57), :]
+    for s in (:mp, :cbi)
+        ps[!, s] = coalesce.(ps[!, s] ./ std(skipmissing(ps[!, s])), NaN)
+    end
+    return ps
+end
+
 # ── figure style (shared with docs/make_rz_*.jl) ─────────────────────────────
 const INK = RGB(0.106, 0.180, 0.310)          # response line and band fill
 const BANDALPHA = 0.18
@@ -66,6 +80,19 @@ function irfpanel(s::IRFSummary; title, reference = 0.0, xlab = "")
         fillalpha = BANDALPHA, title, xlabel = xlab, base()...)
     hline!(p, [reference]; c = RULE, ls = :dot, lw = 0.8)
     plot!(p, H, s.coef; c = INK, lw = 1.8)
+    return p
+end
+
+# two estimates of one response: `a` shaded navy and solid, `b` brick and dashed
+function comparepanel(a::IRFSummary, b::IRFSummary; title, xlab = "", xticks = :auto)
+    H = a.horizon
+    p = plot(H, b.lower; fillrange = b.upper, linealpha = 0, fillcolor = ACCENT,
+        fillalpha = 0.12, title, xlabel = xlab, xticks, base()...)
+    plot!(p, H, a.lower; fillrange = a.upper, linealpha = 0, fillcolor = INK,
+        fillalpha = BANDALPHA)
+    hline!(p, [0.0]; c = RULE, ls = :dot, lw = 0.8)
+    plot!(p, H, b.coef; c = ACCENT, ls = :dash, lw = 1.6)
+    plot!(p, H, a.coef; c = INK, lw = 1.8)
     return p
 end
 

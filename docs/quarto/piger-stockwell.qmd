@@ -1,0 +1,180 @@
+---
+title: "Levels or long differences?"
+subtitle: "Piger and Stockwell (2025): monetary policy shocks, US monthly data, 1990–2019"
+engine: julia
+---
+
+```{julia}
+#| echo: false
+#| output: false
+include("_setup.jl")
+```
+
+Piger and Stockwell (2025, *Journal of Applied Econometrics*) ask whether a
+local projection with an observed shock should be estimated with the response
+in levels, $y_{t+h}$, or in long differences, $y_{t+h} - y_{t-1}$. This page
+reruns the application of their paper (Figure 20): the responses of US
+industrial production and consumer prices to the Jarocinski–Karadi (2020)
+monetary-policy and central-bank-information shocks, estimated both ways. In
+their MATLAB code each specification is a hand-built loop over horizons. Here
+each is one `lp` call.
+
+## Data and specification
+
+The monthly dataset from their replication package ships with the package as
+`docs/src/data/piger_stockwell.csv`: the two shocks (`mp`, `cbi`) and five
+series, 100·log industrial production (`lip`), CPI (`lcpi`) and S&P 500
+(`lsp500`), the excess bond premium (`ebp`) and the one-year Treasury yield
+(`gs1`). As in their code, the sample ends in 2019:12 and each shock is
+divided by its standard deviation.
+
+```{julia}
+ps = ps_data()
+first(ps[14:end, [:year, :month, :mp, :cbi, :lip, :lcpi]], 3)
+```
+
+The shocks begin in 1990:2. Before that they are `NaN`, not `missing`: those
+months are not estimation rows, but the lagged controls of the first
+estimation rows reach back into them, and `lp` drops rows with `missing`
+values before it builds lags.
+
+For a response $y$ and shock $s_t$, with $x_t$ the five series, the two
+specifications are
+
+$$
+\begin{aligned}
+\text{levels:}\quad & y_{t+h} = \alpha_h + \beta_h s_t + \sum_{j=1}^{12} \gamma_{h,j}' x_{t-j} + u_{t+h}, \\
+\text{long differences:}\quad & y_{t+h} - y_{t-1} = \alpha_h + \beta_h s_t + \sum_{j=1}^{12} \gamma_{h,j}' \Delta x_{t-j} + u_{t+h}.
+\end{aligned}
+$$
+
+`ldiff(y)` builds the long difference and `lags(firstdiff(x), 12)` the lagged
+first differences:
+
+```{julia}
+levels = lp(@formula(leads(lip) ~ mp + lags(lip, 12) + lags(lcpi, 12) +
+                     lags(lsp500, 12) + lags(ebp, 12) + lags(gs1, 12)), ps; horizon = 36)
+diffs = lp(@formula(ldiff(lip) ~ mp + lags(firstdiff(lip), 12) + lags(firstdiff(lcpi), 12) +
+                    lags(firstdiff(lsp500), 12) + lags(firstdiff(ebp), 12) +
+                    lags(firstdiff(gs1), 12)), ps; horizon = 36)
+
+nw = Bartlett(38)       # Newey–West with 37 lags (h_max + 1), as in their code
+summarize(diffs, nw; level = 0.90)
+```
+
+Standard errors follow their code: Newey–West with 37 lags at every horizon
+and the $n/(n-k)$ small-sample factor. `Bartlett(38)` is that estimator, since
+a Bartlett bandwidth of $b$ weights lags $1, \dots, b-1$.
+
+## Impulse responses
+
+```{julia}
+#| echo: false
+#| output: false
+# the four panels of their Figure 20, for both specifications
+const VARS = (:lip, :lcpi, :lsp500, :ebp, :gs1)
+function spec(resp, shock, kind)
+    kind === :level &&
+        return leads(term(resp)) ~ term(1) + term(shock) + sum(lags(term(v), 12) for v in VARS)
+    return ldiff(term(resp)) ~ term(1) + term(shock) +
+                               sum(lags(firstdiff(term(v)), 12) for v in VARS)
+end
+fitpath(resp, shock, kind) = summarize(lp(spec(resp, shock, kind), ps; horizon = 36,
+        shock = shock), nw; term = shock, level = 0.90)
+paths = Dict((r, s, k) => fitpath(r, s, k)
+for r in (:lip, :lcpi), s in (:mp, :cbi), k in (:level, :ldiff))
+P(r, s) = (d = paths[(r, s, :ldiff)], l = paths[(r, s, :level)])
+```
+
+```{julia}
+#| echo: false
+#| fig-cap: "Responses to a one-standard-deviation shock. Solid navy: long differences; dashed brick: levels. 90% bands, Newey–West with 37 lags."
+panel(r, s; title, xlab = "") = comparepanel(P(r, s).d, P(r, s).l; title, xlab,
+    xticks = 0:6:36)
+plot(panel(:lip, :mp; title = "Industrial production · monetary policy"),
+    panel(:lcpi, :mp; title = "CPI · monetary policy"),
+    panel(:lip, :cbi; title = "Industrial production · CB information", xlab = "months"),
+    panel(:lcpi, :cbi; title = "CPI · CB information", xlab = "months");
+    layout = (2, 2), size = (900, 560), FIGKW...)
+```
+
+```{julia}
+#| echo: false
+#| output: false
+ip = P(:lip, :mp)
+ratios = [P(r, s).d.se[37] / P(r, s).l.se[37] for r in (:lip, :lcpi), s in (:mp, :cbi)]
+```
+
+::: {.lead-in}
+Three years after a monetary-policy shock, industrial production is
+**`{julia} f2(ip.d.coef[37])`** in long differences and
+**`{julia} f2(ip.l.coef[37])`** in levels.
+:::
+
+The two specifications agree over the first months and then part. In levels
+the responses drift back toward zero at long horizons; in long differences
+they stay persistent. The price is precision: at 36 months the long-difference
+standard errors are `{julia} f2(minimum(ratios))` to
+`{julia} f2(maximum(ratios))` times the levels ones across the four panels.
+This is the trade-off the paper studies. In its simulations, levels
+projections on persistent data are biased toward zero at long horizons, and
+long differences remove much of that bias at the cost of a larger variance.
+
+```{julia}
+#| echo: false
+#| output: asis
+hs = [0, 6, 12, 18, 24, 30, 36]
+mdtable(["h", "long diff.", "s.e.", "levels", "s.e."],
+    [[string(h), f3(ip.d.coef[h + 1]), f3(ip.d.se[h + 1]), f3(ip.l.coef[h + 1]),
+        f3(ip.l.se[h + 1])] for h in hs])
+```
+
+## Checks
+
+The long-difference response is an anchored response, $y_{t+h}$ minus a
+baseline fixed at $t$, with the baseline $y_{t-1}$. Written with `anchor`, the
+same regression gives the same path:
+
+```{julia}
+anchored = lp(@formula(anchor(lip, lag(lip)) ~ mp + lags(firstdiff(lip), 12) +
+                       lags(firstdiff(lcpi), 12) + lags(firstdiff(lsp500), 12) +
+                       lags(firstdiff(ebp), 12) + lags(firstdiff(gs1), 12)), ps;
+    horizon = 36)
+maximum(abs.(coefpath(anchored) .- coefpath(diffs)))
+```
+
+And the regression at any single horizon is ordinary least squares on columns
+built by hand, the way their MATLAB loop builds them:
+
+```{julia}
+h = 24
+T = nrow(ps)
+rows = 14:(T - h)                                   # 1990:2 to T − h
+Δ(v) = [NaN; diff(Float64.(v))]
+X = hcat(ps.mp[rows], ones(length(rows)),
+    [Δ(ps[!, v])[rows .- j] for v in (:lip, :lcpi, :lsp500, :ebp, :gs1), j in 1:12]...)
+Y = ps.lip[rows .+ h] .- ps.lip[rows .- 1]
+(by_hand = (X \ Y)[1], ldiff = coefpath(diffs)[h + 1])
+```
+
+Beyond this page, the paths were checked against Stata (`newey, lag(37)` on
+variables built with time-series operators) and against a line-by-line port of
+the authors' MATLAB loop, including its Newey–West sum. The long-difference
+coefficients and standard errors agree with both to $10^{-14}$ at every
+horizon, on identical samples; the levels ones to $10^{-6}$, the precision
+allowed by 61 nearly collinear log-level regressors.
+
+## Other long-difference responses
+
+`ldiff` has two relatives. `cumul(ldiff(y))` sums the long differences over
+horizons $0, \dots, h$, for cumulative responses. `hbr(x, y)` divides the
+change by a lagged scale variable, $(x_{t+h} - x_{t-1}) / y_{t-1}$: the
+Hall–Barro–Redlick transformation used for fiscal multipliers, where output and
+spending changes are both measured as shares of lagged GDP. All of them can
+also appear on the right-hand side, as the instrumented regressor of a
+cumulative multiplier:
+
+```julia
+lpiv(@formula(cumul(hbr(gdp)) ~ (cumul(hbr(gov, gdp)) ~ news) +
+              lags(news, 4) + lags(log(gdp), 4) + lags(log(gov), 4)), df; horizon = 20)
+```
