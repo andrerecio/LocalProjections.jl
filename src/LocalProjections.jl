@@ -9,6 +9,7 @@ export lagselect, VARLagSelection, nlags
 export varbootstrap, LPBootstrap
 export WeakIVTestResult, FirstStageIV
 export lag, lead, cumul, CumulTerm, lags, leads, LeadTerm, anchor, AnchorTerm
+export ldiff, hbr, LongDiffTerm, firstdiff, DiffTerm
 export as_irf_result, LocalProjectionIRFResult
 export irfplot, irfplot!, irfplot_axis
 
@@ -108,27 +109,6 @@ StatsModels.termvars(t::FunctionTerm{typeof(lead)}) = _termvars_unary(t)
 StatsModels.termvars(t::StatsModels.LeadLagTerm) = StatsModels.termvars(t.term)
 
 """
-    _unwrap_lhs(lhs_term)
-
-Unwrap LHS term to determine if it's anchored, cumulative, or leads.
-Returns (is_anchor, is_cumul, is_leads, anchor_term, cumul_term, leads_term).
-"""
-function _unwrap_lhs(lhs_term)
-    if lhs_term isa AnchorTerm
-        inner = lhs_term.response
-        is_cumul = inner isa CumulTerm
-        is_leads = inner isa LeadTerm || !is_cumul  # Default to leads
-        return (true, is_cumul, is_leads, lhs_term,
-            is_cumul ? inner : nothing,
-            is_leads && inner isa LeadTerm ? inner : nothing)
-    else
-        return (false, lhs_term isa CumulTerm, lhs_term isa LeadTerm,
-            nothing, lhs_term isa CumulTerm ? lhs_term : nothing,
-            lhs_term isa LeadTerm ? lhs_term : nothing)
-    end
-end
-
-"""
     _extract_single_response(term, context::String)
 
 Extract a single response variable from a term, throwing an error if multiple variables.
@@ -139,32 +119,6 @@ function _extract_single_response(term, context::String)::Symbol
     length(vars) == 1 ||
         throw(ArgumentError("$context must reference a single base variable"))
     return vars[1]
-end
-
-"""
-    _build_lhs_for_horizon(h::Int, is_anchor, is_cumul, is_leads, anchor_term, cumul_term, leads_term)
-
-Build the LHS term for a specific horizon h, handling anchor/cumul/leads combinations.
-"""
-function _build_lhs_for_horizon(h::Int, is_anchor, is_cumul, is_leads,
-        anchor_term, cumul_term, leads_term)
-    if is_anchor
-        inner = if is_cumul && cumul_term !== nothing
-            CumulTerm{typeof(cumul_term.term)}(cumul_term.term, h)
-        elseif is_leads && leads_term !== nothing
-            LeadTerm{typeof(leads_term.term)}(leads_term.term, h)
-        else
-            LeadTerm{typeof(anchor_term.response)}(anchor_term.response, h)
-        end
-        return AnchorTerm{typeof(inner), typeof(anchor_term.anchor)}(
-            inner, anchor_term.anchor, 0)
-    elseif is_cumul
-        return CumulTerm{typeof(cumul_term.term)}(cumul_term.term, h)
-    elseif is_leads
-        return LeadTerm{typeof(leads_term.term)}(leads_term.term, h)
-    else
-        throw(ArgumentError("Invalid LHS term type"))
-    end
 end
 
 # ============================================================================
@@ -203,6 +157,12 @@ function StatsModels.apply_schema(
         t::FunctionTerm{typeof(cumul)}, sch::StatsModels.Schema, ctx::Type)
     term, horizon = _parse_unary_binary_args(t, "cumul", nothing)
     term = StatsModels.apply_schema(term, sch, ctx)
+    # cumul(ldiff(y)) sums the changes at horizons 0, ..., h, so the horizon
+    # belongs to cumul: cumul(ldiff(y), 3), not cumul(ldiff(y, 3)).
+    term isa LongDiffTerm && term.horizon !== nothing &&
+        throw(ArgumentError(
+            "inside cumul(), write $(_longdiff_name(term))($(term.term)) without a horizon; " *
+            "pin the horizon on cumul instead, e.g. cumul($(_longdiff_name(term))(...), 3)"))
     return CumulTerm{typeof(term)}(term, horizon)
 end
 
@@ -431,14 +391,304 @@ function StatsModels.termvars(at::AnchorTerm)
 end
 
 # ============================================================================
+# Long differences (ldiff, hbr) and first differences (firstdiff)
+# ldiff(y):   y_{t+h} - y_{t-1}                  (Piger & Stockwell 2025)
+# hbr(x, y):  (x_{t+h} - x_{t-1}) / y_{t-1}      (Hall 2009; Barro & Redlick 2011)
+# firstdiff(x): x_t - x_{t-1}, for lagged differences on the right-hand side
+# ============================================================================
+
+"""
+    ldiff(term)
+    ldiff(term, horizon)
+
+Long difference ``y_{t+h} - y_{t-1}``, the response of the long-difference local
+projections of Piger and Stockwell (2025):
+
+- `@formula(ldiff(y) ~ shock + lags(firstdiff(y), 12))` — horizon from `lp()`
+- `@formula(ldiff(y, 3) ~ x)` — explicit horizon for standalone use
+- `@formula(cumul(ldiff(y)) ~ x)` — ``\\sum_{j=0}^{h} (y_{t+j} - y_{t-1})``
+
+The baseline ``y_{t-1}`` is fixed while the response moves to ``t+h``; at
+``h = 0`` the long difference is the first difference ``\\Delta y_t``. On the
+right-hand side a bare `ldiff(x)` tracks the projection horizon, like
+`cumul(x)`. See also [`hbr`](@ref) and [`firstdiff`](@ref).
+"""
+ldiff(t::AbstractTerm) = LongDiffTerm(t, nothing, nothing)
+ldiff(t::AbstractTerm, h::Int) = LongDiffTerm(t, nothing, h)
+
+"""
+    hbr(x)
+    hbr(x, y)
+    hbr(x, horizon)
+    hbr(x, y, horizon)
+
+Hall–Barro–Redlick transformation ``(x_{t+h} - x_{t-1}) / y_{t-1}``: the change
+in `x` since ``t-1`` in units of ``y_{t-1}``. `hbr(x)` scales by ``x_{t-1}``
+itself (a growth rate). With `x` and `y` in levels, e.g. real government
+spending and real GDP per capita, the responses of GDP and spending share one
+unit, so their ratio is a dollar multiplier (Hall 2009; Barro and Redlick
+2011; Ramey and Zubairy 2018):
+
+```julia
+# Impulse responses in HBR units
+lp(@formula(hbr(gdp) ~ news + lags(news, 4) + lags(log(gdp), 4) + lags(log(gov), 4)),
+   df; horizon = 20)
+
+# One-step cumulative multiplier: sum_j (Y_{t+j} - Y_{t-1}) / Y_{t-1} on
+# sum_j (G_{t+j} - G_{t-1}) / Y_{t-1}, spending instrumented by the news shock
+lpiv(@formula(cumul(hbr(gdp)) ~ (cumul(hbr(gov, gdp)) ~ news) + lags(news, 4) +
+              lags(log(gdp), 4) + lags(log(gov), 4)), df; horizon = 20)
+```
+
+A numeric second argument is a horizon, so `hbr(x, 3)` is `hbr(x, x, 3)`. As
+with [`ldiff`](@ref), `cumul(hbr(x, y))` sums the transformed changes over
+horizons ``0, \\dots, h`` and a bare `hbr` on the right-hand side tracks the
+projection horizon.
+"""
+hbr(t::AbstractTerm) = LongDiffTerm(t, t, nothing)
+hbr(t::AbstractTerm, h::Int) = LongDiffTerm(t, t, h)
+hbr(t::AbstractTerm, s::AbstractTerm) = LongDiffTerm(t, s, nothing)
+hbr(t::AbstractTerm, s::AbstractTerm, h::Int) = LongDiffTerm(t, s, h)
+
+"""
+    firstdiff(term)
+
+First difference ``x_t - x_{t-1}`` (`NaN` in the first row). Its main use is on
+the right-hand side of a long-difference projection, where the controls are
+lagged differences: `lags(firstdiff(y), 12)` gives ``\\Delta y_{t-1}, \\dots,
+\\Delta y_{t-12}``.
+"""
+firstdiff(t::AbstractTerm) = DiffTerm(t)
+
+"""
+    LongDiffTerm
+
+Term behind [`ldiff`](@ref) and [`hbr`](@ref): the change
+``(x_{t+h} - x_{t-1}) / s_{t-1}``, with `scale` ``s`` equal to `nothing` (no
+scaling) for `ldiff`. `horizon` is `nothing` until the projection pins it.
+"""
+struct LongDiffTerm{T <: AbstractTerm, S <: Union{Nothing, AbstractTerm}} <: AbstractTerm
+    term::T
+    scale::S
+    horizon::Union{Int, Nothing}
+end
+
+"""
+    DiffTerm
+
+Term behind [`firstdiff`](@ref): ``x_t - x_{t-1}``.
+"""
+struct DiffTerm{T <: AbstractTerm} <: AbstractTerm
+    term::T
+end
+
+_longdiff_name(t::LongDiffTerm) = t.scale === nothing ? "ldiff" : "hbr"
+
+StatsModels.termvars(t::FunctionTerm{typeof(ldiff)}) = _termvars_unary(t)
+StatsModels.termvars(t::FunctionTerm{typeof(firstdiff)}) = _termvars_unary(t)
+function StatsModels.termvars(t::FunctionTerm{typeof(hbr)})
+    unique(reduce(vcat, (StatsModels.termvars(a) for a in t.args); init = Symbol[]))
+end
+function StatsModels.termvars(t::LongDiffTerm)
+    t.scale === nothing && return StatsModels.termvars(t.term)
+    unique(vcat(StatsModels.termvars(t.term), StatsModels.termvars(t.scale)))
+end
+StatsModels.termvars(t::DiffTerm) = StatsModels.termvars(t.term)
+
+StatsModels.terms(t::LongDiffTerm) = t.scale === nothing ? (t.term,) : (t.term, t.scale)
+StatsModels.terms(t::DiffTerm) = (t.term,)
+
+function StatsModels.apply_schema(
+        t::FunctionTerm{typeof(ldiff)}, sch::StatsModels.Schema, ctx::Type)
+    term, horizon = _parse_unary_binary_args(t, "ldiff", nothing)
+    return LongDiffTerm(StatsModels.apply_schema(term, sch, ctx), nothing, horizon)
+end
+
+function StatsModels.apply_schema(
+        t::FunctionTerm{typeof(hbr)}, sch::StatsModels.Schema, ctx::Type)
+    args = collect(t.args)
+    horizon = nothing
+    if length(args) >= 2 && last(args) isa ConstantTerm
+        horizon = pop!(args).n
+    end
+    (1 <= length(args) <= 2 && !any(a -> a isa ConstantTerm, args)) ||
+        throw(ArgumentError("hbr() takes a variable, an optional scale variable " *
+                            "and an optional horizon, e.g. hbr(g, y) or hbr(g, y, 3)"))
+    term = StatsModels.apply_schema(args[1], sch, ctx)
+    scale = length(args) == 2 ? StatsModels.apply_schema(args[2], sch, ctx) : term
+    return LongDiffTerm(term, scale, horizon)
+end
+
+function StatsModels.apply_schema(t::LongDiffTerm, sch::StatsModels.Schema, ctx::Type)
+    scale = t.scale === nothing ? nothing : StatsModels.apply_schema(t.scale, sch, ctx)
+    LongDiffTerm(StatsModels.apply_schema(t.term, sch, ctx), scale, t.horizon)
+end
+
+function StatsModels.apply_schema(
+        t::FunctionTerm{typeof(firstdiff)}, sch::StatsModels.Schema, ctx::Type)
+    length(t.args) == 1 || throw(ArgumentError("firstdiff() takes one variable"))
+    return DiffTerm(StatsModels.apply_schema(only(t.args), sch, ctx))
+end
+
+function StatsModels.apply_schema(t::DiffTerm, sch::StatsModels.Schema, ctx::Type)
+    DiffTerm(StatsModels.apply_schema(t.term, sch, ctx))
+end
+
+"`modelcols` of a single-column term as a `Vector{Float64}` with `NaN` for `missing`."
+function _float_column(t::AbstractTerm, d::Tables.ColumnTable, context::String)
+    col = _extract_single_column(StatsModels.modelcols(t, d), context)
+    return Vector{Float64}(map(v -> ismissing(v) ? NaN : Float64(v), col))
+end
+
+function _longdiff_scale(t::LongDiffTerm, d::Tables.ColumnTable)
+    t.scale === nothing && return nothing
+    return _float_column(t.scale, d, "hbr() scale variable")
+end
+
+"""
+    _create_long_difference(x, s, h, cumulative) -> Vector{Float64}
+
+``(x_{t+h} - x_{t-1}) / s_{t-1}``, or with `cumulative = true`
+``\\sum_{j=0}^{h} (x_{t+j} - x_{t-1}) / s_{t-1}``; no scaling when `s` is
+`nothing`. `NaN` where a lead, the baseline or the scale is unavailable.
+"""
+function _create_long_difference(x::Vector{Float64}, s::Union{Nothing, Vector{Float64}},
+        h::Int, cumulative::Bool)
+    n = length(x)
+    ahead = cumulative ? _create_cumulative(x, h) : collect(lead(x, h, default = NaN))
+    k = cumulative ? h + 1 : 1
+    out = fill(NaN, n)
+    @inbounds for t in 2:n
+        v = ahead[t] - k * x[t - 1]
+        out[t] = s === nothing ? v : v / s[t - 1]
+    end
+    any(isinf, out) && throw(ArgumentError(
+        "hbr(): the scale variable is zero at a period t - 1 used by the projection"))
+    return out
+end
+
+function StatsModels.modelcols(t::LongDiffTerm, d::Tables.ColumnTable)
+    _check_horizon_provided(t.horizon, _longdiff_name(t))
+    x = _float_column(t.term, d, "$(_longdiff_name(t))() response")
+    return _create_long_difference(x, _longdiff_scale(t, d), t.horizon, false)
+end
+
+# cumul(ldiff(y)) and cumul(hbr(x, y)): the changes relative to t - 1 are summed
+# over horizons 0, ..., h, so the baseline enters h + 1 times, not once.
+function StatsModels.modelcols(ct::CumulTerm{<:LongDiffTerm}, d::Tables.ColumnTable)
+    _check_horizon_provided(ct.horizon, "cumul")
+    t = ct.term
+    x = _float_column(t.term, d, "$(_longdiff_name(t))() response")
+    return _create_long_difference(x, _longdiff_scale(t, d), ct.horizon, true)
+end
+
+function StatsModels.modelcols(t::DiffTerm, d::Tables.ColumnTable)
+    x = _float_column(t.term, d, "firstdiff() variable")
+    out = fill(NaN, length(x))
+    for i in 2:length(x)
+        out[i] = x[i] - x[i - 1]
+    end
+    return out
+end
+
+StatsModels.width(::LongDiffTerm) = 1
+StatsModels.width(::DiffTerm) = 1
+
+function _longdiff_label(t::LongDiffTerm)
+    x = StatsModels.coefnames(t.term)
+    x = x isa AbstractVector ? x[1] : x
+    args = if t.scale === nothing || t.scale == t.term
+        x
+    else
+        s = StatsModels.coefnames(t.scale)
+        x * ", " * (s isa AbstractVector ? s[1] : s)
+    end
+    t.horizon === nothing || (args *= ", $(t.horizon)")
+    return _longdiff_name(t) * "(" * args * ")"
+end
+
+StatsModels.coefnames(t::LongDiffTerm) = [_longdiff_label(t)]
+Base.show(io::IO, t::LongDiffTerm) = print(io, _longdiff_label(t))
+
+function StatsModels.coefnames(t::DiffTerm)
+    x = StatsModels.coefnames(t.term)
+    return ["firstdiff(" * (x isa AbstractVector ? x[1] : x) * ")"]
+end
+Base.show(io::IO, t::DiffTerm) = print(io, "firstdiff(", t.term, ")")
+
+_extract_base_variables(t::LongDiffTerm) = StatsModels.termvars(t)
+_extract_base_variables(t::DiffTerm) = _extract_base_variables(t.term)
+
+# ============================================================================
+# The response at horizon h
+# `lp`/`lpiv` build the right-hand side once and rebuild only the response at
+# every horizon. Which response depends on the left-hand-side term alone, so
+# the per-horizon loop asks `_lhs_at(lhs, h)` and each term type answers.
+# ============================================================================
+
+const _LHS_HELP = "the left-hand side of a local projection must be leads(y), " *
+                  "cumul(y), anchor(y, z), ldiff(y), hbr(x, y) or cumul() of the last two"
+
+"""
+    _lhs_at(lhs, h) -> AbstractTerm
+
+The response term of horizon `h` for the left-hand side `lhs`: `leads(y)` →
+``y_{t+h}``, `cumul(y)` → ``\\sum_{j\\le h} y_{t+j}``, `anchor(y, z)` →
+``y_{t+h} - z_t``, `ldiff(y)` → ``y_{t+h} - y_{t-1}``, `hbr(x, y)` →
+``(x_{t+h} - x_{t-1})/y_{t-1}``, `cumul(ldiff(y))` / `cumul(hbr(x, y))` → the
+sums over horizons ``0, \\dots, h``. A horizon written on the left-hand side
+is overridden: the projection sets it.
+"""
+_lhs_at(::Any, ::Int) = throw(ArgumentError(_LHS_HELP))
+_lhs_at(t::LeadTerm, h::Int) = LeadTerm(t.term, h)
+_lhs_at(t::CumulTerm, h::Int) = CumulTerm(t.term, h)
+_lhs_at(t::LongDiffTerm, h::Int) = LongDiffTerm(t.term, t.scale, h)
+function _lhs_at(t::AnchorTerm, h::Int)
+    # A plain response inside anchor(y, z) (or y | z) is read as leads(y)
+    inner = t.response isa Union{LeadTerm, CumulTerm, LongDiffTerm} ?
+            _lhs_at(t.response, h) : LeadTerm(t.response, h)
+    return AnchorTerm(inner, t.anchor, 0)
+end
+
+"""
+    _lhs_response(lhs) -> Symbol
+
+The response variable named by the left-hand side (for `hbr(x, y)` it is `x`;
+`y` only scales it).
+"""
+_lhs_response(::Any) = throw(ArgumentError(_LHS_HELP))
+_lhs_response(t::LeadTerm) = _extract_single_response(t, "leads() term")
+_lhs_response(t::CumulTerm) = _extract_single_response(t, "cumul() term")
+_lhs_response(t::CumulTerm{<:LongDiffTerm}) = _lhs_response(t.term)
+function _lhs_response(t::LongDiffTerm)
+    _extract_single_response(t.term, "$(_longdiff_name(t))() response")
+end
+function _lhs_response(t::AnchorTerm)
+    _extract_single_response(t.response, "anchor() response term")
+end
+
+"""
+    _lhs_tautological(lhs) -> Bool
+
+Whether regressing the horizon-0 response on the response variable itself is an
+identity (coefficient 1, zero variance), which `lp`/`lpiv` then impose exactly.
+Not so for long differences: ``y_t - y_{t-1}`` on ``y_t`` has coefficient 1 only
+when ``y_{t-1}`` is among the controls.
+"""
+_lhs_tautological(::Any) = true
+_lhs_tautological(::LongDiffTerm) = false
+_lhs_tautological(::CumulTerm{<:LongDiffTerm}) = false
+_lhs_tautological(t::AnchorTerm) = _lhs_tautological(t.response)
+
+# ============================================================================
 # Horizon-tracking terms on the right-hand side
 # ============================================================================
 
 """
     _has_dynamic_horizon(term) -> Bool
 
-`true` when `term` contains a `CumulTerm` or `LeadTerm` whose horizon is
-`nothing` — a right-hand-side term that must be rebuilt at every projection
+`true` when `term` contains a `CumulTerm`, `LeadTerm` or `LongDiffTerm`
+(`ldiff`/`hbr`) whose horizon is `nothing` — a right-hand-side term that must be rebuilt at every projection
 horizon rather than once. `cumul(x, 3)` and `leads(x, 3)` pin an explicit
 horizon and are therefore *not* dynamic.
 """
@@ -448,6 +698,9 @@ _has_dynamic_horizon(t::LeadTerm) = t.horizon === nothing || _has_dynamic_horizo
 function _has_dynamic_horizon(t::AnchorTerm)
     _has_dynamic_horizon(t.response) || _has_dynamic_horizon(t.anchor)
 end
+_has_dynamic_horizon(t::LongDiffTerm) = t.horizon === nothing
+# cumul(ldiff(y), 3) is pinned as a whole: its inner change has no horizon of its own
+_has_dynamic_horizon(t::CumulTerm{<:LongDiffTerm}) = t.horizon === nothing
 _has_dynamic_horizon(t::StatsModels.MatrixTerm) = any(_has_dynamic_horizon, t.terms)
 _has_dynamic_horizon(t::StatsModels.InteractionTerm) = any(_has_dynamic_horizon, t.terms)
 _has_dynamic_horizon(t::Tuple) = any(_has_dynamic_horizon, t)
@@ -474,6 +727,12 @@ function _specialize_horizon(t::LeadTerm, h::Int)
     inner = _specialize_horizon(t.term, h)
     return LeadTerm{typeof(inner)}(inner, t.horizon === nothing ? h : t.horizon)
 end
+function _specialize_horizon(t::LongDiffTerm, h::Int)
+    return t.horizon === nothing ? LongDiffTerm(t.term, t.scale, h) : t
+end
+function _specialize_horizon(t::CumulTerm{<:LongDiffTerm}, h::Int)
+    return t.horizon === nothing ? CumulTerm(t.term, h) : t
+end
 function _specialize_horizon(t::StatsModels.MatrixTerm, h::Int)
     return StatsModels.MatrixTerm(map(x -> _specialize_horizon(x, h), t.terms))
 end
@@ -499,7 +758,7 @@ end
     _rhs_tracks_horizon(formula::FormulaTerm) -> Bool
 
 `true` when the *unapplied* right-hand side of `formula` contains a bare
-`cumul(x)` or `leads(x)` — a regressor that is rebuilt at every projection
+`cumul(x)`, `leads(x)`, `ldiff(x)` or `hbr(x, y)` — a regressor that is rebuilt at every projection
 horizon — anywhere, including inside an IV block `(endo ~ instruments)` or
 an interaction. Explicit horizons (`cumul(x, 3)`) do not count.
 
@@ -515,8 +774,13 @@ _tracks_horizon(t::StatsModels.InteractionTerm) = any(_tracks_horizon, t.terms)
 function _tracks_horizon(t::FunctionTerm)
     nm = nameof(t.f)
     (nm === :cumul || nm === :leads) && length(t.args) == 1 && return true
+    # cumul(ldiff(y), 3): the pinned cumul horizon also fixes the inner change
+    nm === :cumul && _is_longdiff_call(first(t.args)) && return false
+    _is_longdiff_call(t) && return !any(a -> a isa ConstantTerm, t.args)
     return any(_tracks_horizon, t.args)
 end
+
+_is_longdiff_call(t) = t isa FunctionTerm && nameof(t.f) in (:ldiff, :hbr)
 
 # ============================================================================
 # Pipe Operator (|) for Anchored Response Syntax
@@ -770,7 +1034,9 @@ function _create_anchored(y::AbstractVector, z::AbstractVector, h::Int)::Vector{
     n = length(y)
     length(z) == n || throw(ArgumentError("y and z must have same length"))
     h > n && throw(ArgumentError("horizon h=$h is too large for series of length $n"))
-    return lead(y, h, default = NaN) .- z
+    # An anchor such as lag(y) is `missing` in its first rows
+    tofloat(v) = ismissing(v) ? NaN : Float64(v)
+    return tofloat.(lead(y, h, default = NaN)) .- tofloat.(z)
 end
 
 """
@@ -829,6 +1095,10 @@ function _extract_base_variables(ft::FormulaTerm)
         _extract_base_variables(ft.rhs)
     ))
 end
+
+# Any other term, e.g. `term(1)` or `lags(term(:x), 4)` in a formula built
+# programmatically rather than with @formula
+_extract_base_variables(t::AbstractTerm) = StatsModels.termvars(t)
 
 # InteractionTerm and other composite terms
 function _extract_base_variables(t::StatsModels.InteractionTerm)
@@ -985,24 +1255,9 @@ function lp(formula::FormulaTerm, data::AbstractDataFrame;
     lhs_term = StatsModels.apply_schema(formula.lhs, sch, StatisticalModel)
     rhs_term = StatsModels.apply_schema(formula.rhs, sch, StatisticalModel)
 
-    # Check if LHS is a CumulTerm (cumulative impulse response), LeadTerm (forward-looking), or AnchorTerm (anchored)
-    # Note: AnchorTerm can contain LeadTerm or CumulTerm inside (from pipe syntax like leads(y)|z or cumul(y)|z)
-    # If AnchorTerm contains plain term (y|z), default to leads behavior
-    is_anchor, is_cumulative, is_leads, anchor_term, cumul_term,
-    leads_term = _unwrap_lhs(lhs_term)
-
-    # Extract response variable/data
-    # For cumulative/leads/anchor cases, we need to extract the base variable names for Stage 1 filtering
-    # but we'll evaluate the transformed term for actual calculation
-    response = if is_anchor
-        _extract_single_response(anchor_term.response, "anchor() response term")
-    elseif is_cumulative
-        _extract_single_response(cumul_term, "cumul() term")
-    elseif is_leads
-        _extract_single_response(leads_term, "leads() term")
-    else
-        throw(ArgumentError("A local projection without leads and cumulated variables does not make much sense"))
-    end
+    # The response variable named by the LHS; the per-horizon response itself
+    # is rebuilt from `lhs_term` by `_lhs_at` (leads, cumul, anchor, ldiff, hbr)
+    response = _lhs_response(lhs_term)
 
     # Extract all variable names from RHS (including from function terms)
     rhs_terms = StatsModels.termvars(rhs_term)
@@ -1067,8 +1322,7 @@ function lp(formula::FormulaTerm, data::AbstractDataFrame;
             end
         end
         return _lp_estimate_horizons(Xstate, _state_names(coef_names_base, labels),
-            df_base_complete, horizon, response, shock_symbol, formula,
-            is_anchor, is_cumulative, is_leads, anchor_term, cumul_term, leads_term,
+            df_base_complete, horizon, response, shock_symbol, formula, lhs_term,
             LPState(state, statelag, labels, base_shock))
     end
 
@@ -1092,8 +1346,7 @@ function lp(formula::FormulaTerm, data::AbstractDataFrame;
     # closure returning Matrix{Float64}, so _lp_estimate_horizons can be fully
     # inferred by the compiler.
     return _lp_estimate_horizons(Xof, coef_names_base, df_base_complete, horizon,
-        response, shock_symbol, formula,
-        is_anchor, is_cumulative, is_leads, anchor_term, cumul_term, leads_term)
+        response, shock_symbol, formula, lhs_term)
 end
 
 """
@@ -1104,18 +1357,15 @@ Function barrier for type-stable per-horizon OLS estimation.
 every time unless the RHS carries a horizon-tracking `cumul`/`leads` term.
 """
 function _lp_estimate_horizons(Xof::F, coef_names_base::Vector{String},
-        df_base_complete, horizon, response, shock_symbol, formula,
-        is_anchor, is_cumulative, is_leads, anchor_term, cumul_term,
-        leads_term, state::Union{Nothing, LPState} = nothing) where {F}
+        df_base_complete, horizon, response, shock_symbol, formula, lhs_term,
+        state::Union{Nothing, LPState} = nothing) where {F}
     # Helper to estimate one horizon
     function _estimate_horizon(h)
         X = Xof(h)::Matrix{Float64}
         # Identify rows where X is complete (no NaN values)
         X_missing_ind = vec(all(!isnan, X, dims = 2))
-        lhs_h = _build_lhs_for_horizon(h, is_anchor, is_cumulative, is_leads,
-            anchor_term, cumul_term, leads_term)
         # Convert to Vector{Float64} for type stability (modelcols may return ShiftedArray)
-        y_h = Vector{Float64}(StatsModels.modelcols(lhs_h, df_base_complete))
+        y_h = Vector{Float64}(StatsModels.modelcols(_lhs_at(lhs_term, h), df_base_complete))
         y_complete_rows = .!isnan.(y_h)
         complete_rows = X_missing_ind .& y_complete_rows
         sum(complete_rows) == 0 &&
@@ -1142,7 +1392,8 @@ function _lp_estimate_horizons(Xof::F, coef_names_base::Vector{String},
 
     return LocalProjection{eltype(models)}(
         models, horizon, response, shock_symbol, formula, coef_names_base,
-        response === (state === nothing ? shock_symbol : state.shock), state)
+        _lhs_tautological(lhs_term) &&
+            response === (state === nothing ? shock_symbol : state.shock), state)
 end
 
 """
@@ -1534,20 +1785,8 @@ function lpiv(formula::FormulaTerm, data::AbstractDataFrame;
     end
     base_vars = unique(vcat(base_vars_lhs, base_vars_rhs))
 
-    # Check LHS structure (leads, cumul, anchor)
-    is_anchor, is_cumulative, is_leads, anchor_term, cumul_term,
-    leads_term = _unwrap_lhs(lhs_term)
-
-    # Extract response variable name
-    response = if is_anchor
-        _extract_single_response(anchor_term.response, "anchor() response term")
-    elseif is_cumulative
-        _extract_single_response(cumul_term, "cumul() term")
-    elseif is_leads
-        _extract_single_response(leads_term, "leads() term")
-    else
-        throw(ArgumentError("LHS must use leads(), cumul(), or anchor()"))
-    end
+    # Response variable named by the LHS (leads, cumul, anchor, ldiff, hbr)
+    response = _lhs_response(lhs_term)
 
     # Stage 1: Remove rows with missing base variables
     df_base_complete = dropmissing(df_base, base_vars, disallowmissing = true)
@@ -1655,9 +1894,7 @@ function lpiv(formula::FormulaTerm, data::AbstractDataFrame;
     # pair of Matrix{Float64}, so _lpiv_estimate_horizons can be fully inferred.
     return _lpiv_estimate_horizons(XZof, coef_names_base, df_base_complete,
         horizon, n_endogenous, response, shock_symbol, formula,
-        endo_names, instr_names,
-        is_anchor, is_cumulative, is_leads, anchor_term, cumul_term, leads_term,
-        state_spec)
+        endo_names, instr_names, lhs_term, state_spec)
 end
 
 """
@@ -1670,19 +1907,16 @@ every time unless some RHS term tracks the horizon.
 function _lpiv_estimate_horizons(XZof::F,
         coef_names_base::Vector{String}, df_base_complete,
         horizon, n_endogenous, response, shock_symbol, formula,
-        endo_names, instr_names,
-        is_anchor, is_cumulative, is_leads, anchor_term, cumul_term,
-        leads_term, state::Union{Nothing, LPState} = nothing) where {F}
+        endo_names, instr_names, lhs_term,
+        state::Union{Nothing, LPState} = nothing) where {F}
     # Helper to estimate one horizon
     function _estimate_iv_horizon(h)
         X_full, Z_full = XZof(h)::Tuple{Matrix{Float64}, Matrix{Float64}}
         # Identify complete rows
         XZ_complete = vec(all(!isnan, X_full, dims = 2)) .&
                       vec(all(!isnan, Z_full, dims = 2))
-        lhs_h = _build_lhs_for_horizon(h, is_anchor, is_cumulative, is_leads,
-            anchor_term, cumul_term, leads_term)
         # Convert to Vector{Float64} for type stability (modelcols may return ShiftedArray)
-        y_h = Vector{Float64}(StatsModels.modelcols(lhs_h, df_base_complete))
+        y_h = Vector{Float64}(StatsModels.modelcols(_lhs_at(lhs_term, h), df_base_complete))
         y_complete_rows = .!isnan.(y_h)
         complete_rows = XZ_complete .& y_complete_rows
         sum(complete_rows) == 0 &&
@@ -1712,7 +1946,8 @@ function _lpiv_estimate_horizons(XZof::F,
     return LocalProjectionIV{eltype(models)}(
         models, horizon, response, shock_symbol, formula, coef_names_base,
         endo_names, instr_names,
-        response === (state === nothing ? shock_symbol : state.shock), state)
+        _lhs_tautological(lhs_term) &&
+            response === (state === nothing ? shock_symbol : state.shock), state)
 end
 
 """
@@ -2182,6 +2417,10 @@ function biascorrect(lp_result::LocalProjection)
         "the Herbst–Johannsen correction assumes the same regressors at every " *
         "horizon, but the formula has a horizon-tracking right-hand-side term " *
         "(a bare `cumul(x)` or `leads(x)`), so the design changes with h"))
+    _lhs_kind(lp_result.base_formula) === :longdiff && throw(ArgumentError(
+        "the Herbst–Johannsen correction is derived for a response in levels, " *
+        "y_{t+h} or its cumulative sum; it does not cover the long-difference " *
+        "responses ldiff() and hbr()"))
     H = lp_result.horizon
     m0 = lp_result.models[1]
     T0 = Int(nobs(m0))
@@ -2721,13 +2960,15 @@ end
     _lhs_kind(formula) -> Symbol
 
 Which response transform the local-projection formula uses: `:leads`, `:cumul`,
-`:anchor`, or `:unknown`. Determines how the VAR-implied pseudo-truth must be
-accumulated across horizons.
+`:anchor`, `:longdiff` (`ldiff`, `hbr`, or `cumul` of either), or `:unknown`.
+Determines how the VAR-implied pseudo-truth must be accumulated across horizons.
 """
 function _lhs_kind(formula::FormulaTerm)
     lhs = formula.lhs
     if lhs isa FunctionTerm
         nm = nameof(lhs.f)
+        _is_longdiff_call(lhs) && return :longdiff
+        nm === :cumul && _is_longdiff_call(first(lhs.args)) && return :longdiff
         nm === :leads && return :leads
         nm === :cumul && return :cumul
         (nm === :anchor || nm === :|) && return :anchor
@@ -2909,7 +3150,9 @@ function varbootstrap(lp_result::LocalProjection, data::AbstractDataFrame;
     kind = _lhs_kind(lp_result.base_formula)
     kind in (:leads, :cumul) || throw(ArgumentError(
         "the VAR bootstrap supports `leads` and `cumul` responses; got " *
-        "$(kind === :anchor ? "an anchored response" : "an unrecognized LHS")"))
+        "$(kind === :anchor ? "an anchored response" :
+           kind === :longdiff ? "a long-difference (ldiff/hbr) response" :
+           "an unrecognized LHS")"))
     lp_result.state === nothing || throw(ArgumentError(
         "the VAR bootstrap simulates from a linear VAR, which is not the " *
         "data-generating process of a state-dependent local projection"))

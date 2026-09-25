@@ -15,6 +15,8 @@ website:
         text: Overview
       - href: ramey-zubairy.qmd
         text: "Ramey–Zubairy (2018)"
+      - href: piger-stockwell.qmd
+        text: "Piger–Stockwell (2025)"
     right:
       - icon: github
         href: https://github.com/andrerecio/LocalProjections.jl

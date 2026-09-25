@@ -117,6 +117,30 @@ lp_anchor_log = lp(@formula(anchor(log(y_pos), baseline) ~ x), df; horizon=5)
 println("Anchored log IRF: ", round.(coefpath(lp_anchor_log), digits=4))
 ```
 
+## Long Differences: `ldiff()` and `hbr()`
+
+Piger and Stockwell (2025) estimate local projections in *long differences*:
+the response is ``y_{t+h} - y_{t-1}`` and the controls are lagged first
+differences. `ldiff(y)` builds the response and `lags(firstdiff(y), p)` the
+controls:
+
+```@example trans
+lp_ld = lp(@formula(ldiff(y) ~ x + lags(firstdiff(y), 2)), df; horizon=5)
+println("Long-difference IRF: ", round.(coefpath(lp_ld), digits=4))
+```
+
+`hbr(x, y)` is the Hall–Barro–Redlick transformation
+``(x_{t+h} - x_{t-1}) / y_{t-1}``, used for fiscal multipliers so that the
+responses of output and spending share a unit (`hbr(y)` is ``hbr(y, y)``, a
+growth rate). Both work inside `cumul`, where the change relative to ``t-1``
+is summed over horizons ``0, \ldots, h``, and both track the horizon on the
+right-hand side as `cumul(x)` does:
+
+```@example trans
+lp_hbr = lp(@formula(cumul(hbr(y_pos)) ~ x), df; horizon=5)
+println("Cumulative HBR IRF: ", round.(coefpath(lp_hbr), digits=4))
+```
+
 ## Summary
 
 | Term | Formula | Computes |
@@ -125,5 +149,9 @@ println("Anchored log IRF: ", round.(coefpath(lp_anchor_log), digits=4))
 | `cumul(y)` | ``\sum_{j=0}^h y_{t+j}`` | Cumulative sum |
 | `anchor(y, z)` | ``y_{t+h} - z_t`` | Anchored deviation |
 | `leads(y)\|z` | ``y_{t+h} - z_t`` | Pipe syntax for anchor |
+| `ldiff(y)` | ``y_{t+h} - y_{t-1}`` | Long difference |
+| `hbr(x, y)` | ``(x_{t+h} - x_{t-1}) / y_{t-1}`` | Hall–Barro–Redlick change |
+| `cumul(ldiff(y))` | ``\sum_{j=0}^h (y_{t+j} - y_{t-1})`` | Cumulative long difference |
+| `firstdiff(x)` | ``x_t - x_{t-1}`` | First difference (for lagged controls) |
 | `lag(x, n)` | ``x_{t-n}`` | Lagged regressor |
 | `lags(x, n)` | ``[x_{t-1}, \ldots, x_{t-n}]`` | Multiple lags |
