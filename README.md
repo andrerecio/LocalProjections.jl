@@ -7,6 +7,9 @@ linear regressions with a formula interface, robust and HAR inference,
 small-sample bias correction, bootstrap confidence bands, and
 instrumental-variable support.
 
+**Website:** [andrearecine.me/LocalProjections.jl](https://andrearecine.me/LocalProjections.jl),
+with the Ramey–Zubairy (2018) example worked through on live output.
+
 This is a fork of [gragusa/LocalProjections.jl](https://github.com/gragusa/LocalProjections.jl)
 that extends the inference procedures: equal-weighted-cosine (EWC) HAR
 inference with Student-`t` critical values, the Herbst–Johannsen bias
