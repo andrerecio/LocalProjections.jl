@@ -5,6 +5,7 @@
 ### Changed
 
 - **Requires Regress.jl 0.2, CovarianceMatrices.jl 0.32 and Julia 1.12.** The new upstream versions fix two defects documented in `upstream_issue_drafts.md`. HAC estimators no longer carry kernel-weight state, so `weakivtest` on a formula-fitted IV model with `Bartlett{NeweyWest}()` no longer crashes (Issue 2). The IV path now excludes the intercept from automatic bandwidth selection, so `lp` and `lpiv` select the same Newey–West/Andrews bandwidth on identical data (Issue 4, REG-2b). Automatic-bandwidth `lpiv` standard errors change as a result; fixed-bandwidth kernel HAC, HR0/HR1 and EWC results are unchanged. HC2/HC3 on over-identified `lpiv` now use the correct IV leverage (Regress fixed the matrix-TSLS formula), so those standard errors change too.
+- **Source split into per-topic files** (internal): `src/LocalProjections.jl` now only includes `terms.jl`, `types.jl`, `lp.jl`, `lpiv.jl`, `inference.jl`, `var.jl`, `fevd*.jl`, etc. No behavior change; the order in which multi-method docstrings (e.g. `?summarize`) are listed follows the new include order.
 - **`vcov(estimator, lp; kwargs...)` forwards keyword arguments** to each horizon's model. `vcov(Bartlett(6), lpiv_result; dofadjust = true)` adds the `n/(n−k)` factor that `lp` applies to kernel HAC, so `lp` and `lpiv` bands can be put on one convention. EWC stays unscaled, and on `lp` results `dofadjust = false` is still ignored upstream.
 
 ### Added
