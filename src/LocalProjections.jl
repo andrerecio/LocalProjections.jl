@@ -7,6 +7,7 @@ export ewc_bandwidth
 export biascorrect, BiasCorrectedLP
 export lagselect, VARLagSelection, nlags
 export varbootstrap, LPBootstrap
+export fevd, LPFEVD, fevdbootstrap, FEVDBootstrap, FEVDSummary
 export WeakIVTestResult, FirstStageIV
 export lag, lead, cumul, CumulTerm, lags, leads, LeadTerm, anchor, AnchorTerm
 export ldiff, hbr, LongDiffTerm, firstdiff, DiffTerm
@@ -28,7 +29,8 @@ using CovarianceMatrices
 using Random: AbstractRNG, Xoshiro
 import Random
 using Statistics
-using LinearAlgebra: I, Symmetric, cond, eigvals, factorize, kron, logdet, tr
+using LinearAlgebra: I, Symmetric, cholesky, cond, dot, eigen, eigmin, eigvals,
+                     factorize, Factorization, issuccess, kron, logdet, lu, tr
 using Distributions
 using RecipesBase
 using ShiftedArrays: lag, lead
@@ -2846,27 +2848,41 @@ function _var_impact(U::AbstractMatrix{Float64}, innov_index::Int)
 end
 
 """
-    _var_irf(A, ν, H) -> Matrix{Float64}
+    _var_ma(A, H) -> Array{Float64,3}
 
-VAR-implied structural impulse responses, `n × (H+1)`. Port of
-`_estim/var_ir.m`: the recursion
-``\\Theta_h = \\sum_{l=1}^{\\min(h,p)} A_l \\Theta_{h-l}`` with
-``\\Theta_0 = I``, returning ``\\Theta_h \\nu`` at each horizon. Equivalent to
-``e_r' C^h b`` on the companion form but cheaper.
+Reduced-form moving-average coefficients of a VAR, `n × n × (H+1)`: the
+recursion ``\\Theta_h = \\sum_{l=1}^{\\min(h,p)} A_l \\Theta_{h-l}`` with
+``\\Theta_0 = I``, so that `Θ[:, :, h+1]` is ``[F^h]_{1:n,1:n}`` for the
+companion matrix ``F`` (`var_ir.m`, `var_estimation.m`).
 """
-function _var_irf(A::Array{Float64, 3}, ν::AbstractVector{Float64}, H::Int)
+function _var_ma(A::Array{Float64, 3}, H::Int)
     n, _, p = size(A)
-    Θ = Vector{Matrix{Float64}}(undef, H + 1)
-    Θ[1] = Matrix{Float64}(I, n, n)
-    out = Matrix{Float64}(undef, n, H + 1)
-    out[:, 1] = ν
+    Θ = Array{Float64}(undef, n, n, H + 1)
+    Θ[:, :, 1] = Matrix{Float64}(I, n, n)
     for h in 1:H
         M = zeros(Float64, n, n)
         for l in 1:min(h, p)
-            M += A[:, :, l] * Θ[h - l + 1]
+            M += A[:, :, l] * Θ[:, :, h - l + 1]
         end
-        Θ[h + 1] = M
-        out[:, h + 1] = M * ν
+        Θ[:, :, h + 1] = M
+    end
+    return Θ
+end
+
+"""
+    _var_irf(A, ν, H) -> Matrix{Float64}
+
+VAR-implied structural impulse responses, `n × (H+1)`. Port of
+`_estim/var_ir.m`: ``\\Theta_h \\nu`` at each horizon, with ``\\Theta_h`` the
+moving-average coefficients of `_var_ma`. Equivalent to ``e_r' C^h b`` on the
+companion form but cheaper.
+"""
+function _var_irf(A::Array{Float64, 3}, ν::AbstractVector{Float64}, H::Int)
+    Θ = _var_ma(A, H)
+    out = Matrix{Float64}(undef, size(A, 1), H + 1)
+    out[:, 1] = ν
+    for h in 1:H
+        out[:, h + 1] = Θ[:, :, h + 1] * ν
     end
     return out
 end
@@ -3064,6 +3080,21 @@ function coefpath(b::LPBootstrap; term::Symbol = b.term)
     return copy(b.theta)
 end
 
+# Run `run_draw(b)` for b = 1:nboot, on threads or serially. Each draw seeds
+# its own RNG and writes only its own slots, so the two give identical results.
+function _run_draws!(run_draw, nboot::Int, threaded::Bool)
+    if threaded
+        Threads.@threads for b in 1:nboot
+            run_draw(b)
+        end
+    else
+        for b in 1:nboot
+            run_draw(b)
+        end
+    end
+    return nothing
+end
+
 """
     varbootstrap(lp_result, data; vars, nlags, kwargs...) -> LPBootstrap
 
@@ -3210,21 +3241,14 @@ function varbootstrap(lp_result::LocalProjection, data::AbstractDataFrame;
                 theta_boot[b, h] = θb[h]
                 se_boot[b, h] = sb[h]
             end
-        catch
+        catch err
+            err isa InterruptException && rethrow()
             failures[b] = 1
         end
         return nothing
     end
 
-    if threaded
-        Threads.@threads for b in 1:nboot
-            run_draw(b)
-        end
-    else
-        for b in 1:nboot
-            run_draw(b)
-        end
-    end
+    _run_draws!(run_draw, nboot, threaded)
 
     nfail = sum(failures)
     if nfail > 0.05 * nboot
@@ -3301,6 +3325,13 @@ function _boot_interval(b::LPBootstrap, h::Int, α::Float64, method::Symbol)
         b.theta[h] + b.pseudo_truth[h] - ql)
 end
 
+function _check_level(level::Real)
+    level_f = Float64(level)
+    (0 < level_f < 1) ||
+        throw(ArgumentError("`level` must be in (0, 1) (got $level_f)"))
+    return level_f
+end
+
 """
     summarize(b::LPBootstrap; level=0.90, method=:hall_t, scale=1.0) -> IRFSummary
 
@@ -3322,9 +3353,7 @@ function summarize(b::LPBootstrap; level::Real = 0.90, method::Symbol = :hall_t,
         scale::Real = 1.0)
     method in (:hall_t, :hall, :efron) || throw(ArgumentError(
         "`method` must be :hall_t, :hall or :efron (got :$method)"))
-    level_f = Float64(level)
-    (0 < level_f < 1) ||
-        throw(ArgumentError("`level` must be in (0, 1) (got $level_f)"))
+    level_f = _check_level(level)
     scale_f = Float64(scale)
     α = 1 - level_f
     H = length(b.theta) - 1
@@ -3337,6 +3366,1767 @@ function summarize(b::LPBootstrap; level::Real = 0.90, method::Symbol = :hall_t,
     end
     return IRFSummary(b.term, level_f, scale_f, collect(0:H),
         b.theta .* scale_f, b.se .* scale_f, lower, upper)
+end
+
+# ============================================================================
+# Forecast-error variance decomposition (Gorodnichenko & Lee 2020)
+# ============================================================================
+
+const _FEVD_ESTIMATORS = (:r2, :lpa, :lpb)
+
+function _fevd_label(estimator::Symbol)
+    estimator === :r2 ? "R²" :
+    estimator === :lpa ? "LP-A" : "LP-B"
+end
+
+"""
+    _gl_bandwidth(n) -> Int
+
+Newey–West lag of Gorodnichenko and Lee (2020) for a sample of `n` rows,
+``L = \\mathrm{round}(0.75\\, n^{1/3} - 1)`` (`SubR2.m`, `SubLPA.m`), floored
+at zero as `lrv_nw.m` does. MATLAB rounds half away from zero, and the cube
+root is taken with `^` rather than `cbrt`, which rounds differently at
+`n = 1000`. `lrv_nw(⋅, L)` corresponds to CovarianceMatrices' `Bartlett(L + 1)`.
+"""
+_gl_bandwidth(n::Integer) = max(round(Int, 0.75 * n^(1 / 3) - 1, RoundNearestTiesAway), 0)
+
+"""
+    _gl_lrv_nw(Z, L) -> Matrix{Float64}
+
+Bartlett long-run variance of the rows of `Z`, a port of `lrv_nw.m`:
+``\\Gamma_0 + \\sum_{i=1}^{L} (1 - i/(L+1)) (\\Gamma_i + \\Gamma_i')`` with
+``\\Gamma_i = \\sum_{t=i+1}^{n} z_t z_{t-i}' / n``. No demeaning and no
+degrees-of-freedom factor; `L ≤ 0` returns ``\\Gamma_0``.
+"""
+function _gl_lrv_nw(Z::AbstractMatrix{Float64}, L::Integer)
+    n = size(Z, 1)
+    V = (Z' * Z) ./ n
+    for i in 1:min(L, n - 1)
+        Γ = (view(Z, (i + 1):n, :)' * view(Z, 1:(n - i), :)) ./ n
+        w = 1 - i / (L + 1)
+        V .+= w .* (Γ .+ Γ')
+    end
+    return V
+end
+
+"""
+    _gl_prewhitened_lrv(Z, L) -> Matrix{Float64}
+
+VAR(1)-prewhitened long-run variance (`SubR2.m:213-220`,
+`SimulationAVarLPA.m:249-256`): ``z_t = A z_{t-1} + u_t`` by least squares
+without intercept, then ``(I - A)^{-1}\\, \\mathrm{lrv}(U, L)\\, (I - A')^{-1}``.
+`lrv(U, L)` divides by the ``n - 1`` residual rows while `L` comes from `n`, and
+``A`` is not capped (no Andrews–Monahan eigenvalue adjustment), as in the
+reference. The VAR is solved by QR rather than the normal equations.
+"""
+function _gl_prewhitened_lrv(Z::AbstractMatrix{Float64}, L::Integer)
+    n = size(Z, 1)
+    Z0 = Z[1:(n - 1), :]
+    Z1 = Z[2:n, :]
+    A = Matrix(transpose(Z0 \ Z1))
+    U = Z1 - Z0 * transpose(A)
+    IA = I - A
+    return (IA \ _gl_lrv_nw(U, L)) / transpose(IA)
+end
+
+# Covariance of the moment estimator, G⁻¹ Ω G⁻ᵀ / n (the reference's `GOGT`),
+# from a factorization of G that the two calls of a horizon (with and without
+# prewhitening) share
+function _gl_gogt(F::Factorization, Ω::AbstractMatrix, n::Integer)
+    X = F \ Ω
+    return Matrix(transpose(F \ Matrix(transpose(X)))) ./ n
+end
+_gl_gogt(G::AbstractMatrix, Ω::AbstractMatrix, n::Integer) = _gl_gogt(lu(G), Ω, n)
+
+# Delta-method standard error; NaN when the quadratic form is negative or NaN
+function _gl_delta_se(g::AbstractVector{Float64}, V::AbstractMatrix{Float64})
+    v = dot(g, V * g)
+    return v >= 0 ? sqrt(v) : NaN
+end
+
+"""
+    _gl_r2_gradient(θ, s) -> Vector{Float64}
+
+Gradient of the R² share ``\\theta_2'\\theta_1/\\theta_3`` with respect to
+``\\theta = (\\theta_1, \\theta_2, \\theta_3)`` (`SubR2.m`,
+`SimulationAVarR2.m:180-190`): ``[\\theta_2', \\theta_1', -s] / \\theta_3``.
+Exact at ``s = \\hat s``; the simulation method plugs in the bias-corrected share.
+"""
+function _gl_r2_gradient(θ::AbstractVector{Float64}, s::Float64)
+    k = (length(θ) - 1) ÷ 2
+    return vcat(θ[(k + 1):(2k)], θ[1:k], -s) ./ θ[end]
+end
+
+"""
+    _gl_r2(y, W, xf; avar = true) -> NamedTuple
+
+The R² estimator at one horizon, a port of `SubR2.m:157-230`. Rows are the
+horizon-``h`` window ``t_0, \\dots, T-h``: `y` holds ``y_{t+h} - y_{t-1}``,
+`W` the information set ``W_{t-1}`` (intercept included) and `xf` the demeaned
+shocks ``x_t, \\dots, x_{t+h}``. With ``\\hat f`` the residual of `y` on `W`
+and ``n`` the number of rows,
+
+```math
+\\hat\\Sigma_x = \\frac{X_f'X_f}{n},\\quad \\hat\\theta_2 = \\frac{X_f'\\hat f}{n},\\quad
+\\hat\\theta_1 = \\hat\\Sigma_x^{-1}\\hat\\theta_2,\\quad \\hat\\theta_3 = \\frac{\\hat f'\\hat f}{n},\\quad
+\\hat s = \\frac{\\hat\\theta_2'\\hat\\theta_1}{\\hat\\theta_3},
+```
+
+the uncentred ``R^2`` of ``\\hat f`` on ``X_f``. With `avar = true` the result
+also holds the covariance of ``\\hat\\theta = (\\hat\\theta_1, \\hat\\theta_2,
+\\hat\\theta_3)`` with and without prewhitening (`avar_pw`, `avar`, i.e.
+``G^{-1}\\hat\\Omega G^{-\\prime}/n``) and the delta-method standard errors of
+``\\hat s`` (`se_pw`, `se`). ``\\hat f`` is treated as data: the estimation
+error of the forecast-error regression is ignored, which is valid when the
+shock is unpredictable from ``W_{t-1}``. The prewhitened quantities are `NaN`
+when the ``2h+3`` moments cannot be prewhitened on ``n - 1`` rows
+(`feasible = false`).
+"""
+function _gl_r2(y::AbstractVector{Float64}, W::AbstractMatrix{Float64},
+        xf::AbstractMatrix{Float64}; avar::Bool = true)
+    n = length(y)
+    k = size(xf, 2)
+    fe = y - W * (W \ y)
+    Σx = (xf' * xf) ./ n
+    θ2 = (xf' * fe) ./ n
+    θ1 = Σx \ θ2
+    θ3 = dot(fe, fe) / n
+    s = dot(θ2, θ1) / θ3
+    θ = vcat(θ1, θ2, θ3)
+    avar || return (; s, theta = θ, fe)
+
+    m = 2k + 1
+    e = fe - xf * θ1
+    exf = e .* xf
+    Z = hcat(exf .- mean(exf; dims = 1), fe .* xf .- transpose(θ2), fe .^ 2 .- θ3)
+    G = lu(-cat(Σx, Matrix{Float64}(I, k + 1, k + 1); dims = (1, 2)))
+    ξ = _gl_r2_gradient(θ, s)
+    L = _gl_bandwidth(n)
+    V = _gl_gogt(G, _gl_lrv_nw(Z, L), n)
+    feasible = m < n - 1
+    V_pw = feasible ? _gl_gogt(G, _gl_prewhitened_lrv(Z, L), n) : fill(NaN, m, m)
+    return (; s, theta = θ, fe, avar_pw = V_pw, avar = V,
+        se_pw = _gl_delta_se(ξ, V_pw), se = _gl_delta_se(ξ, V), bandwidth = L, feasible)
+end
+
+"""
+    _gl_lp(dhy, C, W, q, x, σ²x, t0, t0lp, H; estimator, dofadjust, irf_se = true)
+
+LP-A / LP-B estimators for all horizons, a port of `SubLPA.m` / `SubLPB.m`
+(`semIndicator = 0`). `dhy` is ``T \\times (H+1)`` with column ``h+1`` equal to
+``y_{t+h} - y_{t-1}``; `C` the contemporaneous regressors (the demeaned shock
+first), `W` the information set ``W_{t-1}``, `x` the demeaned shock and `σ²x` its
+full-sample variance. `q` is the regressor matrix of a separate impulse-response
+regression (shock first, sample from `t0lp`), or `nothing` to read ``\\hat\\psi_h``
+off the forecast-error regression ``[C, W]``.
+
+- ``X^\\perp = C - W\\hat\\Gamma`` from **one** regression on rows ``t_0, \\dots, T``;
+- per horizon, on rows ``t_0, \\dots, T-h``: ``\\hat b_h`` from the regression of
+  `dhy` on ``[C, W]`` and ``\\hat f_t = \\hat u_t + X^{\\perp\\prime}_t \\hat b_{h,C}``;
+- ``D_h = T_h - k_W`` with `dofadjust` (the reference's `dfIndicator = 0`), else ``T_h``;
+- LP-A: ``\\hat\\sigma^2_{f,h} = \\sum \\hat f^2 / D_h`` and
+  ``\\hat s_h = \\hat\\sigma^2_x \\sum_{i \\le h} \\hat\\psi_i^2 / \\hat\\sigma^2_{f,h}``;
+- LP-B: ``\\hat v_t = \\hat f_t - \\sum_{i \\le h}\\hat\\psi_i x_{t+h-i}``,
+  ``\\hat\\sigma^2_{v,h} = \\sum \\hat v^2 / D_h``,
+  ``m_h = \\hat\\sigma^2_x\\sum_{i\\le h}\\hat\\psi_i^2 + \\hat\\sigma^2_{v,h}`` and
+  ``\\hat s_h = \\hat\\sigma^2_x\\sum_{i\\le h}\\hat\\psi_i^2 / m_h``.
+
+`irf_se` is the Newey–West standard error of ``\\hat\\psi_h`` with lag
+`_gl_bandwidth` of the impulse-response sample and no
+degrees-of-freedom factor. Returns a named tuple with the per-horizon
+estimates and the matrices the asymptotic variance needs (`resid_lp`,
+`beta_lp`, `fe`, `v`).
+"""
+function _gl_lp(dhy::Matrix{Float64}, C::Matrix{Float64}, W::Matrix{Float64},
+        q::Union{Nothing, Matrix{Float64}}, x::Vector{Float64}, σ²x::Float64,
+        t0::Int, t0lp::Int, H::Int; estimator::Symbol, dofadjust::Bool,
+        irf_se::Bool = true)
+    T = size(dhy, 1)
+    nc = size(C, 2)
+    kW = size(W, 2)
+    R = hcat(C, W)
+    shared = q === nothing
+    Q = shared ? R : q
+    Nq = size(Q, 2)
+    lpb = estimator === :lpb
+
+    # X⊥: one regression on rows t0..T, not t0..T-h (SubLPA.m:311-315)
+    r0 = t0:T
+    Cperp = fill(NaN, T, nc)
+    Cperp[r0, :] = C[r0, :] - W[r0, :] * (W[r0, :] \ C[r0, :])
+
+    psi = zeros(H + 1)
+    se_psi = irf_se ? zeros(H + 1) : Float64[]
+    mse = zeros(H + 1)
+    sigma2v = lpb ? zeros(H + 1) : Float64[]
+    fe = fill(NaN, T, H + 1)
+    v = lpb ? fill(NaN, T, H + 1) : Matrix{Float64}(undef, 0, 0)
+    resid_lp = fill(NaN, T, H + 1)
+    beta_lp = zeros(Nq, H + 1)
+    perfect = falses(H + 1)
+
+    for h in 0:H
+        rows = t0:(T - h)
+        Th = length(rows)
+        y = dhy[rows, h + 1]
+        Rh = R[rows, :]
+        b = Rh \ y
+        u = y - Rh * b
+        if shared
+            rlp, ylp, Qh, blp, ulp = rows, y, Rh, b, u
+        else
+            rlp = t0lp:(T - h)
+            ylp = dhy[rlp, h + 1]
+            Qh = Q[rlp, :]
+            blp = Qh \ ylp
+            ulp = ylp - Qh * blp
+        end
+        psi[h + 1] = blp[1]
+        beta_lp[:, h + 1] = blp
+        resid_lp[rlp, h + 1] = ulp
+        perfect[h + 1] = sum(abs2, ulp) <= 1e-20 * sum(abs2, ylp)
+
+        f = u + Cperp[rows, :] * b[1:nc]
+        fe[rows, h + 1] = f
+        D = Th - (dofadjust ? kW : 0)
+        if lpb
+            vh = copy(f)
+            @inbounds for i in 0:h, (j, t) in enumerate(rows)
+
+                vh[j] -= psi[i + 1] * x[t + h - i]
+            end
+            v[rows, h + 1] = vh
+            sigma2v[h + 1] = sum(abs2, vh) / D
+            mse[h + 1] = σ²x * sum(abs2, view(psi, 1:(h + 1))) + sigma2v[h + 1]
+        else
+            mse[h + 1] = sum(abs2, f) / D
+        end
+
+        if irf_se
+            nlp = length(rlp)
+            SX = (Qh' * Qh) ./ nlp
+            Ω = _gl_lrv_nw(Qh .* ulp, _gl_bandwidth(nlp))
+            Vψ = ((SX \ Ω) / SX) ./ nlp
+            se_psi[h + 1] = sqrt(max(Vψ[1, 1], 0.0))
+        end
+    end
+    share = σ²x .* cumsum(psi .^ 2) ./ mse
+    return (; share, psi, irf_se = se_psi, mse, sigma2v, fe, v, resid_lp, beta_lp,
+        Q, perfect)
+end
+
+"""
+    _gl_lp_gradient(estimator, ψ, σ²x, σ²h, m, s, Nq) -> Vector{Float64}
+
+Gradient of the LP-A / LP-B share with respect to
+``\\theta_h = (\\mathrm{vec}(b_0, \\dots, b_h), \\sigma^2_x, \\sigma^2_h)``
+(`SimulationAVarLP*.m:319-323`), with ``\\psi_j`` the first of the `Nq`
+coefficients of ``b_j``:
+
+- LP-A: ``\\frac{1}{\\sigma^2_{f}}\\,[2\\sigma^2_x\\psi' \\otimes e_1',\\ \\sum\\psi^2,\\ -s]``;
+- LP-B: ``\\frac{1-s}{m}\\,[2\\sigma^2_x\\psi' \\otimes e_1',\\ \\sum\\psi^2,\\ -\\frac{s}{1-s}]``,
+
+where `m` is the LP-B denominator (pass `m = σ²h` for LP-A). Both are exact at
+``s = \\hat s``; the reference's simulation method plugs in the bias-corrected
+share instead. The LP-B last entry is computed as ``-s/m``, which is the same
+number without dividing by ``1 - s``.
+"""
+function _gl_lp_gradient(estimator::Symbol, ψ::AbstractVector{Float64}, σ²x::Float64,
+        σ²h::Float64, m::Float64, s::Float64, Nq::Int)
+    np = length(ψ)
+    g = zeros(Nq * np + 2)
+    c = estimator === :lpa ? 1 / σ²h : (1 - s) / m
+    for j in 1:np
+        g[1 + (j - 1) * Nq] = c * 2 * ψ[j] * σ²x
+    end
+    g[end - 1] = c * sum(abs2, ψ)
+    g[end] = estimator === :lpa ? -s / σ²h : -s / m
+    return g
+end
+
+"""
+    _gl_lp_avar(Q, resid_lp, err, x, σ²x, σ²h, beta_lp, Σq, t0, t0lp, h) -> NamedTuple
+
+Horizon-``h`` asymptotic covariance of
+``\\hat\\theta_h = (\\mathrm{vec}(\\hat b_0, \\dots, \\hat b_h), \\hat\\sigma^2_x, \\hat\\sigma^2_h)``
+for LP-A / LP-B (`SimulationAVarLP*.m:212-262`, `jointIndicator = 0`). On rows
+``\\max(t_0, t_0^{LP}), \\dots, T-h`` the moments are
+``[q_t\\hat u_{t,0}, \\dots, q_t\\hat u_{t,h},\\ x_t^2 - \\hat\\sigma^2_x,\\ e_t^2 - \\hat\\sigma^2_h]``
+with `err` ``= \\hat f`` (LP-A) or ``\\hat v`` (LP-B), demeaned column by column;
+``G = -\\mathrm{blkdiag}(I_{h+1} \\otimes \\hat\\Sigma_q, I_2)`` with `Σq` the
+second-moment matrix of ``q_t`` over ``t_0^{LP}, \\dots, T``.
+"""
+function _gl_lp_avar(Q::Matrix{Float64}, resid_lp::Matrix{Float64},
+        err::AbstractVector{Float64}, x::Vector{Float64}, σ²x::Float64, σ²h::Float64,
+        beta_lp::Matrix{Float64}, Σq::Matrix{Float64}, t0::Int, t0lp::Int, h::Int)
+    T, Nq = size(Q)
+    rows = max(t0, t0lp):(T - h)
+    n = length(rows)
+    m = Nq * (h + 1) + 2
+    Z = Matrix{Float64}(undef, n, m)
+    for j in 0:h
+        Z[:, (j * Nq + 1):((j + 1) * Nq)] = Q[rows, :] .* view(resid_lp, rows, j + 1)
+    end
+    Z[:, m - 1] = view(x, rows) .^ 2 .- σ²x
+    Z[:, m] = view(err, rows) .^ 2 .- σ²h
+    Z .-= mean(Z; dims = 1)
+    G = lu(-cat(kron(Matrix{Float64}(I, h + 1, h + 1), Σq), Matrix{Float64}(I, 2, 2);
+        dims = (1, 2)))
+    L = _gl_bandwidth(n)
+    V = _gl_gogt(G, _gl_lrv_nw(Z, L), n)
+    feasible = m < n - 1
+    V_pw = feasible ? _gl_gogt(G, _gl_prewhitened_lrv(Z, L), n) : fill(NaN, m, m)
+    θ = vcat(vec(beta_lp[:, 1:(h + 1)]), σ²x, σ²h)
+    return (; theta = θ, avar_pw = V_pw, avar = V, bandwidth = L, nobs = n, feasible)
+end
+
+"""
+    _GLSpec
+
+A `fevd` formula compiled against the data schema: the response transform
+(`lhs`, `:cumul` or `:ldiff`) and its variable (`response`), the applied
+left-hand-side term, the contemporaneous regressors (shock first) with their
+applied terms, the applied information-set terms (intercept and `lags()`), the
+polynomial trend order, and every raw column the specification reads. Building
+the design from it (`_gl_design`) needs only a column table, so the
+same specification can be re-estimated on simulated data.
+"""
+struct _GLSpec
+    lhs::Symbol
+    response::Symbol
+    lhs_term::AbstractTerm
+    contemporaneous::Vector{Symbol}
+    cterms::Vector{AbstractTerm}
+    info::Vector{AbstractTerm}
+    trend::Int
+    variables::Vector{Symbol}
+end
+
+"""
+    _GLDesign
+
+Matrices of a `fevd` specification on the original time axis (``T`` rows):
+`dhy` (``T \\times (H+1)``, ``y_{t+h} - y_{t-1}``), `C` (contemporaneous
+regressors, demeaned shock first), `W` (information set ``W_{t-1}``: the
+intercept, the `lags()` columns and the trend ``t, t^2, t^3`` on the absolute
+row index), `q` (separate impulse-response regressors, or `nothing`) and `x`
+(the shock demeaned with its full-sample mean). Rows before the effective
+start hold `NaN` in the lagged columns.
+"""
+struct _GLDesign
+    dhy::Matrix{Float64}
+    C::Matrix{Float64}
+    W::Matrix{Float64}
+    q::Union{Nothing, Matrix{Float64}}
+    x::Vector{Float64}
+end
+
+const _FEVD_GRAMMAR = "fevd formulas have the form `cumul(v) ~ x + ... + lags(w, p) + " *
+                      "lags(firstdiff(z), p)`: plain variables enter at date t, `lags()` of a " *
+                      "variable or of its `firstdiff()` form the information set at t - 1"
+
+function _gl_parse(formula::FormulaTerm, data::AbstractDataFrame,
+        shock::Union{Symbol, Nothing}, trend::Int, what::String)
+    vars = unique(StatsModels.termvars(formula))
+    for v in vars
+        hasproperty(data, v) ||
+            throw(ArgumentError("variable $v in `$what` is not a column of the data"))
+        eltype(data[!, v]) <: Union{Missing, Real} || throw(ArgumentError(
+            "column $v used in `$what` must be numeric (got eltype $(eltype(data[!, v])))"))
+    end
+    hints = Dict{Symbol, Any}(v => StatsModels.ContinuousTerm for v in vars)
+    sch = StatsModels.schema(formula, data, hints)
+    f = StatsModels.apply_schema(formula, sch, StatisticalModel)
+
+    lhs_term = f.lhs
+    lhs, inner = if lhs_term isa CumulTerm && !(lhs_term isa CumulTerm{<:LongDiffTerm})
+        :cumul, lhs_term.term
+    elseif lhs_term isa LongDiffTerm && lhs_term.scale === nothing
+        :ldiff, lhs_term.term
+    else
+        throw(ArgumentError(
+            "the left-hand side of `$what` must be cumul(v) (v a first difference, " *
+            "the response is its level) or ldiff(y) (y in levels); got $(formula.lhs)"))
+    end
+    inner isa StatsModels.ContinuousTerm || throw(ArgumentError(
+        "the left-hand side of `$what` must transform a plain variable; got $(formula.lhs)"))
+
+    rhs = f.rhs isa StatsModels.MatrixTerm ? f.rhs.terms : (f.rhs,)
+    intercept = false
+    cterms = AbstractTerm[]
+    info = AbstractTerm[]
+    for t in rhs
+        if t isa StatsModels.InterceptTerm{true}
+            intercept = true
+            push!(info, t)
+        elseif t isa StatsModels.InterceptTerm{false}
+            continue
+        elseif t isa StatsModels.ContinuousTerm
+            push!(cterms, t)
+        elseif t isa LagTerm && t.nsteps >= 1 &&
+               (t.term isa StatsModels.ContinuousTerm ||
+                (t.term isa DiffTerm && t.term.term isa StatsModels.ContinuousTerm))
+            push!(info, t)
+        else
+            throw(ArgumentError("unsupported term $t in `$what`; " * _FEVD_GRAMMAR))
+        end
+    end
+    intercept || throw(ArgumentError(
+        "`$what` must include an intercept: the forecast-error regressions have a constant"))
+    csyms = Symbol[t.sym for t in cterms]
+    allunique(csyms) ||
+        throw(ArgumentError("`$what` lists a contemporaneous variable twice"))
+    isempty(csyms) && throw(ArgumentError(
+        "`$what` has no contemporaneous variable: the shock must enter as a plain " *
+        "right-hand-side variable (its value at date t)"))
+    s = shock === nothing ? csyms[1] : shock
+    k = findfirst(isequal(s), csyms)
+    k === nothing && throw(ArgumentError(
+        "the shock $s is not a contemporaneous (plain) variable of `$what`; " *
+        "contemporaneous variables: $(join(csyms, ", "))"))
+    order = vcat(k, setdiff(eachindex(csyms), k))
+    return _GLSpec(lhs, inner.sym, lhs_term, csyms[order], cterms[order], info, trend,
+        Symbol.(vars))
+end
+
+# The raw columns of `vars` as a column table of Float64 vectors. `missing` and
+# NaN are rejected: lags and leads are built on the original time axis and the
+# reference has no notion of a gap (this also sidesteps issue LP-1).
+function _gl_columns(data::AbstractDataFrame, vars::AbstractVector{Symbol})
+    cols = map(vars) do v
+        col = data[!, v]
+        eltype(col) <: Union{Missing, Real} ||
+            throw(ArgumentError("column $v must be numeric"))
+        any(ismissing, col) && throw(ArgumentError(
+            "column $v contains `missing`; fevd requires a gap-free sample"))
+        c = Vector{Float64}(col)
+        all(isfinite, c) || throw(ArgumentError(
+            "column $v contains NaN or Inf; fevd requires a gap-free sample"))
+        c
+    end
+    return NamedTuple{Tuple(vars)}(Tuple(cols))
+end
+
+# [C, W] (or [C, W] of the impulse-response set) on the original time axis.
+# The shock column of C is replaced by the demeaned shock `x`.
+function _gl_regressors(spec::_GLSpec, d::NamedTuple, x::Vector{Float64}, T::Int)
+    C = Matrix{Float64}(undef, T, length(spec.cterms))
+    C[:, 1] = x
+    for (j, t) in enumerate(spec.cterms)
+        j == 1 && continue
+        C[:, j] = _float_column(t, d, "contemporaneous regressor")
+    end
+    blocks = Matrix{Float64}[_as_float_matrix(StatsModels.modelcols(t, d))
+                             for t in spec.info]
+    for k in 1:(spec.trend)
+        push!(blocks, reshape(Float64.(1:T) .^ k, T, 1))
+    end
+    return C, reduce(hcat, blocks)
+end
+
+"""
+    _gl_design(spec, irf_spec, d, H) -> _GLDesign
+
+Build the matrices of a `fevd` specification from the column table `d`
+(see `_GLDesign`).
+"""
+function _gl_design(spec::_GLSpec, irf_spec::Union{Nothing, _GLSpec}, d::NamedTuple,
+        H::Int)
+    xraw = d[spec.contemporaneous[1]]
+    T = length(xraw)
+    x = xraw .- mean(xraw)
+    C, W = _gl_regressors(spec, d, x, T)
+    q = irf_spec === nothing ? nothing : hcat(_gl_regressors(irf_spec, d, x, T)...)
+    dhy = Matrix{Float64}(undef, T, H + 1)
+    for h in 0:H
+        dhy[:, h + 1] = Vector{Float64}(StatsModels.modelcols(_lhs_at(spec.lhs_term, h), d))
+    end
+    return _GLDesign(dhy, C, W, q, x)
+end
+
+# First row at which every regressor and the h = 0 response exist (at least 2,
+# so that y_{t-1} exists); every horizon then uses the contiguous rows t0..T-h.
+function _gl_start(R::Matrix{Float64}, dhy::Matrix{Float64}, what::String)
+    T = size(R, 1)
+    ok(t) = isfinite(dhy[t, 1]) && all(isfinite, view(R, t, :))
+    t0 = findfirst(ok, 1:T)
+    t0 === nothing && throw(ArgumentError("`$what` has no complete observation"))
+    t0 = max(t0, 2)
+    all(ok, t0:T) || throw(ArgumentError(
+        "the regressors of `$what` are not complete on the contiguous rows $t0:$T"))
+    return t0
+end
+
+"""
+    LPFEVD
+
+Forecast-error variance decomposition of Gorodnichenko and Lee (2020), built
+by [`fevd`](@ref). `share[h+1]` is the estimated share ``\\hat s_h`` of the
+variance of the forecast error of ``y_{t+h} - y_{t-1}`` (given information at
+``t-1``) due to the shock, ``h = 0, \\dots,`` `horizon`.
+
+# Fields
+- `estimator` (`:r2`, `:lpa`, `:lpb`), `horizon`, `response` (the variable in
+  `cumul(v)`/`ldiff(y)`), `shock`, `formula`, `irf_formula` (`nothing` unless a
+  separate impulse-response regression was given), `contemporaneous` (the
+  date-``t`` regressors, shock first);
+- sample: `T` (rows of the data), `t0` (first regression row), `t0lp` (first
+  row of the impulse-response regression; `t0` without `irf_formula`),
+  `nobs[h+1]` ``= T_h = T - h - t_0 + 1``, `window[h+1, :]` ``= [t_0, T-h]``,
+  `bandwidth[h+1]` (Newey–West lag of the asymptotic variance, computed on its
+  window of ``n_h`` rows, see [`fevd`](@ref)), `dofadjust`, `trend`;
+- estimates: `share`, `irf` (``\\hat\\psi_h``, response to a unit shock;
+  `nothing` for `:r2`), `irf_se` (its Newey–West standard error), `shock_mean`
+  and `shock_var` (full-sample mean and variance, ``T-1`` denominator, of the
+  shock), `mse` (``\\hat\\theta_3`` for R², ``\\hat\\sigma^2_{f,h}`` for LP-A,
+  the denominator ``m_h`` for LP-B), `sigma2v` (``\\hat\\sigma^2_{v,h}``, LP-B
+  only), `forecast_errors` (``T \\times (H+1)``, `NaN` outside the window);
+- asymptotic inference: `se_pw` and `se`, the delta-method standard errors of
+  ``\\hat s_h`` with and without VAR(1) prewhitening of the moments, `theta[h+1]`
+  (the moment estimates ``\\hat\\theta_h``) and `avar_pw[h+1]`, `avar[h+1]`
+  (their covariance matrices ``G^{-1}\\hat\\Omega G^{-\\prime}/n_h``, with
+  ``n_h = T_h`` except for LP-A/B with a later-starting `irf_formula`).
+
+The remaining fields (`lhs`, `variables`, `spec`, `irf_spec`, `design`) hold the
+compiled specification and its matrices, so that the bias corrections of
+`fevdbootstrap` need not rebuild them.
+"""
+struct LPFEVD
+    estimator::Symbol
+    horizon::Int
+    response::Symbol
+    shock::Symbol
+    formula::FormulaTerm
+    irf_formula::Union{Nothing, FormulaTerm}
+    contemporaneous::Vector{Symbol}
+    T::Int
+    t0::Int
+    t0lp::Int
+    nobs::Vector{Int}
+    window::Matrix{Int}
+    bandwidth::Vector{Int}
+    dofadjust::Bool
+    trend::Int
+    share::Vector{Float64}
+    irf::Union{Nothing, Vector{Float64}}
+    irf_se::Union{Nothing, Vector{Float64}}
+    shock_mean::Float64
+    shock_var::Float64
+    mse::Vector{Float64}
+    sigma2v::Union{Nothing, Vector{Float64}}
+    forecast_errors::Matrix{Float64}
+    se_pw::Vector{Float64}
+    se::Vector{Float64}
+    theta::Vector{Vector{Float64}}
+    avar_pw::Vector{Matrix{Float64}}
+    avar::Vector{Matrix{Float64}}
+    lhs::Symbol
+    variables::Vector{Symbol}
+    spec::_GLSpec
+    irf_spec::Union{Nothing, _GLSpec}
+    design::_GLDesign
+end
+
+"""
+    fevd(formula, data; horizon, estimator = :r2, shock = nothing,
+         irf_formula = nothing, dofadjust = true, trend = 0) -> LPFEVD
+    fevd(lp_result::LocalProjection, data; estimator = :r2, irf_formula = nothing,
+         dofadjust = true, trend = 0) -> LPFEVD
+
+Share of the forecast-error variance of a variable due to an observed shock,
+by the local-projection estimators of Gorodnichenko and Lee (2020): `:r2` (the
+``R^2`` estimator of the paper's main text), `:lpa` and `:lpb`. A port of
+`SubR2.m`, `SubLPA.m` and `SubLPB.m` with their asymptotic variances
+(`SimulationAVar*.m`, horizon by horizon).
+
+The target is the forecast error of ``y_{t+h} - y_{t-1}`` given information at
+``t-1``. It is estimated by regressing ``y_{t+h} - y_{t-1}`` on the information
+set ``W_{t-1}`` on the rows ``t = t_0, \\dots, T-h`` (``T_h = T-h-t_0+1``).
+
+- **R²**: ``\\hat s_h`` is the uncentred ``R^2`` of the forecast error
+  ``\\hat f_{t+h|t-1}`` on the shocks ``x_t, \\dots, x_{t+h}``, demeaned with their
+  full-sample mean. It lies in ``[0, 1]``.
+- **LP-A**: ``\\hat s_h = \\hat\\sigma^2_x \\sum_{i \\le h}\\hat\\psi_i^2 /
+  \\hat\\sigma^2_{f,h}``, with ``\\hat\\psi_i`` the local-projection response to a
+  unit shock and ``\\hat\\sigma^2_{f,h}`` the forecast-error variance. Not bounded
+  by 1.
+- **LP-B**: the denominator is replaced by
+  ``\\hat\\sigma^2_x \\sum_{i\\le h}\\hat\\psi_i^2 + \\hat\\sigma^2_{v,h}``, with
+  ``\\hat v`` the forecast error net of ``\\sum_{i\\le h}\\hat\\psi_i x_{t+h-i}``.
+  It lies in ``[0, 1]``.
+
+# Formula
+The formula describes both the local projection and the information set:
+
+```julia
+fevd(@formula(cumul(dy) ~ tfp + lags(tfp, 4) + lags(dy, 4) + lags(infl, 4)), df;
+     horizon = 20, estimator = :lpb)
+```
+
+- left-hand side: `cumul(v)` (with ``v`` a first difference, the response is its
+  level: ``\\sum_{j\\le h} v_{t+j} = y_{t+h} - y_{t-1}``) or `ldiff(y)` (``y`` in
+  levels);
+- plain variables enter at date ``t`` (the reference's `XtIndicator`); the shock
+  is the first of them, or the `shock` keyword. For LP-A/B the others are
+  controls whose innovations, purged of ``W_{t-1}``, stay in the forecast error;
+  the R² estimator ignores them, as `SubR2.m` does;
+- `lags(v, p)` and `lags(firstdiff(v), p)` form ``W_{t-1}``, together with the
+  required intercept and, with `trend = k ∈ 0:3`, the powers ``t, \\dots, t^k``
+  of the absolute row index ``t = 1, \\dots, T``;
+- anything else (`leads`, `anchor`, `hbr`, functions, interactions) throws.
+
+Lags and leads are built on the original rows of `data`, which must have no
+`missing` or `NaN` in the columns used; ``t_0 \\ge 2`` is the first row at which
+every regressor exists.
+
+`fevd(lp_result, data; ...)` reuses the projection's formula
+(`lp_result.base_formula`), `horizon` and `shock`, so `horizon` and `shock` are
+not accepted as keywords. The projection must be linear (no `state`) and OLS
+(not `lpiv`), with a `cumul(v)` or `ldiff(y)` left-hand side and a right-hand
+side of the form above.
+
+# Keywords
+- `horizon`: maximum horizon ``H``.
+- `irf_formula` (LP-A/B): a separate, typically parsimonious, regression for
+  ``\\hat\\psi_h`` with the same left-hand side and shock, e.g.
+  `@formula(cumul(dy) ~ tfp + lags(tfp, 1) + lags(firstdiff(y), 1))` (the
+  paper's set: the lagged response is formed from the level ``y``, so it starts
+  at ``t_0^{LP} = 3`` as in the reference); the forecast errors
+  still come from `formula`. The LP-A/B asymptotic variance stacks the
+  impulse-response coefficients of horizons ``0, \\dots, h``, so it needs such a
+  parsimonious regression: with the full `formula` the prewhitened variance is
+  not computable beyond short horizons (see below).
+- `dofadjust = true`: LP-A/B variances divided by ``T_h - k_W``, ``k_W`` the
+  number of columns of ``W_{t-1}`` (contemporaneous regressors excluded), as in
+  the paper (`dfIndicator = 0`); `false` divides by ``T_h``.
+- `trend = 0`: polynomial trend order.
+
+# Conventions
+The shock mean and variance (``T-1`` denominator) are computed over all ``T``
+rows. `irf_se` is a Newey–West standard error with lag
+``\\mathrm{round}(0.75\\,T_h^{1/3} - 1)`` and no degrees-of-freedom factor.
+`se_pw` / `se` are delta-method standard errors at ``\\hat s_h``, from the
+moment conditions of Appendices A/B with Bartlett long-run variances (same lag)
+of the moments with / without VAR(1) prewhitening; the R² moments treat the
+forecast error as data (valid when the shock is unpredictable from
+``W_{t-1}``). The prewhitened variance is `NaN`, with a warning, when the
+moment vector (``2h+3`` for R², ``N_q(h+1)+2`` for LP-A/B, ``N_q`` the
+impulse-response regressors) has at least ``n_h - 1`` elements, ``n_h`` the rows
+of the asymptotic-variance window: ``n_h = T_h`` for R² and for LP-A/B without
+`irf_formula`, ``n_h = T - h - \\max(t_0, t_0^{LP}) + 1`` (the rows shared by
+the forecast-error and impulse-response regressions) for LP-A/B with an
+`irf_formula` that starts later. For LP-A/B the bandwidth and the scaling of
+`avar` use the same ``n_h``. `se_pw`, `se`, `avar_pw` and `avar` of a horizon
+are `NaN`, with a warning, when its impulse-response regression fits exactly
+(e.g. the response is a contemporaneous regressor); `irf` and `irf_se` keep
+their computed values there (numerically zero, as in the reference).
+Regressions use QR rather than the reference's normal equations. When a
+horizon fits exactly, this changes the prewhitened variance at all later
+horizons materially, not just at rounding level: the exact-fit moments stay in
+the stacked moment vector as rounding noise, which the reference's
+normal-equation prewhitening amplifies while QR does not (see the tutorial's
+decision table).
+
+Bias corrections and confidence bands: `fevdbootstrap`.
+
+# Reference
+Gorodnichenko, Y. and B. Lee (2020), "Forecast Error Variance Decompositions
+with Local Projections", *Journal of Business & Economic Statistics* 38(4),
+921–933.
+"""
+function fevd(formula::FormulaTerm, data::AbstractDataFrame;
+        horizon::Integer, estimator::Symbol = :r2,
+        shock::Union{Symbol, Nothing} = nothing,
+        irf_formula::Union{FormulaTerm, Nothing} = nothing,
+        dofadjust::Bool = true, trend::Integer = 0)
+    estimator in _FEVD_ESTIMATORS || throw(ArgumentError(
+        "`estimator` must be :r2, :lpa or :lpb (got :$estimator)"))
+    horizon >= 0 || throw(ArgumentError("horizon must be non-negative"))
+    0 <= trend <= 3 || throw(ArgumentError("`trend` must be 0, 1, 2 or 3 (got $trend)"))
+    estimator === :r2 && irf_formula !== nothing &&
+        throw(ArgumentError(
+            "`irf_formula` sets the impulse-response regression of LP-A/LP-B; the R² " *
+            "estimator has none"))
+    H = Int(horizon)
+    trend = Int(trend)
+
+    spec = _gl_parse(formula, data, shock, trend, "formula")
+    irf_spec = irf_formula === nothing ? nothing :
+               _gl_parse(irf_formula, data, spec.contemporaneous[1], trend, "irf_formula")
+    if irf_spec !== nothing
+        (irf_spec.lhs === spec.lhs && irf_spec.response === spec.response) ||
+            throw(ArgumentError(
+                "`irf_formula` must have the same left-hand side as `formula` " *
+                "($(formula.lhs)); got $(irf_formula.lhs)"))
+    end
+    variables = irf_spec === nothing ? spec.variables :
+                unique(vcat(spec.variables, irf_spec.variables))
+    d = _gl_columns(data, variables)
+    T = nrow(data)
+    design = _gl_design(spec, irf_spec, d, H)
+    dhy, C, W, x = design.dhy, design.C, design.W, design.x
+    xraw = d[spec.contemporaneous[1]]
+    shock_mean = mean(xraw)
+    shock_var = var(xraw)
+
+    t0 = _gl_start(estimator === :r2 ? W : hcat(C, W), dhy, "formula")
+    t0lp = irf_spec === nothing ? t0 : _gl_start(design.q, dhy, "irf_formula")
+    width = estimator === :r2 ? max(size(W, 2), H + 1) : size(C, 2) + size(W, 2)
+    width_lp = design.q === nothing ? width : size(design.q, 2)
+    (T - H - t0 + 1 > width && T - H - t0lp + 1 > width_lp) || throw(ArgumentError(
+        "horizon $H leaves too few observations: the horizon-$H regressions use " *
+        "$(T - H - max(t0, t0lp) + 1) rows for $(max(width, width_lp)) parameters"))
+    for h in 0:H
+        all(isfinite, view(dhy, t0lp:(T - h), h + 1)) &&
+        all(isfinite, view(dhy, t0:(T - h), h + 1)) || throw(ArgumentError(
+            "the response is not available on the contiguous rows $t0:$(T - h)"))
+    end
+
+    nobs = [T - h - t0 + 1 for h in 0:H]
+    window = hcat(fill(t0, H + 1), [T - h for h in 0:H])
+    share = zeros(H + 1)
+    se_pw = fill(NaN, H + 1)
+    se = fill(NaN, H + 1)
+    bandwidth = zeros(Int, H + 1)
+    theta = Vector{Vector{Float64}}(undef, H + 1)
+    avar_pw = Vector{Matrix{Float64}}(undef, H + 1)
+    avar = Vector{Matrix{Float64}}(undef, H + 1)
+    forecast_errors = fill(NaN, T, H + 1)
+    infeasible = Int[]
+    exact = Int[]
+
+    if estimator === :r2
+        mse = zeros(H + 1)
+        for h in 0:H
+            rows = t0:(T - h)
+            xf = [x[t + j] for t in rows, j in 0:h]
+            r = _gl_r2(dhy[rows, h + 1], W[rows, :], xf)
+            share[h + 1] = r.s
+            mse[h + 1] = r.theta[end]
+            forecast_errors[rows, h + 1] = r.fe
+            theta[h + 1] = r.theta
+            bandwidth[h + 1] = r.bandwidth
+            r.feasible || push!(infeasible, h)
+            if sum(abs2, r.fe) <= 1e-20 * sum(abs2, view(dhy, rows, h + 1))
+                push!(exact, h)
+                m = length(r.theta)
+                avar_pw[h + 1] = fill(NaN, m, m)
+                avar[h + 1] = fill(NaN, m, m)
+            else
+                avar_pw[h + 1] = r.avar_pw
+                avar[h + 1] = r.avar
+                se_pw[h + 1] = r.se_pw
+                se[h + 1] = r.se
+            end
+        end
+        irf = irf_se = sigma2v = nothing
+    else
+        r = _gl_lp(dhy, C, W, design.q, x, shock_var, t0, t0lp, H;
+            estimator = estimator, dofadjust = dofadjust)
+        share .= r.share
+        mse = r.mse
+        irf = r.psi
+        irf_se = r.irf_se
+        sigma2v = estimator === :lpb ? r.sigma2v : nothing
+        forecast_errors .= r.fe
+        Q = r.Q
+        Nq = size(Q, 2)
+        rq = t0lp:T
+        Σq = (Q[rq, :]' * Q[rq, :]) ./ length(rq)
+        for h in 0:H
+            err = estimator === :lpb ? view(r.v, :, h + 1) : view(r.fe, :, h + 1)
+            σ²h = estimator === :lpb ? r.sigma2v[h + 1] : r.mse[h + 1]
+            a = _gl_lp_avar(Q, r.resid_lp, err, x, shock_var, σ²h, r.beta_lp, Σq,
+                t0, t0lp, h)
+            theta[h + 1] = a.theta
+            bandwidth[h + 1] = a.bandwidth
+            a.feasible || push!(infeasible, h)
+            if r.perfect[h + 1]
+                push!(exact, h)
+                m = length(a.theta)
+                avar_pw[h + 1] = fill(NaN, m, m)
+                avar[h + 1] = fill(NaN, m, m)
+            else
+                avar_pw[h + 1] = a.avar_pw
+                avar[h + 1] = a.avar
+                g = _gl_lp_gradient(estimator, view(r.psi, 1:(h + 1)), shock_var, σ²h,
+                    r.mse[h + 1], r.share[h + 1], Nq)
+                se_pw[h + 1] = _gl_delta_se(g, a.avar_pw)
+                se[h + 1] = _gl_delta_se(g, a.avar)
+            end
+        end
+    end
+
+    if !isempty(infeasible)
+        remedy = estimator === :r2 ?
+                 "The R² moment vector has 2h + 3 elements whatever the regressors, so " *
+                 "only a shorter `horizon` restores prewhitening; `se` and `avar` (no " *
+                 "prewhitening) remain available." :
+                 "Use a more parsimonious `irf_formula` (Gorodnichenko and Lee use the " *
+                 "shock, one lag of it and of the response, and a constant)."
+        size_rule = estimator === :r2 || t0lp <= t0 ? "T_h - 1 elements" :
+                    "n - 1 elements, n = T - h - max(t0, t0lp) + 1 the rows shared by " *
+                    "the forecast-error and impulse-response regressions"
+        @warn "fevd: at horizons $(infeasible) the moment vector has at least " *
+              size_rule * ", so it cannot be prewhitened; `se_pw` and `avar_pw` are " *
+              "NaN there. " * remedy
+    end
+    isempty(exact) || @warn "fevd: the regression fits exactly at horizons $(exact) " *
+          "(e.g. the response is a contemporaneous regressor), so the asymptotic " *
+          "variance is degenerate; `se_pw`, `se`, `avar_pw` and `avar` are NaN there."
+
+    return LPFEVD(estimator, H, spec.response, spec.contemporaneous[1], formula,
+        irf_formula, spec.contemporaneous, T, t0, t0lp, nobs, window, bandwidth,
+        dofadjust, trend, share, irf, irf_se, shock_mean, shock_var, mse, sigma2v,
+        forecast_errors, se_pw, se, theta, avar_pw, avar, spec.lhs, variables, spec,
+        irf_spec, design)
+end
+
+function fevd(m::LocalProjection, data::AbstractDataFrame; estimator::Symbol = :r2,
+        irf_formula::Union{FormulaTerm, Nothing} = nothing, dofadjust::Bool = true,
+        trend::Integer = 0)
+    m.state === nothing || throw(ArgumentError(
+        "fevd does not support state-dependent local projections"))
+    _rhs_tracks_horizon(m.base_formula) && throw(ArgumentError(
+        "fevd needs a horizon-invariant information set; the projection has a " *
+        "horizon-tracking right-hand-side term"))
+    try
+        return fevd(m.base_formula, data; horizon = m.horizon, estimator = estimator,
+            shock = m.shock, irf_formula = irf_formula, dofadjust = dofadjust,
+            trend = trend)
+    catch e
+        e isa ArgumentError || rethrow()
+        throw(ArgumentError("fevd(lp_result, data): `formula` is the projection's " *
+                            "formula $(m.base_formula); " * e.msg))
+    end
+end
+
+function fevd(::LocalProjectionIV, ::AbstractDataFrame; kwargs...)
+    throw(ArgumentError("fevd estimates variance shares of an observed shock; " *
+                        "it does not support instrumental-variable projections"))
+end
+
+function Base.show(io::IO, f::LPFEVD)
+    print(io, "LPFEVD(estimator=:", f.estimator, ", horizon=0:", f.horizon,
+        ", response=", f.response, ", shock=", f.shock, ")")
+end
+
+function Base.show(io::IO, ::MIME"text/plain", f::LPFEVD)
+    println(io, "LPFEVD (Gorodnichenko–Lee ", _fevd_label(f.estimator), ")")
+    println(io, "  Response:   ", f.spec.lhs_term)
+    println(io, "  Shock:      ", f.shock)
+    println(io, "  Formula:    ", f.formula)
+    f.irf_formula === nothing || println(io, "  IRF formula: ", f.irf_formula)
+    println(io, "  Sample:     T = ", f.T, ", t0 = ", f.t0,
+        f.t0lp == f.t0 ? "" : ", t0 (IRF) = $(f.t0lp)",
+        ", T_h = T - h - t0 + 1")
+    f.estimator === :r2 ||
+        println(io, "  Variances:  ", f.dofadjust ? "T_h - k_W" : "T_h",
+            " denominator")
+    hz = collect(0:(f.horizon))
+    if f.irf === nothing
+        data = (; h = hz, s = f.share, sp = f.se_pw, se = f.se, n = f.nobs)
+        labels = ["Horizon", "Share", "s.e. (PW)", "s.e.", "T_h"]
+    else
+        data = (; h = hz, s = f.share, sp = f.se_pw, se = f.se, irf = f.irf,
+            irf_se = f.irf_se, n = f.nobs)
+        labels = ["Horizon", "Share", "s.e. (PW)", "s.e.", "IRF", "IRF s.e.", "T_h"]
+    end
+    nc = length(labels)
+    pretty_table(io, data;
+        column_labels = labels,
+        title = "Forecast-error variance share of $(f.shock)",
+        formatters = [fmt__round(4, collect(2:(nc - 1)))],
+        alignment = fill(:r, nc),
+        table_format = TextTableFormat(borders = text_table_borders__unicode_rounded))
+    return nothing
+end
+
+# ============================================================================
+# FEVD bias corrections (Gorodnichenko & Lee 2020)
+# ============================================================================
+
+const _FEVD_METHODS = (:var, :block, :simulation)
+
+"""
+    _var_fevd(A, Ω, H; shock, response, cumulate = false) -> Vector{Float64}
+
+Share of the forecast-error variance of variable `response` due to the Cholesky
+shock of variable `shock` in a VAR with slopes `A` (`n × n × p`) and residual
+covariance `Ω`, horizons ``0, \\dots, H`` (`var_chol.m:54-81`). With
+``\\Psi_h = \\Theta_h L`` the one-standard-deviation responses
+(``\\Theta_h`` from `_var_ma`, ``L`` the lower Cholesky factor of ``\\Omega``),
+
+```math
+s_h = \\frac{\\sum_{l \\le h} \\Psi_l[r, j]^2}{\\sum_{l \\le h} \\sum_m \\Psi_l[r, m]^2}.
+```
+
+With `cumulate = true` the response row is first cumulated over horizons, for
+all shocks (`var_chol.m:67`): the share then refers to ``y_{t+h} - y_{t-1}``
+when the VAR holds the first difference of ``y``. The share is invariant to a
+scalar rescaling of ``\\Omega`` but depends on the Cholesky order.
+"""
+function _var_fevd(A::Array{Float64, 3}, Ω::AbstractMatrix{Float64}, H::Int;
+        shock::Int, response::Int, cumulate::Bool = false)
+    C = cholesky(Symmetric(Matrix{Float64}(Ω)); check = false)
+    issuccess(C) || throw(ArgumentError(
+        "the VAR residual covariance is not positive definite: the VAR variables " *
+        "are linearly dependent (e.g. a level together with its first difference)"))
+    L = C.L
+    Θ = _var_ma(A, H)
+    n = size(A, 1)
+    ψ = zeros(n)
+    num = 0.0
+    den = 0.0
+    s = Vector{Float64}(undef, H + 1)
+    for h in 0:H
+        row = vec(transpose(view(Θ, response, :, h + 1)) * L)
+        ψ = cumulate ? ψ .+ row : row
+        num += ψ[shock]^2
+        den += sum(abs2, ψ)
+        s[h + 1] = num / den
+    end
+    return s
+end
+
+"""
+    _gl_lagselect(Y, candidates; criterion = :hqic) -> NamedTuple
+
+VAR lag order chosen as in the Gorodnichenko–Lee bootstrap drivers
+(`BootstrapVARR2.m:144-173`). Every candidate ``p`` is fitted on the **common**
+effective sample (the last ``T_{IC} = T - p_{\\max}`` rows, the preceding ``p``
+rows as initial conditions), with the maximum-likelihood covariance
+``\\hat\\Omega_p = \\hat U'\\hat U / T_{IC}`` and ``k = n^2 p``:
+
+```math
+\\mathrm{HQIC} = \\log\\det\\hat\\Omega_p + \\frac{2k\\log\\log T_{IC}}{T_{IC}},\\qquad
+\\mathrm{BIC} = \\log\\det\\hat\\Omega_p + \\frac{k\\log T_{IC}}{T_{IC}},\\qquad
+\\mathrm{AIC} = \\log\\det\\hat\\Omega_p + \\frac{2k}{T_{IC}}.
+```
+
+Ties go to the first candidate. Returns `(; p, values)`. These conventions
+differ from [`lagselect`](@ref) (the `ic_var.m` port), which is left unchanged.
+"""
+function _gl_lagselect(Y::AbstractMatrix{Float64}, candidates::AbstractVector{Int};
+        criterion::Symbol = :hqic)
+    criterion in (:hqic, :bic, :aic) || throw(ArgumentError(
+        "`criterion` must be :hqic, :bic or :aic (got :$criterion)"))
+    isempty(candidates) && throw(ArgumentError("`nlags` has no candidate lag order"))
+    all(>=(1), candidates) || throw(ArgumentError(
+        "the candidate VAR lag orders must be at least 1 (got $(candidates))"))
+    n = size(Y, 2)
+    pmax = maximum(candidates)
+    Tic = size(Y, 1) - pmax
+    values = Vector{Float64}(undef, length(candidates))
+    for (i, p) in enumerate(candidates)
+        v = _var_ols(Y[(pmax - p + 1):end, :], p)
+        Ω = (v.U' * v.U) ./ Tic
+        _check_var_rank(Ω)
+        k = n^2 * p
+        penalty = criterion === :hqic ? 2k * log(log(Tic)) / Tic :
+                  criterion === :bic ? k * log(Tic) / Tic : 2k / Tic
+        values[i] = logdet(Symmetric(Ω)) + penalty
+    end
+    return (; p = candidates[argmin(values)], values)
+end
+
+# R² share at horizon h on the regression rows `rows` (`t` indexes the window
+# t0..T-h of the original sample, possibly resampled) of the design `des`.
+function _gl_r2_rows(des::_GLDesign, rows::AbstractVector{Int}, h::Int)
+    xf = [des.x[t + j] for t in rows, j in 0:h]
+    return _gl_r2(des.dhy[rows, h + 1], des.W[rows, :], xf; avar = false).s
+end
+
+# The specification of `f` re-estimated on the column table `d` (a bootstrap
+# sample): the shares, the unit-shock responses (LP-A/B) and the shock variance.
+# No asymptotic variances. On gap-free data t0 and t0lp depend only on the lag
+# structure, so those of `f` apply.
+function _gl_point(f::LPFEVD, d::NamedTuple)
+    H = f.horizon
+    des = _gl_design(f.spec, f.irf_spec, d, H)
+    σ²x = var(d[f.shock])
+    if f.estimator === :r2
+        T = size(des.dhy, 1)
+        share = [_gl_r2_rows(des, f.t0:(T - h), h) for h in 0:H]
+        return (; share, psi = nothing, σ²x)
+    end
+    r = _gl_lp(des.dhy, des.C, des.W, des.q, des.x, σ²x, f.t0, f.t0lp, H;
+        estimator = f.estimator, dofadjust = f.dofadjust, irf_se = false)
+    return (; share = r.share, psi = r.psi, σ²x)
+end
+
+"""
+    _gl_psd_factor(V) -> Matrix{Float64}
+
+A factor ``M`` with ``MM' \\approx V`` for drawing from ``N(\\hat\\theta, V)``.
+The Cholesky factor of the symmetrized `V` when it is positive definite;
+otherwise the eigenvalues are floored at `eps()` (the diagonal of the eigenvalue
+matrix only) and ``M = Q\\Lambda^{1/2}`` (`SimulationAVar*.m`, Q18). The
+reference floors the whole eigenvalue matrix, off-diagonal zeros included, and
+repeats the repair until `cholcov` succeeds, in an unbounded loop; drawing
+through the eigenfactor makes one pass sufficient.
+"""
+function _gl_psd_factor(V::AbstractMatrix{Float64})
+    S = Symmetric((V + V') ./ 2)
+    C = cholesky(S; check = false)
+    issuccess(C) && return Matrix{Float64}(C.L)
+    E = eigen(S)
+    return E.vectors .* transpose(sqrt.(max.(E.values, eps())))
+end
+
+# One simulated share at horizon h: θ* = θ̂ + M z, redrawn while a variance is
+# nonpositive (R²: θ₃; LP-A/B: σ²x and σ²_h). NaN after `maxtries` rejections.
+function _gl_sim_share(rng::AbstractRNG, θ̂::Vector{Float64}, M::Matrix{Float64},
+        estimator::Symbol, h::Int; maxtries::Int = 10_000)
+    m = length(θ̂)
+    z = Vector{Float64}(undef, size(M, 2))
+    for _ in 1:maxtries
+        θ = θ̂ + M * Random.randn!(rng, z)
+        if estimator === :r2
+            θ[m] > 0 || continue
+            k = h + 1
+            return dot(view(θ, 1:k), view(θ, (k + 1):(2k))) / θ[m]
+        end
+        (θ[m - 1] > 0 && θ[m] > 0) || continue
+        Nq = (m - 2) ÷ (h + 1)
+        num = θ[m - 1] * sum(j -> abs2(θ[1 + j * Nq]), 0:h)
+        return estimator === :lpa ? num / θ[m] : num / (num + θ[m])
+    end
+    return NaN
+end
+
+"""
+    FEVDBootstrap
+
+Result of [`fevdbootstrap`](@ref): a bias-corrected Gorodnichenko–Lee
+forecast-error variance decomposition together with the draws it is built from.
+Fields of the underlying [`LPFEVD`](@ref) are reachable directly (`b.share`,
+`b.horizon`, …); `b.fevd` is the estimate itself.
+
+# Fields
+- `fevd`, `method` (`:var`, `:block` or `:simulation`);
+- `draws` (``B_{\\mathrm{eff}} \\times (H+1)``, the shares ``s^*_{b,h}`` of the
+  draws that succeeded; for `:simulation` with `bound`, clamped to ``[0, 1]``),
+  `mean_draws` (``\\bar m_h``), `se_boot` (their standard deviation, ``B-1``
+  denominator);
+- `pseudo_truth`: the share implied by the bootstrap VAR, ``s^{VAR}_h``
+  (`:var` only, else `nothing`);
+- `biascorrected`: ``\\hat s_h - (\\bar m_h - s^{VAR}_h)`` for `:var`,
+  ``2\\hat s_h - \\bar m_h`` for `:block` and `:simulation`; never clamped;
+- `se_pw`, `se`: delta-method standard errors with and without prewhitening,
+  at ``\\hat s_h`` (those of `fevd`) for `:var` and `:block`, at the
+  bias-corrected share for `:simulation` (the authors' convention, so they
+  depend on the draws);
+- LP-A/B with `:var` (else `nothing`): `irf_draws` (unit-shock responses
+  ``\\psi^*_{b,h}``), `irf_bc` ``= 2\\hat\\psi_h - \\mathrm{mean}_b\\,\\psi^*_{b,h}``
+  (centred on ``\\hat\\psi``, not on the VAR response, as in the reference),
+  `irf_se_boot`, and `irfstr_draws` (``\\psi^*_{b,h}`` times the standard
+  deviation of the simulated shock, the one-standard-deviation responses);
+- `:var` metadata (else `nothing`): `vars` (VAR variables, Cholesky order),
+  `nlags` (VAR lag order), `ic` (`(; criterion, candidates, values)`, or
+  `nothing` when `nlags` was fixed), `skipfirst`, `burnin`;
+- `blocklength` (`:block`), `prewhiten` and `bound` (`:simulation`; `bound` is
+  `false` for LP-A/B, which are never clamped);
+- `nboot` (requested draws) and `nfail` (draws that failed and are excluded).
+"""
+struct FEVDBootstrap
+    fevd::LPFEVD
+    method::Symbol
+    draws::Matrix{Float64}
+    mean_draws::Vector{Float64}
+    pseudo_truth::Union{Nothing, Vector{Float64}}
+    biascorrected::Vector{Float64}
+    se_boot::Vector{Float64}
+    se_pw::Vector{Float64}
+    se::Vector{Float64}
+    irf_draws::Union{Nothing, Matrix{Float64}}
+    irf_bc::Union{Nothing, Vector{Float64}}
+    irf_se_boot::Union{Nothing, Vector{Float64}}
+    irfstr_draws::Union{Nothing, Matrix{Float64}}
+    vars::Union{Nothing, Vector{Symbol}}
+    nlags::Union{Nothing, Int}
+    ic::Union{Nothing,
+        @NamedTuple{criterion::Symbol, candidates::Vector{Int}, values::Vector{Float64}}}
+    skipfirst::Union{Nothing, Bool}
+    burnin::Union{Nothing, Int}
+    blocklength::Union{Nothing, Int}
+    prewhiten::Union{Nothing, Bool}
+    bound::Union{Nothing, Bool}
+    nboot::Int
+    nfail::Int
+end
+
+function Base.getproperty(b::FEVDBootstrap, name::Symbol)
+    name in fieldnames(FEVDBootstrap) && return getfield(b, name)
+    return getproperty(getfield(b, :fevd), name)
+end
+
+# The bootstrap's own fields first (they take precedence in `getproperty`), then
+# those of the wrapped LPFEVD that it does not shadow (`se_pw`, `se`)
+function Base.propertynames(b::FEVDBootstrap)
+    Tuple(unique((fieldnames(FEVDBootstrap)..., propertynames(getfield(b, :fevd))...)))
+end
+
+# Rows of `draws` (and of the optional LP draws) whose draw did not fail.
+# `errors[b]` holds the exception of draw `b` (or `nothing`); the first one is
+# reported so that a systematic failure is not reduced to a count.
+function _fevd_draw_moments(draws::Matrix{Float64}, failures::Vector{Int},
+        errors::Vector{Any}, what::String)
+    nboot = length(failures)
+    nfail = sum(failures)
+    i = findfirst(!isnothing, errors)
+    cause = i === nothing ? "" : "; first error: " * sprint(showerror, errors[i])
+    nfail == nboot && throw(ErrorException(
+        "fevdbootstrap ($what): all $nboot draws failed" * cause))
+    nfail > 0 && @warn "fevdbootstrap ($what): $nfail of $nboot draws failed and " *
+          "are excluded from the bias correction and the bands" * cause
+    ok = failures .== 0
+    kept = draws[ok, :]
+    return kept, ok, nfail
+end
+
+_col_mean(D::Matrix{Float64}) = vec(mean(D; dims = 1))
+_col_std(D::Matrix{Float64}) = vec(std(D; dims = 1))
+
+# Default VAR ordering: the date-t controls, then the shock, then every other
+# variable in order of appearance on the right-hand side(s), then the response
+# if it only appears on the left.
+function _fevd_default_vars(f::LPFEVD)
+    rhs = StatsModels.termvars(f.formula.rhs)
+    f.irf_formula === nothing || append!(rhs, StatsModels.termvars(f.irf_formula.rhs))
+    order = unique(vcat(Symbol.(rhs), f.variables))
+    rest = [v for v in order if !(v in f.contemporaneous)]
+    return vcat(f.contemporaneous[2:end], f.shock, rest)
+end
+
+# The VAR lag order: fixed, or chosen among candidates by `_gl_lagselect`.
+function _fevd_nlags(Y::Matrix{Float64}, nlags, criterion::Symbol)
+    if nlags isa Integer
+        nlags >= 1 ||
+            throw(ArgumentError("the VAR lag order must be at least 1 (got $nlags)"))
+        return Int(nlags), nothing
+    end
+    candidates = collect(Int, nlags)
+    sel = _gl_lagselect(Y, candidates; criterion = criterion)
+    return sel.p, (; criterion, candidates, values = sel.values)
+end
+
+# Pairs `y => v` for the levels `y` that the specification uses only through
+# `lags(firstdiff(y), p)` and whose first difference is the column `v` of
+# `candidates` (diff(y) ≈ v[2:end]).
+function _fevd_level_pairs(f::LPFEVD, data::AbstractDataFrame,
+        candidates::AbstractVector{Symbol})
+    plain = Symbol[]
+    diffs = Symbol[]
+    for spec in (f.spec, f.irf_spec)
+        spec === nothing && continue
+        push!(plain, spec.response)
+        append!(plain, spec.contemporaneous)
+        for t in spec.info
+            t isa LagTerm || continue
+            t.term isa DiffTerm ? push!(diffs, t.term.term.sym) : push!(plain, t.term.sym)
+        end
+    end
+    pairs = Pair{Symbol, Symbol}[]
+    for s in unique(diffs)
+        s in plain && continue
+        ds = diff(Vector{Float64}(data[!, s]))
+        for v in candidates
+            v === s && continue
+            hasproperty(data, v) || continue
+            col = data[!, v]
+            (eltype(col) <: Real && all(isfinite, col)) || continue
+            if isapprox(ds, Vector{Float64}(col[2:end]); rtol = 1e-8)
+                push!(pairs, s => v)
+                break
+            end
+        end
+    end
+    return pairs
+end
+
+# A VAR residual covariance that is singular up to rounding (linearly dependent
+# variables) gives meaningless shares even when its Cholesky factorization
+# happens to succeed: test the smallest eigenvalue of the correlation matrix.
+function _check_var_rank(Ω::AbstractMatrix{Float64}, varlist = nothing)
+    d = [Ω[i, i] for i in axes(Ω, 1)]
+    singular = !all(>(0), d) ||
+               eigmin(Symmetric(Ω ./ sqrt.(d .* transpose(d)))) <= sqrt(eps()) * size(Ω, 1)
+    singular && throw(ArgumentError(
+        "the VAR residual covariance is singular: the VAR variables" *
+        (varlist === nothing ? "" : " $(varlist)") * " are linearly dependent (e.g. " *
+        "a level together with its first difference)"))
+    return nothing
+end
+
+function _fevd_var(f::LPFEVD, data::AbstractDataFrame; vars, nlags, criterion::Symbol,
+        skipfirst::Bool, burnin::Integer, nboot::Int, rng::AbstractRNG, threaded::Bool)
+    f.trend == 0 || throw(ArgumentError(
+        "method = :var is not available with `trend` ≥ 1: the reference simulates the " *
+        "trend on the burn-in clock but estimates it on the sample clock; use " *
+        "method = :block or :simulation"))
+    nrow(data) == f.T || throw(ArgumentError(
+        "`data` has $(nrow(data)) rows but the FEVD was estimated on $(f.T); pass the " *
+        "data frame given to `fevd`"))
+    burnin >= 0 || throw(ArgumentError("`burnin` must be non-negative (got $burnin)"))
+    criterion in (:hqic, :bic, :aic) || throw(ArgumentError(
+        "`criterion` must be :hqic, :bic or :aic (got :$criterion)"))
+    skipfirst && f.lhs !== :cumul &&
+        throw(ArgumentError(
+            "`skipfirst` reproduces the reference's VAR on rows 2:T, which only arises with " *
+            "a cumul(v) response; with ldiff(y) the VAR always uses every row"))
+    # Levels that enter only through firstdiff() and whose difference is another
+    # variable (cumul(dy) with lags(firstdiff(y), p)): the VAR simulates the
+    # difference and each draw rebuilds the level by cumulation, as the reference
+    # does (yb = cumsum(Δy_b)); a VAR in both would be singular.
+    default = _fevd_default_vars(f)
+    levels = _fevd_level_pairs(f, data, vars === nothing ? default : collect(Symbol, vars))
+    if vars === nothing
+        lmap = Dict(levels)
+        varlist = unique([get(lmap, s, s) for s in default])
+    else
+        varlist = collect(Symbol, vars)
+        for (s, d) in levels
+            s in varlist && throw(ArgumentError(
+                "`vars` holds both $s and its first difference $d, so the VAR would be " *
+                "singular; drop $s: each draw rebuilds it by cumulating $d"))
+        end
+    end
+    absent = setdiff(f.variables, varlist, first.(levels))
+    isempty(absent) || throw(ArgumentError(
+        "the FEVD specification uses $(absent), which are not in `vars` = $(varlist); " *
+        "every variable the estimator needs must be simulated by the VAR"))
+    j = findfirst(isequal(f.shock), varlist)
+    r = findfirst(isequal(f.response), varlist)
+
+    Yall = _var_data(data, varlist)
+    Y = skipfirst ? Yall[2:end, :] : Yall
+    p, ic = _fevd_nlags(Y, nlags, criterion)
+    v = _var_ols(Y, p)
+    Ω = (v.U' * v.U) ./ v.Tu
+    _check_var_rank(Ω, varlist)
+    H = f.horizon
+    pseudo = _var_fevd(v.A, Ω, H; shock = j, response = r, cumulate = f.lhs === :cumul)
+
+    T = f.T
+    lpest = f.estimator !== :r2
+    simulated = setdiff(f.variables, first.(levels))
+    names = Tuple(vcat(simulated, first.(levels)))
+    cols = [findfirst(isequal(s), varlist) for s in simulated]
+    lcols = [findfirst(isequal(d), varlist) for d in last.(levels)]
+    keep = (p + burnin):(p + burnin + T - 1)
+    seeds = rand(rng, UInt64, nboot)
+    draws = fill(NaN, nboot, H + 1)
+    irf_draws = lpest ? fill(NaN, nboot, H + 1) : nothing
+    irfstr_draws = lpest ? fill(NaN, nboot, H + 1) : nothing
+    failures = zeros(Int, nboot)
+    errors = Vector{Any}(nothing, nboot)
+
+    function run_draw(b::Int)
+        try
+            drng = Xoshiro(seeds[b])
+            # var_bootstrap.m: iid residuals (the first of burnin + T draws is
+            # unused there, hence burnin + T - 1), then a random block of p
+            # actual observations as the initial condition
+            Ustar = v.U[rand(drng, 1:(v.Tu), burnin + T - 1), :]
+            init = rand(drng, 1:(v.Tu + 1))
+            Yb = _var_simulate(v.c, v.A, Ustar, Y[init:(init + p - 1), :])
+            # the origin of a rebuilt level is irrelevant: it enters through firstdiff
+            d = NamedTuple{names}((Tuple(Yb[keep, k] for k in cols)...,
+                Tuple(accumulate(+, Yb[keep, k]) for k in lcols)...))
+            all(c -> all(isfinite, c), d) || error("non-finite simulated data")
+            est = _gl_point(f, d)
+            all(isfinite, est.share) || error("non-finite share")
+            draws[b, :] = est.share
+            if lpest
+                irf_draws[b, :] = est.psi
+                irfstr_draws[b, :] = est.psi .* sqrt(est.σ²x)
+            end
+        catch err
+            err isa InterruptException && rethrow()
+            failures[b] = 1
+            errors[b] = err
+        end
+        return nothing
+    end
+    _run_draws!(run_draw, nboot, threaded)
+
+    kept, ok, nfail = _fevd_draw_moments(draws, failures, errors, "VAR bootstrap")
+    m = _col_mean(kept)
+    if lpest
+        irf_kept = irf_draws[ok, :]
+        irf_bc = 2 .* f.irf .- _col_mean(irf_kept)
+        irf_se_boot = _col_std(irf_kept)
+        irfstr_kept = irfstr_draws[ok, :]
+    else
+        irf_kept = irf_bc = irf_se_boot = irfstr_kept = nothing
+    end
+    return FEVDBootstrap(f, :var, kept, m, pseudo, f.share .- (m .- pseudo),
+        _col_std(kept), copy(f.se_pw), copy(f.se), irf_kept, irf_bc, irf_se_boot,
+        irfstr_kept, varlist, p, ic, skipfirst, Int(burnin), nothing, nothing, nothing,
+        nboot, nfail)
+end
+
+function _fevd_block(f::LPFEVD; blocklength::Integer, nboot::Int, rng::AbstractRNG,
+        threaded::Bool)
+    f.estimator === :r2 || throw(ArgumentError(
+        "method = :block (Kilian–Kim) is defined for the R² estimator only; use " *
+        ":var or :simulation for LP-A/LP-B"))
+    ℓ = Int(blocklength)
+    ℓ >= 1 || throw(ArgumentError("`blocklength` must be at least 1 (got $ℓ)"))
+    H = f.horizon
+    f.nobs[end] >= ℓ || throw(ArgumentError(
+        "`blocklength` = $ℓ exceeds the $(f.nobs[end]) observations of horizon $H"))
+    des = f.design
+    T, t0 = f.T, f.t0
+    seeds = rand(rng, UInt64, nboot)
+    draws = fill(NaN, nboot, H + 1)
+    failures = zeros(Int, nboot)
+    errors = Vector{Any}(nothing, nboot)
+
+    function run_draw(b::Int)
+        try
+            drng = Xoshiro(seeds[b])
+            rows = Int[]
+            for h in 0:H
+                Th = f.nobs[h + 1]
+                nb = cld(Th, ℓ)
+                resize!(rows, nb * ℓ)
+                for k in 1:nb
+                    start = rand(drng, t0:(T - h - ℓ + 1))
+                    for i in 1:ℓ
+                        rows[(k - 1) * ℓ + i] = start + i - 1
+                    end
+                end
+                draws[b, h + 1] = _gl_r2_rows(des, view(rows, 1:Th), h)
+            end
+            all(isfinite, view(draws, b, :)) || error("non-finite share")
+        catch err
+            err isa InterruptException && rethrow()
+            failures[b] = 1
+            errors[b] = err
+        end
+        return nothing
+    end
+    _run_draws!(run_draw, nboot, threaded)
+
+    kept, _, nfail = _fevd_draw_moments(draws, failures, errors, "block bootstrap")
+    m = _col_mean(kept)
+    return FEVDBootstrap(f, :block, kept, m, nothing, 2 .* f.share .- m, _col_std(kept),
+        copy(f.se_pw), copy(f.se), nothing, nothing, nothing, nothing, nothing, nothing,
+        nothing, nothing, nothing, ℓ, nothing, nothing, nboot, nfail)
+end
+
+function _fevd_simulation(f::LPFEVD; prewhiten::Bool, bound::Bool, nboot::Int,
+        rng::AbstractRNG, threaded::Bool)
+    H = f.horizon
+    est = f.estimator
+    clamp01 = bound && est === :r2
+    Vs = prewhiten ? f.avar_pw : f.avar
+    factors = Union{Nothing, Matrix{Float64}}[all(isfinite, Vs[h + 1]) ?
+                                              _gl_psd_factor(Vs[h + 1]) : nothing
+                                              for h in 0:H]
+    skipped = [h for h in 0:H if factors[h + 1] === nothing]
+    hint = prewhiten && any(h -> all(isfinite, f.avar[h + 1]), skipped) ?
+           " The covariance without prewhitening is available at some of them " *
+           "(`prewhiten = false`)." : ""
+    isempty(skipped) || @warn "fevdbootstrap (simulation): the " *
+          "$(prewhiten ? "prewhitened " : "")asymptotic variance is not available at " *
+          "horizons $(skipped) (see the warnings of `fevd`); the bias-corrected share " *
+          "and its standard errors are NaN there." * hint
+
+    seeds = rand(rng, UInt64, nboot)
+    draws = fill(NaN, nboot, H + 1)
+    failures = zeros(Int, nboot)
+    function run_draw(b::Int)
+        drng = Xoshiro(seeds[b])
+        for h in 0:H
+            M = factors[h + 1]
+            M === nothing && continue
+            s = _gl_sim_share(drng, f.theta[h + 1], M, est, h)
+            isfinite(s) || (failures[b] = 1)
+            draws[b, h + 1] = clamp01 ? clamp(s, 0.0, 1.0) : s
+        end
+        return nothing
+    end
+    _run_draws!(run_draw, nboot, threaded)
+
+    kept, _, nfail = _fevd_draw_moments(draws, failures, Vector{Any}(nothing, nboot), "simulation")
+    m = _col_mean(kept)
+    bc = 2 .* f.share .- m
+    # Delta-method standard errors at the bias-corrected share
+    # (SimulationAVarR2.m:180-190, SimulationAVarLP*.m:319-327)
+    se_pw = fill(NaN, H + 1)
+    se = fill(NaN, H + 1)
+    for h in 0:H
+        θ = f.theta[h + 1]
+        if est === :r2
+            g = _gl_r2_gradient(θ, bc[h + 1])
+        else
+            Nq = (length(θ) - 2) ÷ (h + 1)
+            g = _gl_lp_gradient(est, view(f.irf, 1:(h + 1)), f.shock_var, θ[end],
+                f.mse[h + 1], bc[h + 1], Nq)
+        end
+        se_pw[h + 1] = _gl_delta_se(g, f.avar_pw[h + 1])
+        se[h + 1] = _gl_delta_se(g, f.avar[h + 1])
+    end
+    # Only horizons with a bias-corrected share: where the covariance used for the
+    # draws is missing, bc (and so the gradient) is NaN, already reported above
+    negative = [h
+                for h in 0:H
+                if isfinite(bc[h + 1]) &&
+        ((isnan(se_pw[h + 1]) && all(isfinite, f.avar_pw[h + 1])) ||
+         (isnan(se[h + 1]) && all(isfinite, f.avar[h + 1])))]
+    isempty(negative) || @warn "fevdbootstrap (simulation): the delta-method variance " *
+          "at the bias-corrected share is negative at horizons $(negative) (the " *
+          "covariance is not positive semidefinite); the standard errors are NaN there."
+    return FEVDBootstrap(f, :simulation, kept, m, nothing, bc, _col_std(kept), se_pw, se,
+        nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing,
+        nothing, prewhiten, clamp01, nboot, nfail)
+end
+
+"""
+    fevdbootstrap(f::LPFEVD, data = nothing; method = :var, nboot = 2000,
+                  rng = Random.default_rng(), threaded = false, kwargs...) -> FEVDBootstrap
+
+Bias correction of a Gorodnichenko–Lee forecast-error variance decomposition
+(see [`fevd`](@ref)) by one of the three procedures of the paper. Each produces
+draws ``s^*_{b,h}``, ``b = 1, \\dots, B``, of the estimator, with mean
+``\\bar m_h``:
+
+| `method` | estimators | draws | bias-corrected share |
+|---|---|---|---|
+| `:var` | R², LP-A, LP-B | the estimator re-run on samples simulated from a VAR fitted to `data` | ``\\hat s_h - (\\bar m_h - s^{VAR}_h)`` |
+| `:block` | R² | the R² re-computed on moving blocks of regression rows | ``2\\hat s_h - \\bar m_h`` |
+| `:simulation` | R², LP-A, LP-B | ``\\theta^* \\sim N(\\hat\\theta_h, \\hat V_h)`` mapped into the share | ``2\\hat s_h - \\bar m_h`` |
+
+The bias-corrected share is never clamped to ``[0, 1]``.
+
+# VAR bootstrap (`method = :var`, `BootstrapVAR{R2,LPA,LPB}.m`)
+A reduced-form VAR is fitted by least squares to the variables `vars` of
+`data` (the data frame given to `fevd`). In each draw its residuals are
+resampled iid, the VAR is iterated from a randomly drawn block of ``p`` actual
+observations for `burnin` periods plus the ``T`` rows of the data, and the
+**same** FEVD specification (estimator, formulas, `dofadjust`) is re-estimated
+on the last ``T`` rows, without re-selecting any lag. The pseudo-truth
+``s^{VAR}_h`` is the FEVD of the fitted VAR for the Cholesky shock of the shock
+variable, with one-standard-deviation shocks; for a `cumul(v)` response the
+response row is cumulated, so that ``s^{VAR}_h`` refers to the same
+``y_{t+h} - y_{t-1}`` as the estimator.
+
+- `vars`: the VAR variables in Cholesky order. They must include every variable
+  of the specification (the response is `v` itself for `cumul(v)` and `y` in
+  levels for `ldiff(y)`), so that each draw can rebuild all regressors; further
+  variables may be added. The exception is a level `y` that enters only through
+  `lags(firstdiff(y), p)` while its first difference `v` (``\\Delta y_t = v_t``
+  in `data`) is in the VAR, e.g. `cumul(dy)` with `lags(firstdiff(y), 1)`: `y` is
+  then left out of the VAR (a VAR in both would be singular) and each draw
+  rebuilds it by cumulating the simulated `v`, as the reference does. The default orders the date-``t`` controls first,
+  then the shock, then the remaining variables of the formula in order of
+  appearance (for the application of the paper this gives
+  `[tfp, dy, infl, rr, effr]` for both shocks). ``s^{VAR}_h``, and hence the
+  bias correction, depends on this order.
+- `nlags = 1:10`: a fixed lag order, or candidates (each ``\\ge 1``) among which
+  `criterion` (`:hqic` (default), `:bic` or `:aic`) chooses on a common sample
+  with the maximum-likelihood residual covariance and ``n^2 p`` parameters.
+- `skipfirst = false`: with a `cumul(v)` response, `true` drops the first row
+  from the VAR, as the reference does when it forms ``\\Delta y`` from the level
+  (its VAR then has ``T - 1`` rows while the draws still have ``T``); use it to
+  reproduce the reference's lag choice and pseudo-truth exactly.
+- `burnin = 100`.
+
+For LP-A/B the result also holds the impulse-response draws and the
+bias-corrected responses ``2\\hat\\psi_h - \\mathrm{mean}_b\\,\\psi^*_{b,h}``.
+Not available with `trend ≥ 1`.
+
+# Block bootstrap (`method = :block`, R² only, `BootstrapBlockR2.m`)
+For each horizon separately, ``\\lceil T_h/\\ell \\rceil`` blocks of `blocklength
+= 4` consecutive regression rows ``(y_{t+h} - y_{t-1}, W_{t-1}, x_t, \\dots,
+x_{t+h})`` are drawn from the window ``t_0, \\dots, T-h`` (block starts uniform,
+non-circular), concatenated and truncated to ``T_h`` rows; the data are not
+re-simulated and the shock is not re-demeaned. The reference also draws and
+discards 100 burn-in rows, which is equivalent when 100 is a multiple of
+``\\ell``. Requires ``T_H \\ge \\ell``.
+
+# Asymptotic simulation (`method = :simulation`, `SimulationAVar*.m`, Appendices A/B)
+For each horizon separately, ``\\theta^*`` is drawn from the normal
+approximation ``N(\\hat\\theta_h, \\hat V_h)`` stored by `fevd` (`theta`,
+`avar_pw` with `prewhiten = true`, else `avar`), and mapped into the share:
+``\\theta_1^{*\\prime}\\theta_2^*/\\theta_3^*`` for R² (``\\theta_1 =
+\\Sigma_x^{-1}\\theta_2`` is not imposed), and the LP-A / LP-B formulas in the
+drawn ``\\psi``, ``\\sigma^2_x`` and ``\\sigma^2_h`` for LP-A/B. Draws with a
+nonpositive variance (``\\theta_3`` for R², ``\\sigma^2_x`` or ``\\sigma^2_h``
+for LP-A/B) are redrawn. A covariance that is not positive definite is repaired
+by flooring its eigenvalues at `eps()` (used for drawing only). With
+`bound = true` (default) the R² draws are clamped to ``[0, 1]`` before their
+mean is taken; LP-A/B draws are never clamped. Horizons whose covariance is
+`NaN` in `fevd` give `NaN`. `se_pw` and `se` are the delta-method standard errors
+evaluated at the **bias-corrected** share, the authors' choice
+(`SimulationAVarR2.m:180-182`); `fevd` reports them at ``\\hat s_h``.
+
+# Reproducibility
+Per-draw seeds are drawn from `rng` before the loop (draw ``b`` uses
+`Xoshiro(seed_b)` for all its horizons), so `threaded = true` and
+`threaded = false` give bit-identical results. Draws that fail (an exception or
+a non-finite share) are excluded, counted in `nfail`, and reported with a
+warning; the reference has no such handling.
+
+# Example
+```julia
+f = fevd(@formula(cumul(dy) ~ tfp + lags(tfp, 4) + lags(dy, 4) + lags(infl, 4) +
+                              lags(rr, 4) + lags(effr, 4)), df; horizon = 20)
+b = fevdbootstrap(f, df; method = :var, nboot = 2000, rng = Xoshiro(1))
+b.biascorrected
+fevdbootstrap(f; method = :block, rng = Xoshiro(1))
+fevdbootstrap(f; method = :simulation, rng = Xoshiro(1))
+```
+"""
+function fevdbootstrap(f::LPFEVD, data::Union{Nothing, AbstractDataFrame} = nothing;
+        method::Symbol = :var,
+        nboot::Integer = 2000,
+        rng::AbstractRNG = Random.default_rng(),
+        threaded::Bool = false,
+        vars::Union{Nothing, AbstractVector{Symbol}} = nothing,
+        nlags::Union{Integer, AbstractVector{<:Integer}} = 1:10,
+        criterion::Symbol = :hqic,
+        skipfirst::Bool = false,
+        burnin::Integer = 100,
+        blocklength::Integer = 4,
+        prewhiten::Bool = true,
+        bound::Bool = true)
+    method in _FEVD_METHODS || throw(ArgumentError(
+        "`method` must be :var, :block or :simulation (got :$method)"))
+    nboot >= 2 || throw(ArgumentError(
+        "`nboot` must be at least 2 (got $nboot): the draws' standard deviation " *
+        "needs two of them"))
+    B = Int(nboot)
+    if method === :var
+        data === nothing && throw(ArgumentError(
+            "method = :var fits a VAR to the data; pass the data frame given to `fevd`"))
+        return _fevd_var(f, data; vars, nlags, criterion, skipfirst, burnin,
+            nboot = B, rng, threaded)
+    elseif method === :block
+        return _fevd_block(f; blocklength, nboot = B, rng, threaded)
+    end
+    return _fevd_simulation(f; prewhiten, bound, nboot = B, rng, threaded)
+end
+
+function fevdbootstrap(f::LPFEVD, data; kwargs...)
+    fevdbootstrap(f, DataFrame(data); kwargs...)
+end
+
+const _FEVD_METHOD_LABELS = Dict(:var => "VAR residual bootstrap",
+    :block => "moving-block bootstrap", :simulation => "asymptotic simulation")
+
+function Base.show(io::IO, b::FEVDBootstrap)
+    print(io, "FEVDBootstrap(estimator=:", b.estimator, ", method=:", b.method,
+        ", horizon=0:", b.horizon, ", nboot=", b.nboot, ")")
+end
+
+function Base.show(io::IO, ::MIME"text/plain", b::FEVDBootstrap)
+    f = b.fevd
+    println(io, "FEVDBootstrap (Gorodnichenko–Lee ", _fevd_label(f.estimator), ", ",
+        _FEVD_METHOD_LABELS[b.method], ")")
+    println(io, "  Response:   ", f.spec.lhs_term)
+    println(io, "  Shock:      ", f.shock)
+    if b.method === :var
+        println(io, "  VAR:        ", join(string.(b.vars), ", "), "   (p = ", b.nlags,
+            b.ic === nothing ? "" : ", by :$(b.ic.criterion)", ")",
+            b.skipfirst ? ", rows 2:T" : "", ", burn-in ", b.burnin)
+    elseif b.method === :block
+        println(io, "  Blocks:     length ", b.blocklength)
+    else
+        println(io, "  Covariance: ", b.prewhiten ? "prewhitened" : "not prewhitened",
+            b.bound ? ", R² draws clamped to [0, 1]" : "")
+    end
+    println(io, "  Draws:      ", b.nboot, b.nfail > 0 ? " ($(b.nfail) failed)" : "")
+    hz = collect(0:(f.horizon))
+    if b.pseudo_truth === nothing
+        data = (; h = hz, s = f.share, bc = b.biascorrected, m = b.mean_draws,
+            sb = b.se_boot)
+        labels = ["Horizon", "Share", "Bias-corr.", "Mean draws", "s.e. (draws)"]
+    else
+        data = (; h = hz, s = f.share, bc = b.biascorrected, m = b.mean_draws,
+            pt = b.pseudo_truth, sb = b.se_boot)
+        labels = ["Horizon", "Share", "Bias-corr.", "Mean draws", "VAR share",
+            "s.e. (draws)"]
+    end
+    nc = length(labels)
+    pretty_table(io, data;
+        column_labels = labels,
+        title = "Forecast-error variance share of $(f.shock)",
+        formatters = [fmt__round(4, collect(2:nc))],
+        alignment = fill(:r, nc),
+        table_format = TextTableFormat(borders = text_table_borders__unicode_rounded))
+    return nothing
+end
+
+"""
+    FEVDSummary
+
+Pointwise confidence band for a Gorodnichenko–Lee forecast-error variance
+share, built by [`summarize`](@ref) from an [`LPFEVD`](@ref) or a
+[`FEVDBootstrap`](@ref). Displays with PrettyTables; `DataFrame(s)` gives the
+columns `horizon, share, estimate, se, lower, upper`.
+
+# Fields
+- `response`, `shock`, `estimator` (`:r2`, `:lpa`, `:lpb`);
+- `method`: `:asymptotic` for an `LPFEVD`, else the bias-correction procedure
+  of the bootstrap (`:var`, `:block`, `:simulation`);
+- `band`: `:normal` (``\\text{centre} \\pm z\\cdot\\text{s.e.}``) or `:shift`
+  (bootstrap quantiles translated to the centre);
+- `level`, `biascorrected` (whether the band is centred on the bias-corrected
+  share), `prewhiten` (whether a `:normal` band uses the prewhitened standard
+  error; `nothing` for `:shift`);
+- `horizon`, `share` (the estimate ``\\hat s_h``), `estimate` (the centre of
+  the band: the bias-corrected share or ``\\hat s_h``), `se` (the standard
+  error of the band: the delta-method one for `:normal`, the standard
+  deviation of the draws for `:shift`), `lower`, `upper`.
+"""
+struct FEVDSummary
+    response::Symbol
+    shock::Symbol
+    estimator::Symbol
+    method::Symbol
+    band::Symbol
+    level::Float64
+    biascorrected::Bool
+    prewhiten::Union{Nothing, Bool}
+    horizon::Vector{Int}
+    share::Vector{Float64}
+    estimate::Vector{Float64}
+    se::Vector{Float64}
+    lower::Vector{Float64}
+    upper::Vector{Float64}
+end
+
+function DataFrames.DataFrame(s::FEVDSummary)
+    DataFrame(horizon = s.horizon, share = s.share, estimate = s.estimate, se = s.se,
+        lower = s.lower, upper = s.upper)
+end
+
+function Base.show(io::IO, s::FEVDSummary)
+    print(io, "FEVDSummary(estimator=:", s.estimator, ", method=:", s.method,
+        ", band=:", s.band, ", level=", s.level, ")")
+end
+
+function Base.show(io::IO, ::MIME"text/plain", s::FEVDSummary)
+    what = s.method === :asymptotic ? "delta method" : _FEVD_METHOD_LABELS[s.method]
+    println(
+        io, "FEVDSummary (Gorodnichenko–Lee ", _fevd_label(s.estimator), ", ", what, ")")
+    println(io, "  Response:   ", s.response)
+    println(io, "  Shock:      ", s.shock)
+    se_label = s.band === :shift ? "s.e. (draws)" :
+               s.prewhiten ? "s.e. (PW)" : "s.e."
+    print(io, "  Band:       ",
+        s.band === :shift ? "bootstrap quantiles shifted to the centre" :
+        "normal, centre ± z·$(se_label)",
+        s.method === :asymptotic ? "" :
+        s.biascorrected ? ", bias-corrected" : ", uncorrected")
+    pct = round(s.level * 100; digits = 1)
+    pct_s = isinteger(pct) ? string(Int(pct)) : string(pct)
+    if s.biascorrected
+        data = (; h = s.horizon, s = s.share, bc = s.estimate, se = s.se, lo = s.lower,
+            hi = s.upper)
+        labels = ["Horizon", "Share", "Bias-corr.", se_label, "Lower $pct_s%",
+            "Upper $pct_s%"]
+    else
+        data = (; h = s.horizon, s = s.share, se = s.se, lo = s.lower, hi = s.upper)
+        labels = ["Horizon", "Share", se_label, "Lower $pct_s%", "Upper $pct_s%"]
+    end
+    println(io)
+    nc = length(labels)
+    pretty_table(io, data;
+        column_labels = labels,
+        title = "Forecast-error variance share of $(s.shock)",
+        formatters = [fmt__round(4, collect(2:nc))],
+        alignment = fill(:r, nc),
+        table_format = TextTableFormat(borders = text_table_borders__unicode_rounded))
+    return nothing
+end
+
+# MATLAB's `quantile`: Hyndman–Fan type 5, plotting positions (i - 0.5)/n with
+# linear interpolation, clamped at the extremes (spec Q37). `_boot_interval`
+# uses type 7.
+_gl_quantile5(v::AbstractVector{<:Real}, p::Real) = quantile(v, p; alpha = 0.5, beta = 0.5)
+
+"""
+    summarize(f::LPFEVD; level=0.90, prewhiten=true) -> FEVDSummary
+
+Normal confidence band ``\\hat s_h \\pm z_{(1+\\text{level})/2}\\,
+\\widehat{\\mathrm{se}}_h`` for a Gorodnichenko–Lee FEVD, with the delta-method
+standard error at ``\\hat s_h`` (`se_pw` with `prewhiten = true`, else `se`).
+Deterministic; the band is not clamped to ``[0, 1]`` and is `NaN` at horizons
+whose standard error is `NaN`. Bias-corrected bands come from
+[`fevdbootstrap`](@ref).
+"""
+function summarize(f::LPFEVD; level::Real = 0.90, prewhiten::Bool = true)
+    level_f = _check_level(level)
+    se = copy(prewhiten ? f.se_pw : f.se)
+    z = quantile(Normal(), 0.5 + level_f / 2)
+    return FEVDSummary(f.response, f.shock, f.estimator, :asymptotic, :normal, level_f,
+        false, prewhiten, collect(0:(f.horizon)), copy(f.share), copy(f.share), se,
+        f.share .- z .* se, f.share .+ z .* se)
+end
+
+"""
+    summarize(b::FEVDBootstrap; level=0.90, band=:shift, biascorrected=true,
+              prewhiten=true) -> FEVDSummary
+
+Pointwise confidence band for a bias-corrected Gorodnichenko–Lee FEVD. With
+``c_h`` the centre — the bias-corrected share ``\\tilde s_h`` (`b.biascorrected`)
+when `biascorrected = true`, the estimate ``\\hat s_h`` otherwise — and
+``q \\in \\{\\alpha/2, 1-\\alpha/2\\}``, ``\\alpha = 1 - `` `level`:
+
+- `band = :shift` (the paper's band, `cbIndicator = 0`):
+  ``Q_q(s^*_{\\cdot,h}) + c_h - \\bar m_h``, the distribution of the draws
+  translated so that its mean is the centre. ``Q_q`` is MATLAB's `quantile`
+  (Hyndman–Fan type 5). With `biascorrected = false` this is the uncorrected band
+  ``Q_q(s^*) + \\hat s_h - \\bar m_h`` drawn in the paper's figures
+  (`AppSimulation.m:325-329`). The reported `se` is the standard deviation of the
+  draws.
+- `band = :normal` (`cbIndicator = 1` / `2`): ``c_h + \\Phi^{-1}(q)\\,
+  \\mathrm{se}_h`` with `b.se_pw` (`prewhiten = true`) or `b.se`. These are the
+  delta-method standard errors at ``\\hat s_h`` for `:var` and `:block` and at
+  ``\\tilde s_h`` for `:simulation` (see [`FEVDBootstrap`](@ref)); with
+  `biascorrected = false` the same band is translated to ``\\hat s_h``.
+
+The keyword is `band` rather than `method` (the name `summarize(::LPBootstrap)`
+uses for its interval construction) because `method` already names the
+bias-correction procedure of [`fevdbootstrap`](@ref) and of `b.method`. Bands
+are pointwise and never clamped to ``[0, 1]``; they are `NaN` at horizons
+without draws (`:simulation` horizons whose covariance is `NaN`).
+"""
+function summarize(b::FEVDBootstrap; level::Real = 0.90, band::Symbol = :shift,
+        biascorrected::Bool = true, prewhiten::Bool = true)
+    band in (:shift, :normal) || throw(ArgumentError(
+        "`band` must be :shift or :normal (got :$band)"))
+    level_f = _check_level(level)
+    α = 1 - level_f
+    f = b.fevd
+    H = f.horizon
+    centre = copy(biascorrected ? b.biascorrected : f.share)
+    lower = fill(NaN, H + 1)
+    upper = fill(NaN, H + 1)
+    if band === :shift
+        se = copy(b.se_boot)
+        for h in 1:(H + 1)
+            col = view(b.draws, :, h)
+            (!isempty(col) && all(isfinite, col)) || continue
+            shift = centre[h] - b.mean_draws[h]
+            lower[h] = _gl_quantile5(col, α / 2) + shift
+            upper[h] = _gl_quantile5(col, 1 - α / 2) + shift
+        end
+        pw = nothing
+    else
+        se = copy(prewhiten ? b.se_pw : b.se)
+        z = quantile(Normal(), 1 - α / 2)
+        lower .= centre .- z .* se
+        upper .= centre .+ z .* se
+        pw = prewhiten
+    end
+    return FEVDSummary(f.response, f.shock, f.estimator, b.method, band, level_f,
+        biascorrected, pw, collect(0:H), copy(f.share), centre, se, lower, upper)
 end
 
 # ============================================================================
@@ -3590,6 +5380,96 @@ end
     BootstrapIRFPlot(b, Float64.(levels), method)
 end
 
+"""
+    FEVDPlot
+
+Internal wrapper for dispatching the plot recipe on [`LPFEVD`](@ref) and
+[`FEVDBootstrap`](@ref). Users should call `plot(f; levels, prewhiten)` or
+`plot(b; levels, band, biascorrected, prewhiten)` directly.
+"""
+struct FEVDPlot{F <: Union{LPFEVD, FEVDBootstrap}}
+    fevd::F
+    levels::Vector{Float64}
+    band::Symbol
+    biascorrected::Bool
+    prewhiten::Bool
+end
+
+function _fevd_plot_summary(f::LPFEVD, w::FEVDPlot, level)
+    summarize(f; level,
+        prewhiten = w.prewhiten)
+end
+function _fevd_plot_summary(b::FEVDBootstrap, w::FEVDPlot, level)
+    summarize(b; level,
+        band = w.band, biascorrected = w.biascorrected, prewhiten = w.prewhiten)
+end
+
+@recipe function f(wrapper::FEVDPlot)
+    obj = wrapper.fevd
+    sorted_levels = sort(wrapper.levels; rev = true)
+    for level in sorted_levels
+        (level <= 0 || level >= 1) && throw(ArgumentError("levels must be in (0, 1)"))
+    end
+    bands = [_fevd_plot_summary(obj, wrapper, lv) for lv in sorted_levels]
+    centre = bands[1].estimate
+    horizons = bands[1].horizon
+    corrected = bands[1].biascorrected
+
+    # Shares live in [0, 1], but neither the bias-corrected share nor the bands
+    # are clamped (and LP-A is unbounded), so the default range covers both.
+    finite = filter(isfinite, vcat(centre, bands[1].lower, bands[1].upper))
+    lo = isempty(finite) ? 0.0 : min(0.0, minimum(finite))
+    hi = isempty(finite) ? 1.0 : max(1.0, maximum(finite))
+
+    xlabel --> "Horizon"
+    ylabel --> "FEVD share of $(obj.shock)"
+    ylims --> (lo, hi)
+    linewidth --> 2
+    fillalpha --> 0.3
+    legend --> :best
+
+    # Bands are asymmetric for the shifted bootstrap quantiles, so the ribbon
+    # takes a (below, above) pair.
+    if length(sorted_levels) > 1
+        for (idx, s) in enumerate(bands[2:end])
+            @series begin
+                ribbon := (centre .- s.lower, s.upper .- centre)
+                fillalpha := 0.3 + 0.15 * idx
+                label := ""
+                linewidth := 0
+                linecolor := :transparent
+                horizons, centre
+            end
+        end
+    end
+
+    # The uncorrected estimate next to a bias-corrected centre
+    if corrected
+        @series begin
+            ribbon := nothing
+            fillrange := nothing
+            label := "Estimate"
+            linestyle := :dash
+            linewidth := 1.5
+            horizons, bands[1].share
+        end
+    end
+
+    widest = bands[1]
+    label --> (corrected ? "Bias-corrected" : "FEVD")
+    ribbon --> (centre .- widest.lower, widest.upper .- centre)
+    return horizons, centre
+end
+
+@recipe function f(fv::LPFEVD; levels = [0.90], prewhiten = true)
+    FEVDPlot(fv, Float64.(levels), :normal, false, prewhiten)
+end
+
+@recipe function f(b::FEVDBootstrap; levels = [0.90], band = :shift,
+        biascorrected = true, prewhiten = true)
+    FEVDPlot(b, Float64.(levels), band, biascorrected, prewhiten)
+end
+
 # ============================================================================
 # MacroEconometricTools Integration - LocalProjectionIRFResult Conversion
 # ============================================================================
@@ -3749,6 +5629,98 @@ function as_irf_result(b::LPBootstrap;
     return LocalProjectionIRFResult{T, typeof(data)}(
         data, stderr_arr, lower, upper, coverage, meta
     )
+end
+
+# Shared body of the two FEVD conversions: `summaries` are FEVDSummary bands,
+# one per coverage level, with a common centre and standard error.
+function _fevd_irf_result(summaries::Vector{FEVDSummary}, coverage::Vector{Float64},
+        meta::NamedTuple)
+    T = Float64
+    s1 = summaries[1]
+    H = length(s1.horizon)
+    _ax(v) = AxisArray(
+        reshape(collect(T, v), 1, 1, H),
+        Axis{:response}([s1.response]),
+        Axis{:shock}([s1.shock]),
+        Axis{:horizon}(0:(H - 1))
+    )
+    data = _ax(s1.estimate)
+    lower = [_ax(s.lower) for s in summaries]
+    upper = [_ax(s.upper) for s in summaries]
+    return LocalProjectionIRFResult{T, typeof(data)}(
+        data, _ax(s1.se), lower, upper, coverage, meta
+    )
+end
+
+"""
+    as_irf_result(f::LPFEVD; coverage=[0.68, 0.90], prewhiten=true)
+
+Convert a Gorodnichenko–Lee FEVD ([`LPFEVD`](@ref)) to a
+`LocalProjectionIRFResult`. The `data` array holds the variance **shares**
+``\\hat s_h`` (not impulse responses), on the `response × shock × horizon`
+axes; `stderr` the delta-method standard errors (`se_pw` with `prewhiten =
+true`, else `se`); the bands are the normal ones of [`summarize`](@ref). The
+metadata records `fevd = true` and `quantity = :fevd_share`, with the
+estimator and the sample.
+"""
+function as_irf_result(f::LPFEVD;
+        coverage::Vector{Float64} = [0.68, 0.90],
+        prewhiten::Bool = true)
+    summaries = [summarize(f; level = c, prewhiten = prewhiten) for c in coverage]
+    meta = (horizon = f.horizon,
+        formula = f.formula,
+        irf_formula = f.irf_formula,
+        term = f.shock,
+        fevd = true,
+        quantity = :fevd_share,
+        estimator = f.estimator,
+        prewhiten = prewhiten,
+        T = f.T,
+        t0 = f.t0,
+        nobs = f.nobs,
+        bias_corrected = false)
+    return _fevd_irf_result(summaries, coverage, meta)
+end
+
+"""
+    as_irf_result(b::FEVDBootstrap; coverage=[0.68, 0.90], band=:shift,
+                  biascorrected=true, prewhiten=true)
+
+Convert a bias-corrected Gorodnichenko–Lee FEVD ([`FEVDBootstrap`](@ref)) to a
+`LocalProjectionIRFResult`. `data` holds the centre of the bands of
+[`summarize`](@ref) under the same keywords — the bias-corrected shares by
+default — and `stderr` their standard error (the standard deviation of the
+draws for `band = :shift`). The metadata records `fevd = true`,
+`quantity = :fevd_share`, `bootstrap = true`, the procedure
+(`bootstrap_method`), the band, the uncorrected shares (`share`), the VAR
+pseudo-truth for `:var`, and the draw counts.
+"""
+function as_irf_result(b::FEVDBootstrap;
+        coverage::Vector{Float64} = [0.68, 0.90],
+        band::Symbol = :shift,
+        biascorrected::Bool = true,
+        prewhiten::Bool = true)
+    summaries = [summarize(b; level = c, band, biascorrected, prewhiten)
+                 for c in coverage]
+    f = b.fevd
+    meta = (horizon = f.horizon,
+        formula = f.formula,
+        irf_formula = f.irf_formula,
+        term = f.shock,
+        fevd = true,
+        quantity = :fevd_share,
+        estimator = f.estimator,
+        bootstrap = true,
+        bootstrap_method = b.method,
+        band = band,
+        bias_corrected = biascorrected,
+        share = copy(f.share),
+        pseudo_truth = b.pseudo_truth,
+        nboot = b.nboot,
+        nfail = b.nfail,
+        var_lags = b.nlags,
+        var_variables = b.vars)
+    return _fevd_irf_result(summaries, coverage, meta)
 end
 
 end # module LocalProjections
