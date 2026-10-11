@@ -15,7 +15,8 @@ makedocs(
             "Getting Started" => "tutorials/basic.md",
             "Transformations" => "tutorials/transformations.md",
             "Inference and Plotting" => "tutorials/inference.md",
-            "Ramey-Zubairy Multipliers" => "tutorials/ramey_zubairy.md"
+            "Ramey-Zubairy Multipliers" => "tutorials/ramey_zubairy.md",
+            "FEVD (Gorodnichenko-Lee)" => "tutorials/fevd.md"
         ],
         "Inference Procedures Guide" => "inference_procedures_guide.md",
         "API Reference" => "api.md"
