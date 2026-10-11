@@ -117,8 +117,6 @@ struct LocalProjectionCovariance{E}
     horizon::Int
 end
 
-# NOTE: Plot recipes, coefpath, vcov, and summarize are defined after LPResult below
-
 """
     LocalProjectionIV
 

@@ -1,3 +1,7 @@
+# ============================================================================
+# Standard errors and IRF summary tables
+# ============================================================================
+
 """
     stderror(cov; term)
 
@@ -218,6 +222,10 @@ summarize(lp_result, cov; level = 0.90)  # Student-t_B critical values
 """
 ewc_bandwidth(T0::Integer) = max(1, floor(Int, 0.41 * T0^(2 / 3)))
 ewc_bandwidth(lp::LPEstimate) = ewc_bandwidth(Int(nobs(lp.models[1])))
+
+# ============================================================================
+# Asymptotic confidence bands (summarize)
+# ============================================================================
 
 """
     summarize(lp, cov; term=lp.shock, level=0.95, scale=1.0) -> IRFSummary

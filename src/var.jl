@@ -204,6 +204,10 @@ function Base.show(io::IO, ::MIME"text/plain", s::VARLagSelection)
     return nothing
 end
 
+# ============================================================================
+# VAR primitives shared by varbootstrap and fevdbootstrap (Pope, IRF, simulation, FEVD)
+# ============================================================================
+
 """
     _pope_biascorrect(A, Σu, T) -> (A_corrected, δ)
 

@@ -69,19 +69,6 @@ function _shock_terms(lp)
     return (Symbol(st.shock, "_", st.labels[1]), Symbol(st.shock, "_", st.labels[2]))
 end
 
-# Regime of a state-dependent projection, given as 1/2 or as its label
-function _regime_index(st::LPState, regime)
-    regime === nothing && throw(ArgumentError(
-        "state-dependent projection: pass `regime = 1` ($(st.labels[1])) or " *
-        "`regime = 2` ($(st.labels[2])); the Montiel Olea–Pflueger test covers one " *
-        "endogenous regressor at a time"))
-    regime isa Integer && regime in (1, 2) && return Int(regime)
-    idx = findfirst(==(String(regime)), collect(st.labels))
-    idx === nothing && throw(ArgumentError(
-        "unknown regime $regime; use 1, 2, \"$(st.labels[1])\" or \"$(st.labels[2])\""))
-    return idx
-end
-
 # ============================================================================
 # Test of equal responses across regimes (state-dependent projections)
 # ============================================================================

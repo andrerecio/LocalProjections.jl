@@ -1,13 +1,6 @@
 # ============================================================================
-# Forecast-error variance decomposition (Gorodnichenko & Lee 2020)
+# FEVD matrix core: R², LP-A/LP-B estimators, gradients, asymptotic variances
 # ============================================================================
-
-const _FEVD_ESTIMATORS = (:r2, :lpa, :lpb)
-
-function _fevd_label(estimator::Symbol)
-    estimator === :r2 ? "R²" :
-    estimator === :lpa ? "LP-A" : "LP-B"
-end
 
 """
     _gl_bandwidth(n) -> Int
