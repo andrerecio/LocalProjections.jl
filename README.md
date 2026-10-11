@@ -15,8 +15,9 @@ that extends the inference procedures: equal-weighted-cosine (EWC) HAR
 inference with Student-`t` critical values, the Herbst–Johannsen bias
 correction, the VAR residual moving-block bootstrap with VAR lag selection,
 horizon-tracking regressors for cumulative multipliers, state-dependent
-local projections, long-difference local projections (Piger–Stockwell), and
-the Hall–Barro–Redlick transformation for fiscal multipliers.
+local projections, long-difference local projections (Piger–Stockwell),
+the Hall–Barro–Redlick transformation for fiscal multipliers, and the
+Gorodnichenko–Lee local-projection forecast-error variance decompositions.
 
 ## Contents
 
@@ -27,6 +28,7 @@ the Hall–Barro–Redlick transformation for fiscal multipliers.
   - [Bias correction](#bias-correction)
   - [Lag selection](#lag-selection)
   - [Bootstrap inference](#bootstrap-inference)
+  - [Variance decompositions](#variance-decompositions)
   - [Instrumental variables](#instrumental-variables)
   - [Worked example: Ramey–Zubairy (2018)](#worked-example-rameyzubairy-2018)
   - [Worked example: Piger–Stockwell (2025)](#worked-example-pigerstockwell-2025)
@@ -291,6 +293,44 @@ Per-draw seeds are drawn from `rng` before the loop, so results are
 reproducible and identical whether or not `threaded = true` is passed. On a
 typical macro sample (T ≈ 240, horizon 20) a draw costs about a millisecond,
 dominated by rebuilding the StatsModels design rather than by linear algebra.
+
+## Variance decompositions
+
+`fevd` estimates the share of the forecast-error variance of
+`y_{t+h} − y_{t−1}` due to an observed shock with the local-projection
+estimators of Gorodnichenko and Lee (2020, *JBES*): the `R²` of the forecast
+error on the current and future shocks (`:r2`, the paper's main estimator), and
+the two LP-based ratios `:lpa` and `:lpb`. The formula is the local projection;
+its lags form the information set. `fevdbootstrap` bias-corrects the shares by
+the paper's VAR bootstrap (`:var`), Kilian–Kim block bootstrap (`:block`, R²
+only) or asymptotic simulation (`:simulation`). On the paper's data
+(`docs/src/data/gorodnichenko_lee.csv`, TFP shock, GDP):
+
+```julia
+using LocalProjections, DataFrames, CSV, StatsModels, Random, Plots
+
+gl = CSV.read("docs/src/data/gorodnichenko_lee.csv", DataFrame)
+fm = @formula(cumul(dy) ~ tfp + lags(tfp, 4) + lags(dy, 4) + lags(infl, 4) +
+                          lags(rr, 4) + lags(effr, 4))
+f = fevd(fm, gl; horizon = 20, estimator = :r2)
+f.share[[1, 9, 21]]                 # 0.0437, 0.1025, 0.3906 at h = 0, 8, 20
+
+# VAR bootstrap: HQIC over 1:10 picks p = 2 on [tfp, dy, infl, rr, effr]
+b = fevdbootstrap(f, gl; method = :var, nboot = 2000, rng = Xoshiro(1))
+b.biascorrected[[1, 9, 21]]         # 0.0463, 0.0692, 0.2817
+summarize(b; level = 0.90)          # the paper's band: shifted type-5 quantiles
+plot(b)                             # bias-corrected share, band, estimate dashed
+
+# LP-B with the paper's parsimonious impulse-response regression
+fl = fevd(fm, gl; horizon = 20, estimator = :lpb,
+          irf_formula = @formula(cumul(dy) ~ tfp + lags(tfp, 1) + lags(firstdiff(y), 1)))
+summarize(fevdbootstrap(fl; method = :simulation, rng = Xoshiro(1)))
+```
+
+Bias-corrected shares and bands are not clamped to `[0, 1]`. The
+[FEVD tutorial](docs/src/tutorials/fevd.md) covers the estimators, the band
+conventions and the points where the port departs from the authors' MATLAB
+code.
 
 ## Instrumental variables
 
@@ -600,8 +640,9 @@ regenerates the figure.
 ## Plotting
 
 Plots.jl recipes cover every result type: `plot(lp, estimator_or_cov; term,
-levels)` for OLS, IV and bias-corrected results, and `plot(b; levels, method)`
-for bootstrap bands. Loading Makie enables `irfplot`, `irfplot!` and
+levels)` for OLS, IV and bias-corrected results, `plot(b; levels, method)`
+for bootstrap bands, and `plot(f)` / `plot(b; band, biascorrected)` for
+variance decompositions. Loading Makie enables `irfplot`, `irfplot!` and
 `irfplot_axis` through a package extension. `as_irf_result` converts any
 result into the `LocalProjectionIRFResult` type of MacroEconometricTools.jl.
 
@@ -620,6 +661,10 @@ result into the `LocalProjectionIRFResult` type of MacroEconometricTools.jl.
     state-dependent projections are rejected with an explanation, and so are
     long-difference responses (`ldiff`, `hbr`); the bootstrap also rejects
     anchored responses. The VAR columns must be free of `missing` and `NaN`.
+  - **Variance decompositions.** `fevd` covers the R², LP-A and LP-B estimators
+    with `cumul(v)` or `ldiff(y)` responses on gap-free data. Not implemented:
+    the VAR FEVD estimator and its VAR–VAR bootstrap, joint inference across
+    horizons, Driscoll–Kraay standard errors, and `method = :var` with a trend.
   - **Finite-sample factor on `lpiv`.** Kernel HAC and EWC on `lpiv` results
     omit the `n/(n−k)` factor that `lp` applies. `vcov(Bartlett(6), lpiv_result;
     dofadjust = true)` adds it to kernel HAC, putting `lp` and `lpiv` on one

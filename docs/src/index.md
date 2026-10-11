@@ -46,3 +46,4 @@ summarize(lp_result, cov)
 - [Getting Started](tutorials/basic.md) - Basic local projections without transformations
 - [Transformations](tutorials/transformations.md) - Lags, leads, and cumulative responses
 - [Inference and Plotting](tutorials/inference.md) - Robust standard errors and visualization
+- [FEVD (Gorodnichenko–Lee)](tutorials/fevd.md) - Forecast-error variance decompositions with local projections and their bias corrections
