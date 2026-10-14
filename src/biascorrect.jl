@@ -65,6 +65,10 @@ lag-``j`` autocovariance pairing is then misaligned at the gap. The
 correction therefore additionally assumes the horizon-zero estimation
 sample is a contiguous block of the original time axis.
 
+A projection estimated with `sample = :common` is rejected: its horizons share
+one sample instead of losing ``h`` observations each, which is not the setting
+the ``1/(T_0 - h)`` correction is derived for.
+
 Only defined for OLS local projections — the correction is derived for
 least-squares LP coefficients, not for IV estimators.
 
@@ -80,6 +84,10 @@ function biascorrect(lp_result::LocalProjection)
     lp_result.state === nothing || throw(ArgumentError(
         "the Herbst–Johannsen correction is derived for a linear projection and " *
         "does not apply to a state-dependent one"))
+    lp_result.sample === :common && throw(ArgumentError(
+        "the Herbst–Johannsen correction is derived for horizon-specific samples, " *
+        "where the horizon-h regression uses T₀ − h observations; the projection " *
+        "was estimated with sample = :common, re-estimate it with sample = :horizon"))
     _rhs_tracks_horizon(lp_result.base_formula) && throw(ArgumentError(
         "the Herbst–Johannsen correction assumes the same regressors at every " *
         "horizon, but the formula has a horizon-tracking right-hand-side term " *

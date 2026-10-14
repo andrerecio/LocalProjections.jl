@@ -30,12 +30,13 @@ struct LocalProjection{M <: OLSMatrixEstimator}
     coef_names::Vector{String}  # Coefficient names (constant across all horizons)
     tautological_h0::Bool       # true when response == shock (h=0 is trivial: coef=1, SE=0)
     state::Union{Nothing, LPState}  # `nothing` for a linear projection
+    sample::Symbol              # :horizon (per-horizon samples) or :common
 end
 
 function LocalProjection(models::Vector{M}, horizon, response, shock, base_formula,
         coef_names, tautological_h0) where {M <: OLSMatrixEstimator}
     return LocalProjection{M}(models, horizon, response, shock, base_formula,
-        coef_names, tautological_h0, nothing)
+        coef_names, tautological_h0, nothing, :horizon)
 end
 
 """
@@ -65,6 +66,7 @@ function Base.show(io::IO, ::MIME"text/plain", lp::LocalProjection)
     println(io, "  Horizon:    0:$(lp.horizon)")
     println(io, "  Formula:    $(lp.base_formula)")
     lp.state === nothing || println(io, "  State:      ", _describe_state(lp.state))
+    println(io, "  Sample:     ", _describe_sample(lp))
     println(io, "  Coef names: $(lp.coef_names)")
 end
 
@@ -102,7 +104,7 @@ function Base.:+(lp::LocalProjection{M}, v::VcovSpec{V}) where {M <: OLSMatrixEs
     return LocalProjection{M_new}(
         convert(Vector{M_new}, new_models),
         lp.horizon, lp.response, lp.shock, lp.base_formula, lp.coef_names,
-        lp.tautological_h0, lp.state
+        lp.tautological_h0, lp.state, lp.sample
     )
 end
 
@@ -133,13 +135,15 @@ struct LocalProjectionIV{M <: IVMatrixEstimator}
     instrument_names::Vector{String}
     tautological_h0::Bool       # true when response == shock (h=0 is trivial: coef=1, SE=0)
     state::Union{Nothing, LPState}  # `nothing` for a linear projection
+    sample::Symbol              # :horizon (per-horizon samples) or :common
 end
 
 function LocalProjectionIV(models::Vector{M}, horizon, response, shock, base_formula,
         coef_names, endogenous_names, instrument_names,
         tautological_h0) where {M <: IVMatrixEstimator}
     return LocalProjectionIV{M}(models, horizon, response, shock, base_formula,
-        coef_names, endogenous_names, instrument_names, tautological_h0, nothing)
+        coef_names, endogenous_names, instrument_names, tautological_h0, nothing,
+        :horizon)
 end
 
 """
@@ -161,6 +165,12 @@ StatsModels.coefnames(lpiv::LocalProjectionIV, h::Int) = lpiv.coef_names
 """Type alias for dispatching shared methods on both OLS and IV local projections."""
 const LPResult = Union{LocalProjection, LocalProjectionIV}
 
+function _describe_sample(r::LPResult)
+    n = [Int(nobs(m)) for m in r.models]
+    r.sample === :common && return "common, T = $(n[1]) at every horizon"
+    return "per horizon, T = $(n[1]) at h = 0 to $(n[end]) at h = $(r.horizon)"
+end
+
 function Base.show(io::IO, lpiv::LocalProjectionIV)
     print(io,
         "LocalProjectionIV(horizon=0:$(lpiv.horizon), response=$(lpiv.response), shock=$(lpiv.shock))")
@@ -173,6 +183,7 @@ function Base.show(io::IO, ::MIME"text/plain", lpiv::LocalProjectionIV)
     println(io, "  Horizon:      0:$(lpiv.horizon)")
     println(io, "  Formula:      $(lpiv.base_formula)")
     lpiv.state === nothing || println(io, "  State:        ", _describe_state(lpiv.state))
+    println(io, "  Sample:       ", _describe_sample(lpiv))
     println(io, "  Endogenous:   $(lpiv.endogenous_names)")
     println(io, "  Instruments:  $(lpiv.instrument_names)")
     println(io, "  Coef names:   $(lpiv.coef_names)")
@@ -198,7 +209,7 @@ function Base.:+(lpiv::LocalProjectionIV{M}, v::VcovSpec{V}) where {
         convert(Vector{M_new}, new_models),
         lpiv.horizon, lpiv.response, lpiv.shock, lpiv.base_formula,
         lpiv.coef_names, lpiv.endogenous_names, lpiv.instrument_names,
-        lpiv.tautological_h0, lpiv.state
+        lpiv.tautological_h0, lpiv.state, lpiv.sample
     )
 end
 

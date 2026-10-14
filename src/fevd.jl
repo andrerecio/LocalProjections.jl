@@ -311,8 +311,9 @@ every regressor exists.
 `fevd(lp_result, data; ...)` reuses the projection's formula
 (`lp_result.base_formula`), `horizon` and `shock`, so `horizon` and `shock` are
 not accepted as keywords. The projection must be linear (no `state`) and OLS
-(not `lpiv`), with a `cumul(v)` or `ldiff(y)` left-hand side and a right-hand
-side of the form above.
+(not `lpiv`), estimated with `sample = :horizon` (the estimators use the
+horizon-specific windows above), with a `cumul(v)` or `ldiff(y)` left-hand side
+and a right-hand side of the form above.
 
 # Keywords
 - `horizon`: maximum horizon ``H``.
@@ -516,6 +517,9 @@ function fevd(m::LocalProjection, data::AbstractDataFrame; estimator::Symbol = :
         trend::Integer = 0)
     m.state === nothing || throw(ArgumentError(
         "fevd does not support state-dependent local projections"))
+    m.sample === :common && throw(ArgumentError(
+        "fevd estimates every horizon on its own window t₀..T−h; the projection " *
+        "was estimated with sample = :common, re-estimate it with sample = :horizon"))
     _rhs_tracks_horizon(m.base_formula) && throw(ArgumentError(
         "fevd needs a horizon-invariant information set; the projection has a " *
         "horizon-tracking right-hand-side term"))
