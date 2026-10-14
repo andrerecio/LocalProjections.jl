@@ -72,7 +72,7 @@ function _extract_all_vars_from_formula(formula::FormulaTerm)
 end
 
 """
-    lpiv(formula, data; horizon, shock=nothing)
+    lpiv(formula, data; horizon, shock=nothing, sample=:horizon)
 
 Estimate local projections with instrumental variables from horizon 0 to `horizon`.
 
@@ -134,6 +134,9 @@ weakivtest(m + vcov(Bartlett(6)), 8; regime = 2)            # first stage, slack
 - `data::AbstractDataFrame`: DataFrame containing the variables
 - `horizon::Integer`: Maximum forecast horizon (must be non-negative)
 - `shock::Union{Symbol, Nothing}`: Optional coefficient to track (defaults to first endogenous)
+- `sample::Symbol`: `:horizon` (default) estimates each horizon on all the
+  observations available to it; `:common` uses, at every horizon, the
+  observations complete at all horizons `0:horizon` (see [`lp`](@ref))
 
 # Returns
 `LocalProjectionIV` struct containing IV models for each horizon.
@@ -169,8 +172,9 @@ println("First-stage coefs: ", coef(fs[1]))
 function lpiv(formula::FormulaTerm, data::AbstractDataFrame;
         horizon::Integer, shock::Union{Symbol, Nothing} = nothing,
         state::Union{Symbol, Nothing} = nothing, statelag::Integer = 1,
-        regimes = nothing)
+        regimes = nothing, sample::Symbol = :horizon)
     horizon < 0 && throw(ArgumentError("horizon must be non-negative"))
+    _check_sample(sample)
     df_base = DataFrame(data)
 
     # Extract ALL variable names from formula (including those inside IV specs)
@@ -314,7 +318,7 @@ function lpiv(formula::FormulaTerm, data::AbstractDataFrame;
     # pair of Matrix{Float64}, so _lpiv_estimate_horizons can be fully inferred.
     return _lpiv_estimate_horizons(XZof, coef_names_base, df_base_complete,
         horizon, n_endogenous, response, shock_symbol, formula,
-        endo_names, instr_names, lhs_term, state_spec)
+        endo_names, instr_names, lhs_term, state_spec, sample)
 end
 
 """
@@ -322,23 +326,30 @@ end
 
 Function barrier for type-stable per-horizon IV estimation.
 `XZof(h)` returns the `(X_full, Z_full)` pair at horizon `h` — the same pair
-every time unless some RHS term tracks the horizon.
+every time unless some RHS term tracks the horizon. With `sample = :common`
+every horizon uses the rows complete at all horizons.
 """
 function _lpiv_estimate_horizons(XZof::F,
         coef_names_base::Vector{String}, df_base_complete,
         horizon, n_endogenous, response, shock_symbol, formula,
         endo_names, instr_names, lhs_term,
-        state::Union{Nothing, LPState} = nothing) where {F}
-    # Helper to estimate one horizon
-    function _estimate_iv_horizon(h)
+        state::Union{Nothing, LPState} = nothing, sample::Symbol = :horizon) where {F}
+    # Designs, response and complete-case rows (no NaN in X, Z or y) at horizon h
+    function _horizon_data(h)
         X_full, Z_full = XZof(h)::Tuple{Matrix{Float64}, Matrix{Float64}}
-        # Identify complete rows
-        XZ_complete = vec(all(!isnan, X_full, dims = 2)) .&
-                      vec(all(!isnan, Z_full, dims = 2))
         # Convert to Vector{Float64} for type stability (modelcols may return ShiftedArray)
         y_h = Vector{Float64}(StatsModels.modelcols(_lhs_at(lhs_term, h), df_base_complete))
-        y_complete_rows = .!isnan.(y_h)
-        complete_rows = XZ_complete .& y_complete_rows
+        complete_rows = vec(all(!isnan, X_full, dims = 2)) .&
+                        vec(all(!isnan, Z_full, dims = 2)) .& .!isnan.(y_h)
+        return X_full, Z_full, y_h, complete_rows
+    end
+    common = sample === :common ? _common_rows(h -> _horizon_data(h)[4], horizon) :
+             nothing
+
+    # Helper to estimate one horizon
+    function _estimate_iv_horizon(h)
+        X_full, Z_full, y_h, complete_rows = _horizon_data(h)
+        common === nothing || (complete_rows = common)
         sum(complete_rows) == 0 &&
             throw(ArgumentError("No complete observations available for horizon $h"))
         y = view(y_h, complete_rows)
@@ -367,7 +378,7 @@ function _lpiv_estimate_horizons(XZof::F,
         models, horizon, response, shock_symbol, formula, coef_names_base,
         endo_names, instr_names,
         _lhs_tautological(lhs_term) &&
-            response === (state === nothing ? shock_symbol : state.shock), state)
+            response === (state === nothing ? shock_symbol : state.shock), state, sample)
 end
 
 """

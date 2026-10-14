@@ -18,6 +18,12 @@ summarize
 ewc_bandwidth
 ```
 
+## Estimation sample
+
+`lp` and `lpiv` take `sample = :horizon` (default: every horizon uses all its
+complete observations) or `sample = :common` (every horizon uses the
+observations complete at all horizons `0:horizon`); see the `lp` docstring.
+
 ## State dependence
 
 `lp` and `lpiv` take `state`, `statelag` and `regimes` keywords; see their
