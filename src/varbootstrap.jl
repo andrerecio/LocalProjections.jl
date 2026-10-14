@@ -190,7 +190,9 @@ of the thread count. Pass a seeded `rng` and record it; also record `nboot`,
 Bands are **pointwise across horizons**, not simultaneous. Draws in which the
 LP cannot be estimated are recorded in `nfail` and excluded from the quantiles.
 Only OLS local projections are supported, and the response transform must be
-`leads` or `cumul`.
+`leads` or `cumul`. Each draw re-estimates the projection with the same
+`sample` choice as `lp_result`; a `sample = :common` projection needs
+`biascorrect = false` (see [`biascorrect`](@ref)).
 
 # Example
 ```julia
@@ -238,6 +240,11 @@ function varbootstrap(lp_result::LocalProjection, data::AbstractDataFrame;
     lp_result.state === nothing || throw(ArgumentError(
         "the VAR bootstrap simulates from a linear VAR, which is not the " *
         "data-generating process of a state-dependent local projection"))
+    biascorrect && lp_result.sample === :common &&
+        throw(ArgumentError(
+            "the Herbst–Johannsen correction needs horizon-specific samples, but the " *
+            "projection was estimated with sample = :common; pass biascorrect = false " *
+            "or re-estimate it with sample = :horizon"))
     _rhs_tracks_horizon(lp_result.base_formula) && throw(ArgumentError(
         "the VAR bootstrap centers its t-statistic on the VAR-implied impulse " *
         "response to the shock, which is not the estimand of a local projection " *
@@ -284,7 +291,8 @@ function varbootstrap(lp_result::LocalProjection, data::AbstractDataFrame;
             Yinit = Y[init:(init + n_init - 1), :]
             Yb = _var_simulate(v.c, A_dgp, Ustar, Yinit)
             dfb = DataFrame(Yb, varlist)
-            mb = lp(lp_result.base_formula, dfb; horizon = H, shock = term)
+            mb = lp(lp_result.base_formula, dfb; horizon = H, shock = term,
+                sample = lp_result.sample)
             cb = vcov(HC1(), mb)
             θb = coefpath(_maybe_biascorrect(mb, biascorrect); term = term)
             sb = stderror(cb; term = term)

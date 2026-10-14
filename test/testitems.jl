@@ -2250,3 +2250,199 @@ end
     @test coefpath(r)[37] ≈ -3.25545542946992e-01 rtol = 1e-10
     @test se[37] ≈ 2.98261379130978e-01 rtol = 1e-10
 end
+
+@testitem "sample = :common estimates every horizon on the common complete-case sample" tags = [
+    :sample, :verification] begin
+    using LocalProjections
+    using CovarianceMatrices, DataFrames, StableRNGs, StatsBase, StatsModels, Test
+    import Regress
+
+    rng = StableRNG(2024)
+    T = 180
+    x = randn(rng, T)
+    y = zeros(T)
+    for t in 2:T
+        y[t] = 0.6 * y[t - 1] + x[t] + 0.5 * randn(rng)
+    end
+    df = DataFrame(y = y, x = x)
+    f = @formula(leads(y) ~ x + lags(y, 2))
+    H = 6
+
+    byh = lp(f, df; horizon = H)
+    com = lp(f, df; horizon = H, sample = :common)
+    @test byh.sample === :horizon
+    @test com.sample === :common
+    @test nobs.(byh.models) == [T - 2 - h for h in 0:H]
+    @test all(==(T - 2 - H), nobs.(com.models))
+
+    # Hand-built regressions on the rows t = 3..T−H, the sample of the
+    # maximum horizon, at every horizon.
+    rows = 3:(T - H)
+    X = hcat(ones(length(rows)), x[rows], y[rows .- 1], y[rows .- 2])
+    for h in 0:H
+        @test coef(com.models[h + 1]) ≈ X \ y[rows .+ h] rtol = 1e-10
+        @test modelmatrix(com.models[h + 1]) == X
+    end
+    # The maximum horizon is the same regression under both choices.
+    @test coef(com.models[end]) == coef(byh.models[end])
+
+    # Covariances are those of the fixed-sample regressions.
+    for est in (HC1(), Bartlett(4), EWC(5))
+        V = vcov(est, com)
+        for h in (0, 3, H)
+            m = Regress.ols(X, y[rows .+ h]; has_intercept = false)
+            @test stderror(V; term = :x)[h + 1] ≈ sqrt(vcov(est, m)[2, 2]) rtol = 1e-10
+        end
+    end
+
+    # An internal gap (NaN, see LP-1) removes row k from the horizon-0 sample
+    # and row k − h from the horizon-h one; the common sample drops all of them.
+    k = 90
+    ygap = copy(y)
+    ygap[k] = NaN
+    dfg = DataFrame(y = ygap, x = x)
+    byhg = lp(f, dfg; horizon = H)
+    comg = lp(f, dfg; horizon = H, sample = :common)
+    keep = [t
+            for t in 3:(T - H)
+            if !any(t + h == k for h in 0:H) && !(t - 1 == k) &&
+                   !(t - 2 == k)]
+    @test all(==(length(keep)), nobs.(comg.models))
+    Xg = hcat(ones(length(keep)), x[keep], ygap[keep .- 1], ygap[keep .- 2])
+    for h in 0:H
+        @test coef(comg.models[h + 1]) ≈ Xg \ ygap[keep .+ h] rtol = 1e-10
+    end
+    @test nobs(byhg.models[1]) > nobs(comg.models[1])
+    # ... and is then smaller than the maximum-horizon sample.
+    @test nobs(comg.models[end]) < nobs(byhg.models[end])
+
+    # Horizon-tracking right-hand side: cumul(x) is rebuilt per horizon, the
+    # rows stay those complete at every horizon.
+    dyn = lp(@formula(cumul(y) ~ cumul(x) + lags(y, 1)), df; horizon = H, sample = :common)
+    rows1 = 2:(T - H)
+    for h in (0, 2, H)
+        cy = [sum(y[t:(t + h)]) for t in rows1]
+        cx = [sum(x[t:(t + h)]) for t in rows1]
+        Xd = hcat(ones(length(rows1)), cx, y[rows1 .- 1])
+        @test coef(dyn.models[h + 1]) ≈ Xd \ cy rtol = 1e-10
+    end
+
+    # `+ vcov` keeps the choice, and summarize/ewc_bandwidth use the common T.
+    @test (com + vcov(HC1())).sample === :common
+    @test ewc_bandwidth(com) == ewc_bandwidth(T - 2 - H)
+    @test length(summarize(com, HC1()).coef) == H + 1
+    @test occursin("common, T = $(T - 2 - H)",
+        sprint(show, MIME"text/plain"(), com))
+    @test occursin("per horizon", sprint(show, MIME"text/plain"(), byh))
+end
+
+@testitem "sample = :common in lpiv and state-dependent projections" tags = [
+    :sample, :lpiv, :state] begin
+    using LocalProjections
+    using CovarianceMatrices, DataFrames, StableRNGs, StatsBase, StatsModels, Test
+
+    rng = StableRNG(99)
+    T = 220
+    z = randn(rng, T)
+    u = randn(rng, T)
+    x = 0.8 .* z .+ 0.5 .* u
+    y = zeros(T)
+    for t in 2:T
+        y[t] = 0.5 * y[t - 1] + x[t] + u[t]
+    end
+    s = Float64.(randn(rng, T) .> 0)
+    df = DataFrame(y = y, x = x, z = z, s = s)
+    H = 5
+
+    iv = lpiv(@formula(leads(y) ~ (x ~ z) + lags(y, 1)), df; horizon = H,
+        sample = :common)
+    @test iv.sample === :common
+    @test all(==(T - 1 - H), nobs.(iv.models))
+    rows = 2:(T - H)
+    W = hcat(ones(length(rows)), y[rows .- 1])
+    X = hcat(W, x[rows])
+    Z = hcat(W, z[rows])
+    Px = Z * (Z \ X)
+    for h in 0:H
+        @test coef(iv.models[h + 1]) ≈ Px \ y[rows .+ h] rtol = 1e-8
+    end
+    ivh = lpiv(@formula(leads(y) ~ (x ~ z) + lags(y, 1)), df; horizon = H)
+    @test ivh.sample === :horizon
+    @test coef(iv.models[end]) ≈ coef(ivh.models[end]) rtol = 1e-12
+    @test (iv + vcov(HC1())).sample === :common
+    @test occursin("common", sprint(show, MIME"text/plain"(), iv))
+
+    # Internal gaps in the instrument and in the response: the common rows
+    # avoid both at every horizon.
+    kz, ky = 80, 150
+    zg, yg = copy(z), copy(y)
+    zg[kz] = NaN
+    yg[ky] = NaN
+    dfg = DataFrame(y = yg, x = x, z = zg)
+    ivg = lpiv(@formula(leads(y) ~ (x ~ z) + lags(y, 1)), dfg; horizon = H,
+        sample = :common)
+    keep = [t for t in 2:(T - H)
+            if t != kz && t - 1 != ky && all(t + h != ky for h in 0:H)]
+    @test all(==(length(keep)), nobs.(ivg.models))
+    Wg = hcat(ones(length(keep)), yg[keep .- 1])
+    Xg = hcat(Wg, x[keep])
+    Zg = hcat(Wg, zg[keep])
+    Pg = Zg * (Zg \ Xg)
+    for h in 0:H
+        @test coef(ivg.models[h + 1]) ≈ Pg \ yg[keep .+ h] rtol = 1e-8
+    end
+
+    # State dependence: the split design of the maximum horizon at every h.
+    f = @formula(leads(y) ~ x + lags(y, 1))
+    sth = lp(f, df; horizon = H, state = :s)
+    stc = lp(f, df; horizon = H, state = :s, sample = :common)
+    @test stc.sample === :common
+    @test all(==(nobs(sth.models[end])), nobs.(stc.models))
+    for h in 0:H
+        @test modelmatrix(stc.models[h + 1]) == modelmatrix(sth.models[end])
+    end
+    @test coef(stc.models[end]) == coef(sth.models[end])
+    @test length(statetest(stc, HC1()).pvalue) == H + 1
+end
+
+@testitem "sample keyword: guards and downstream procedures" tags = [:sample, :api] begin
+    using LocalProjections
+    using DataFrames, Random, StableRNGs, StatsModels, Test
+
+    rng = StableRNG(5)
+    T = 150
+    x = randn(rng, T)
+    y = zeros(T)
+    for t in 2:T
+        y[t] = 0.5 * y[t - 1] + x[t] + randn(rng)
+    end
+    df = DataFrame(y = y, x = x, dy = [0.0; diff(y)])
+    f = @formula(leads(y) ~ x + lags(y, 2) + lags(x, 2))
+
+    @test_throws ArgumentError lp(f, df; horizon = 3, sample = :maxhorizon)
+    @test_throws ArgumentError lpiv(@formula(leads(y) ~ (x ~ dy)), df; horizon = 3,
+        sample = :all)
+    # No row is complete at every horizon.
+    @test_throws ArgumentError lp(f, df[1:10, :]; horizon = 9, sample = :common)
+
+    com = lp(f, df; horizon = 8, sample = :common)
+    @test_throws ArgumentError biascorrect(com)
+    @test biascorrect(lp(f, df; horizon = 8)) isa BiasCorrectedLP
+    @test_throws ArgumentError varbootstrap(com, df; vars = [:x, :y], nlags = 2,
+        nboot = 5)
+    @test_throws ArgumentError fevd(
+        lp(@formula(cumul(dy) ~ x + lags(dy, 1)), df; horizon = 4, sample = :common), df)
+
+    # varbootstrap re-estimates each draw with the projection's sample: with the
+    # same seeds the simulated data agree, so the maximum horizon (one sample
+    # under both choices) matches while horizon 0 does not.
+    byh = lp(f, df; horizon = 8)
+    bc = varbootstrap(com, df; vars = [:x, :y], nlags = 2, nboot = 30,
+        biascorrect = false, rng = Xoshiro(11))
+    bh = varbootstrap(byh, df; vars = [:x, :y], nlags = 2, nboot = 30,
+        biascorrect = false, rng = Xoshiro(11))
+    @test bc.nfail == 0
+    @test bc.theta == coefpath(com)
+    @test bc.theta_boot[:, end] ≈ bh.theta_boot[:, end] rtol = 1e-12
+    @test !(bc.theta_boot[:, 1] ≈ bh.theta_boot[:, 1])
+end

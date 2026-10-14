@@ -1,8 +1,31 @@
 """
-    lp(formula, data; horizon, shock=nothing)
+    lp(formula, data; horizon, shock=nothing, sample=:horizon)
 
 Estimate local projections implied by `formula` up to the supplied `horizon`.
 `shock` selects the coefficient path of interest (defaults to the first RHS term).
+
+# Estimation sample
+
+With the default `sample = :horizon` every horizon is estimated on all the
+observations available to it, so the sample shrinks as ``h`` grows (the
+horizon-``h`` regression loses the last ``h`` rows to the lead of the
+response). This uses all the data and is the more efficient choice.
+
+`sample = :common` estimates every horizon on one sample: the observations that
+are complete at *every* horizon ``0, \\dots, H``. Without internal gaps this is
+the sample of the maximum horizon, and horizon 0 loses ``H`` observations; an
+internal `NaN` in the response removes, at every horizon, each row whose lead
+hits it at some horizon (up to ``H + 1`` rows per gap), so the common sample is
+then smaller than the horizon-``H`` one. Responses at different horizons are
+comparable observation by observation (the IRF path is not affected by a
+changing sample). The
+choice is stored in the result's `sample` field and reused by `varbootstrap`;
+`biascorrect` and `fevd` require `sample = :horizon`.
+
+```julia
+r = lp(@formula(leads(y) ~ x + lags(y, 4)), df; horizon = 20, sample = :common)
+nobs.(r.models)   # the same number of observations at every horizon
+```
 
 # Horizon-tracking right-hand-side terms
 
@@ -57,8 +80,9 @@ terms.
 function lp(formula::FormulaTerm, data::AbstractDataFrame;
         horizon::Integer, shock::Union{Symbol, Nothing} = nothing,
         state::Union{Symbol, Nothing} = nothing, statelag::Integer = 1,
-        regimes = nothing)
+        regimes = nothing, sample::Symbol = :horizon)
     horizon < 0 && throw(ArgumentError("horizon must be non-negative"))
+    _check_sample(sample)
     df_base = DataFrame(data)  # avoid mutating caller's data
 
     # Apply schema to formula to convert FunctionTerms to proper terms (CumulTerm, LagTerm, etc.)
@@ -141,7 +165,7 @@ function lp(formula::FormulaTerm, data::AbstractDataFrame;
         end
         return _lp_estimate_horizons(Xstate, _state_names(coef_names_base, labels),
             df_base_complete, horizon, response, shock_symbol, formula, lhs_term,
-            LPState(state, statelag, labels, base_shock))
+            LPState(state, statelag, labels, base_shock), sample)
     end
 
     # Set shock variable: use provided shock or default to first RHS coefficient
@@ -164,7 +188,7 @@ function lp(formula::FormulaTerm, data::AbstractDataFrame;
     # closure returning Matrix{Float64}, so _lp_estimate_horizons can be fully
     # inferred by the compiler.
     return _lp_estimate_horizons(Xof, coef_names_base, df_base_complete, horizon,
-        response, shock_symbol, formula, lhs_term)
+        response, shock_symbol, formula, lhs_term, nothing, sample)
 end
 
 """
@@ -173,19 +197,25 @@ end
 Function barrier for type-stable per-horizon OLS estimation.
 `Xof(h)` returns the `Matrix{Float64}` design at horizon `h` — the same matrix
 every time unless the RHS carries a horizon-tracking `cumul`/`leads` term.
+With `sample = :common` every horizon uses the rows complete at all horizons.
 """
 function _lp_estimate_horizons(Xof::F, coef_names_base::Vector{String},
         df_base_complete, horizon, response, shock_symbol, formula, lhs_term,
-        state::Union{Nothing, LPState} = nothing) where {F}
-    # Helper to estimate one horizon
-    function _estimate_horizon(h)
+        state::Union{Nothing, LPState} = nothing, sample::Symbol = :horizon) where {F}
+    # Design, response and complete-case rows (no NaN in X or y) at horizon h
+    function _horizon_data(h)
         X = Xof(h)::Matrix{Float64}
-        # Identify rows where X is complete (no NaN values)
-        X_missing_ind = vec(all(!isnan, X, dims = 2))
         # Convert to Vector{Float64} for type stability (modelcols may return ShiftedArray)
         y_h = Vector{Float64}(StatsModels.modelcols(_lhs_at(lhs_term, h), df_base_complete))
-        y_complete_rows = .!isnan.(y_h)
-        complete_rows = X_missing_ind .& y_complete_rows
+        return X, y_h, vec(all(!isnan, X, dims = 2)) .& .!isnan.(y_h)
+    end
+    common = sample === :common ? _common_rows(h -> _horizon_data(h)[3], horizon) :
+             nothing
+
+    # Helper to estimate one horizon
+    function _estimate_horizon(h)
+        X, y_h, complete_rows = _horizon_data(h)
+        common === nothing || (complete_rows = common)
         sum(complete_rows) == 0 &&
             throw(ArgumentError("No complete observations available for horizon $h"))
         y = view(y_h, complete_rows)
@@ -211,5 +241,5 @@ function _lp_estimate_horizons(Xof::F, coef_names_base::Vector{String},
     return LocalProjection{eltype(models)}(
         models, horizon, response, shock_symbol, formula, coef_names_base,
         _lhs_tautological(lhs_term) &&
-            response === (state === nothing ? shock_symbol : state.shock), state)
+            response === (state === nothing ? shock_symbol : state.shock), state, sample)
 end
