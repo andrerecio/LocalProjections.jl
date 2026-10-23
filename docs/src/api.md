@@ -21,6 +21,9 @@ LocalProjection
 leads
 cumul
 anchor
+ldiff
+hbr
+firstdiff
 lags
 ```
 

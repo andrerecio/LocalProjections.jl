@@ -61,7 +61,6 @@ tmp/
 # Local Development
 test_pkg/
 .claude/
-CLAUDE.md
 AGENTS.md
 GEMINI.md
 JULIA.md
