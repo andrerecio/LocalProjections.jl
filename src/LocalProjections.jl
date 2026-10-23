@@ -3,7 +3,7 @@ module LocalProjections
 export AbstractLocalProjection, LocalProjection, LocalProjectionIV, IRFSummary
 export lp, lpiv, TSLS, LIML, Fuller, KClass, fe, horizonmodel, coefpath, nobs, stderror, vcov, summarize, first_stage, weakivtest
 export @formula, lag, lead, cumul, lags, leads, anchor, ldiff, hbr, firstdiff
-export as_irf_result
+export as_irf_result, ewc_bandwidth
 export irfplot, irfplot!
 public CumulTerm, LeadTerm, AnchorTerm, LongDiffTerm, DiffTerm
 
@@ -16,9 +16,9 @@ using Regress: Regress, OLSMatrixEstimator, IVMatrixEstimator, ols, iv, TSLS, LI
     KClass, AbstractIVEstimator,
     VcovSpec, lags, fe, first_stage, weakivtest
 using CovarianceMatrices: CovarianceMatrices, CR, CR0, CR1, CR2, CR3, Cluster, Clustering,
-    DriscollKraay, clusters, timekernel, timeindex, unitindex
+    DriscollKraay, EWC, clusters, timekernel, timeindex, unitindex
 using Statistics: quantile
-using Distributions: Normal
+using Distributions: Normal, TDist
 using RecipesBase: RecipesBase, @recipe
 using ShiftedArrays: lag, lead
 using StatsBase: StatsBase, StatisticalModel, coef, nobs, response, stderror, vcov
@@ -1606,6 +1606,8 @@ function Regress.weakivtest(lpiv::LocalProjectionIV; kwargs...)
     ]
 end
 
+include("ewc.jl")
+
 # ============================================================================
 # Shared methods for LocalProjection and LocalProjectionIV
 # ============================================================================
@@ -1671,7 +1673,9 @@ numbers are those of [`as_irf_result`](@ref) with `coverage = [level]`. A negati
 
 Standard errors come from the covariance estimator stored in `lp` (see
 [`stderror`](@ref)). Passing a CovarianceMatrices.jl `estimator` is the same as
-`summarize(lp + vcov(estimator); ...)`.
+`summarize(lp + vcov(estimator); ...)`. The bounds use Student-``t_B`` critical values
+when the estimator is `EWC(B)` (see [`ewc_bandwidth`](@ref)) and normal critical values
+otherwise.
 """
 function summarize(
         lp::AbstractLocalProjection;
@@ -1783,8 +1787,10 @@ end
 Convert a `LocalProjection` or `LocalProjectionIV` result to MET's `LocalProjectionIRFResult` type.
 
 This enables using MET's unified plotting infrastructure with AxisArray support.
-Bands are `coef ± z * se`, with `z` the standard normal quantile for each coverage level
-and `se` from the covariance estimator. For IV results, first-stage diagnostics are
+Bands are `coef ± z * se`, with `se` from the covariance estimator and `z` the
+two-sided critical value for each coverage level: the Student-``t_B`` quantile for
+`EWC(B)` (fixed-smoothing inference, Lazarus, Lewis, Stock & Watson 2018), the standard
+normal quantile for every other estimator. For IV results, first-stage diagnostics are
 included in metadata.
 
 # Keyword Arguments
@@ -1838,8 +1844,9 @@ end
 # over horizons 0:H.
 _horizon_vector(a::AxisArray) = vec(Array(a))
 
-# Coefficient path, standard errors and normal confidence bands for `term` at each level
-# in `coverage`, using the covariance estimator stored in `lp`. Every confidence bound
+# Coefficient path, standard errors and confidence bands for `term` at each level in
+# `coverage`, using the covariance estimator stored in `lp` and the critical value paired
+# with it (Student-t_B for EWC, normal otherwise; see `_critical_value`). Every confidence bound
 # the package reports (`summarize`, `as_irf_result`) is computed here. With
 # `diagnostics = true`, IV results also carry the first-stage regressions per horizon.
 function _irf_result(lp::AbstractLocalProjection, term::Symbol, coverage; diagnostics::Bool)
@@ -1853,7 +1860,7 @@ function _irf_result(lp::AbstractLocalProjection, term::Symbol, coverage; diagno
         Axis{:shock}([term]),
         Axis{:horizon}(0:lp.horizon)
     )
-    z = [quantile(Normal(), 0.5 + c / 2) for c in levels]
+    z = [_critical_value(_vcov_estimator(lp), c) for c in levels]
     lower = [cube(beta .- zc .* se) for zc in z]
     upper = [cube(beta .+ zc .* se) for zc in z]
 

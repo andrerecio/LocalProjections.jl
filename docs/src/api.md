@@ -7,6 +7,7 @@ lp
 coefpath
 stderror(::AbstractLocalProjection)
 summarize
+ewc_bandwidth
 ```
 
 ## Types
