@@ -2,10 +2,10 @@ module LocalProjections
 
 export AbstractLocalProjection, LocalProjection, LocalProjectionIV, IRFSummary
 export lp, lpiv, TSLS, LIML, Fuller, KClass, fe, horizonmodel, coefpath, nobs, stderror, vcov, summarize, first_stage, weakivtest
-export @formula, lag, lead, cumul, lags, leads, anchor
+export @formula, lag, lead, cumul, lags, leads, anchor, ldiff, hbr, firstdiff
 export as_irf_result
 export irfplot, irfplot!
-public CumulTerm, LeadTerm, AnchorTerm
+public CumulTerm, LeadTerm, AnchorTerm, LongDiffTerm, DiffTerm
 
 using PrettyTables: pretty_table, TextHighlighter, TextTableFormat,
     text_table_borders__unicode_rounded, @crayon_str
@@ -87,31 +87,6 @@ function _termvars_unary(t::FunctionTerm)
 end
 
 """
-    _unwrap_lhs(lhs_term)
-
-Unwrap LHS term to determine if it's anchored, cumulative, or leads.
-Returns (is_anchor, is_cumul, is_leads, anchor_term, cumul_term, leads_term).
-"""
-function _unwrap_lhs(lhs_term)
-    if lhs_term isa AnchorTerm
-        inner = lhs_term.response
-        is_cumul = inner isa CumulTerm
-        is_leads = inner isa LeadTerm || !is_cumul  # Default to leads
-        return (
-            true, is_cumul, is_leads, lhs_term,
-            is_cumul ? inner : nothing,
-            is_leads && inner isa LeadTerm ? inner : nothing,
-        )
-    else
-        return (
-            false, lhs_term isa CumulTerm, lhs_term isa LeadTerm,
-            nothing, lhs_term isa CumulTerm ? lhs_term : nothing,
-            lhs_term isa LeadTerm ? lhs_term : nothing,
-        )
-    end
-end
-
-"""
     _extract_single_response(term, context::String)
 
 Extract a single response variable from a term, throwing an error if multiple variables.
@@ -122,35 +97,6 @@ function _extract_single_response(term, context::String)::Symbol
     length(vars) == 1 ||
         throw(ArgumentError("$context must reference a single base variable"))
     return vars[1]
-end
-
-"""
-    _build_lhs_for_horizon(h::Int, is_anchor, is_cumul, is_leads, anchor_term, cumul_term, leads_term)
-
-Build the LHS term for a specific horizon h, handling anchor/cumul/leads combinations.
-"""
-function _build_lhs_for_horizon(
-        h::Int, is_anchor, is_cumul, is_leads,
-        anchor_term, cumul_term, leads_term
-    )
-    if is_anchor
-        inner = if is_cumul && cumul_term !== nothing
-            CumulTerm{typeof(cumul_term.term)}(cumul_term.term, h)
-        elseif is_leads && leads_term !== nothing
-            LeadTerm{typeof(leads_term.term)}(leads_term.term, h)
-        else
-            LeadTerm{typeof(anchor_term.response)}(anchor_term.response, h)
-        end
-        return AnchorTerm{typeof(inner), typeof(anchor_term.anchor)}(
-            inner, anchor_term.anchor, 0
-        )
-    elseif is_cumul
-        return CumulTerm{typeof(cumul_term.term)}(cumul_term.term, h)
-    elseif is_leads
-        return LeadTerm{typeof(leads_term.term)}(leads_term.term, h)
-    else
-        throw(ArgumentError("Invalid LHS term type"))
-    end
 end
 
 # ============================================================================
@@ -187,6 +133,7 @@ function StatsModels.apply_schema(
     )
     term, horizon = _parse_unary_binary_args(t, "cumul", nothing)
     term = StatsModels.apply_schema(term, sch, ctx)
+    _check_cumul_inner(term)
     return CumulTerm{typeof(term)}(term, horizon)
 end
 
@@ -472,6 +419,9 @@ function StatsModels.apply_schema(
     # Return AnchorTerm
     return AnchorTerm{typeof(lhs_term), typeof(rhs_term)}(lhs_term, rhs_term, nothing)
 end
+
+include("longdiff.jl")
+include("horizons.jl")
 
 """
     AbstractLocalProjection
@@ -761,7 +711,9 @@ NaN values are returned when:
 function _create_anchored(y::AbstractVector, z::AbstractVector, h::Int)::Vector{Float64}
     n = length(y)
     length(z) == n || throw(ArgumentError("y and z must have same length"))
-    return lead(y, h, default = NaN) .- z
+    # An anchor such as lag(y) is `missing` in its first rows
+    tofloat(v) = ismissing(v) ? NaN : Float64(v)
+    return tofloat.(lead(y, h, default = NaN)) .- tofloat.(z)
 end
 
 """
@@ -892,24 +844,6 @@ function _extract_all_vars_from_formula(formula::FormulaTerm)
         append!(all_vars, StatsModels.termvars(term.rhs))
     end
     return unique(all_vars)
-end
-
-"""
-    _response_variable(lhs) -> Symbol
-
-Name of the response variable, given the tuple returned by [`_unwrap_lhs`](@ref).
-"""
-function _response_variable(lhs)
-    is_anchor, is_cumulative, is_leads, anchor_term, cumul_term, leads_term = lhs
-    is_anchor && return _extract_single_response(anchor_term.response, "anchor() response term")
-    is_cumulative && return _extract_single_response(cumul_term, "cumul() term")
-    is_leads && return _extract_single_response(leads_term, "leads() term")
-    throw(
-        ArgumentError(
-            "the response must use leads(), cumul(), anchor(), or the y|z syntax, " *
-                "e.g. `leads(y) ~ x`"
-        )
-    )
 end
 
 """
@@ -1141,8 +1075,8 @@ function _lp_design(
 
     sch = StatsModels.schema(formula, tbl)
 
-    lhs = _unwrap_lhs(StatsModels.apply_schema(formula.lhs, sch, LPSchemaContext))
-    response = _response_variable(lhs)
+    lhs = StatsModels.apply_schema(formula.lhs, sch, LPSchemaContext)
+    response = _lhs_response(lhs)
     nrows = length(tbl[response])
 
     isempty(StatsModels.termvars(formula.rhs)) &&
@@ -1151,7 +1085,6 @@ function _lp_design(
     # Exogenous regressors, including the intercept unless the formula removes it
     exo_rhs = isempty(exo_raw) ? ConstantTerm(1) : Tuple(exo_raw)
     exo_f = StatsModels.apply_schema(FormulaTerm(Term(response), exo_rhs), sch, StatisticalModel)
-    X_exo = _model_columns(exo_f.rhs, tbl, groups)
     exo_names = Vector{String}(_coefname_vector(exo_f.rhs))
 
     endo_terms = AbstractTerm[]
@@ -1164,8 +1097,8 @@ function _lp_design(
             push!(instr_terms, StatsModels.apply_schema(z, sch, LPSchemaContext))
         end
     end
-    X_endo, endo_names = _term_columns(endo_terms, tbl, groups, nrows)
-    Z_instr, instr_names = _term_columns(instr_terms, tbl, groups, nrows)
+    endo_names = String[n for t in endo_terms for n in _coefname_vector(t)]
+    instr_names = String[n for t in instr_terms for n in _coefname_vector(t)]
     length(instr_names) >= length(endo_names) || throw(
         ArgumentError(
             "Not enough instruments: $(length(instr_names)) < $(length(endo_names)) " *
@@ -1177,14 +1110,25 @@ function _lp_design(
     isempty(coef_names) && throw(
         ArgumentError("formula must contain at least one regressor besides fixed effects")
     )
+    shock = _select_shock(shock, coef_names, endo_names)
+    # A horizon-tracking regressor (bare cumul, leads, ldiff or hbr) is rebuilt at every
+    # horizon; otherwise every horizon shares one pair of matrices.
+    function design(h)
+        X_exo = _model_columns(_specialize_horizon(exo_f.rhs, h), tbl, groups)
+        X_endo, _ = _term_columns(_specialize_horizon(Tuple(endo_terms), h), tbl, groups, nrows)
+        Z_instr, _ = _term_columns(_specialize_horizon(Tuple(instr_terms), h), tbl, groups, nrows)
+        return hcat(X_exo, X_endo)::Matrix{Float64}, hcat(X_exo, Z_instr)::Matrix{Float64}
+    end
+    dynamic = _has_dynamic_horizon(exo_f.rhs) || _has_dynamic_horizon(endo_terms) ||
+        _has_dynamic_horizon(instr_terms)
+    XZ = dynamic ? [design(h) for h in 0:horizon] : fill(design(0), horizon + 1)
     return (;
-        X = hcat(X_exo, X_endo)::Matrix{Float64},
-        Z = hcat(X_exo, Z_instr)::Matrix{Float64},
+        Xs = first.(XZ), Zs = last.(XZ),
         coef_names, endo_names, instr_names, response, lhs,
+        tautological_h0 = _lhs_tautological(lhs) && response === shock,
         has_intercept = "(Intercept)" in coef_names,
         fe = [tbl[name] for name in fe_names],
-        data = tbl, groups,
-        shock = _select_shock(shock, coef_names, endo_names),
+        data = tbl, groups, shock,
     )
 end
 
@@ -1203,12 +1147,14 @@ function _fit_horizon(estimator, X, Z, y, n_endogenous, has_intercept, coefnames
 end
 
 """
-    _lp_estimate_horizons(estimator, X, Z, n_endogenous, has_intercept, coef_names, fe,
+    _lp_estimate_horizons(estimator, Xs, Zs, n_endogenous, has_intercept, coef_names, fe,
         lhs, data, groups, horizon, sample)
 
 Fit one model per horizon `0:horizon` and return the models with the row mask of each
 horizon: OLS when `estimator === nothing`, otherwise
-`Regress.iv(estimator, ...)`. With `sample = :varying`, each horizon uses the rows where
+`Regress.iv(estimator, ...)`. `Xs[h + 1]` and `Zs[h + 1]` are the regressor and
+instrument matrices of horizon `h`; they are one shared pair unless a regressor tracks
+the horizon. With `sample = :varying`, each horizon uses the rows where
 `X`, `Z` and the transformed response at that horizon are all non-`NaN`; with
 `sample = :fixed`, every horizon uses the rows where they are non-`NaN` at all horizons.
 The response is computed within each block of rows in `groups`. `has_intercept` tells
@@ -1216,24 +1162,24 @@ Regress whether `X` contains an intercept column; `coef_names` names the columns
 `fe` holds one group vector per absorbed fixed effect, aligned with the rows of `X`; each
 horizon absorbs them on its own rows.
 
-`X` and `Z` are typed `Matrix{Float64}` so the loop infers concretely despite the
+`Xs` and `Zs` hold `Matrix{Float64}` so the loop infers concretely despite the
 abstract return types of StatsModels.
 """
 function _lp_estimate_horizons(
-        estimator, X::Matrix{Float64}, Z::Matrix{Float64}, n_endogenous::Int,
+        estimator, Xs::Vector{Matrix{Float64}}, Zs::Vector{Matrix{Float64}},
+        n_endogenous::Int,
         has_intercept::Bool, coef_names::Vector{String}, fe::AbstractVector, lhs, data,
         groups, horizon::Integer, sample::Symbol
     )
     sample in (:varying, :fixed) || throw(
         ArgumentError("sample must be :varying or :fixed (got $(repr(sample)))")
     )
-    complete_xz = vec(all(!isnan, X, dims = 2)) .& vec(all(!isnan, Z, dims = 2))
+    complete(X, Z) = vec(all(!isnan, X, dims = 2)) .& vec(all(!isnan, Z, dims = 2))
+    complete_xz = Xs[1] === Xs[end] ? fill(complete(Xs[1], Zs[1]), horizon + 1) :
+        map(complete, Xs, Zs)
     # Vector{Float64}: modelcols may return a ShiftedArray or contain `missing`
-    ys = [
-        _model_columns(_build_lhs_for_horizon(h, lhs...), data, groups)[:, 1]
-            for h in 0:horizon
-    ]
-    rows = [complete_xz .& .!isnan.(y) for y in ys]
+    ys = [_model_columns(_lhs_at(lhs, h), data, groups)[:, 1] for h in 0:horizon]
+    rows = [c .& .!isnan.(y) for (c, y) in zip(complete_xz, ys)]
     if sample === :fixed
         common = reduce(.&, rows)
         any(common) || throw(
@@ -1243,7 +1189,7 @@ function _lp_estimate_horizons(
     end
 
     function _estimate_horizon(h)
-        r, y_h = rows[h + 1], ys[h + 1]
+        r, y_h, X, Z = rows[h + 1], ys[h + 1], Xs[h + 1], Zs[h + 1]
         any(r) ||
             throw(ArgumentError("No complete observations available for horizon $h"))
         fe_h = isempty(fe) ? nothing : Tuple(g[r] for g in fe)
@@ -1291,8 +1237,12 @@ column must not contain `missing` or `NaN`. Alternatively, a categorical control
 (`leads(y) ~ x + id` with `id` a string or `CategoricalArray` column) estimates one
 dummy per unit; the shock coefficient is the same.
 
-The response must be written with `leads(y)`, `cumul(y)`, `anchor(y, z)` or the pipe
-syntax `y|z`. `shock` names the coefficient whose path is reported by
+The response must be written with `leads(y)`, `cumul(y)`, `anchor(y, z)`, the pipe
+syntax `y|z`, the long difference [`ldiff`](@ref)`(y)` (``y_{t+h} - y_{t-1}``), the
+Hall–Barro–Redlick change [`hbr`](@ref)`(x, y)` (``(x_{t+h} - x_{t-1})/y_{t-1}``), or
+`cumul` of either of the last two. A bare `cumul(x)`, `leads(x)`, `ldiff(x)` or
+`hbr(x, y)` among the regressors is rebuilt at every horizon, with one coefficient name
+for all horizons (`cumul(x)`); `cumul(x, 3)` pins the column. `shock` names the coefficient whose path is reported by
 [`coefpath`](@ref) and [`summarize`](@ref); by default it is the first regressor other
 than the intercept. A `shock` that is not a coefficient of the model is an error.
 
@@ -1327,12 +1277,12 @@ function lp(
     )
     d = _lp_design(formula, data, horizon, shock, false, unit, time)
     models, rows = _lp_estimate_horizons(
-        nothing, d.X, d.Z, 0, d.has_intercept, d.coef_names, d.fe, d.lhs, d.data,
+        nothing, d.Xs, d.Zs, 0, d.has_intercept, d.coef_names, d.fe, d.lhs, d.data,
         d.groups, horizon, sample
     )
     result = LocalProjection(
         models, horizon, d.response, d.shock, formula, d.coef_names,
-        d.response === d.shock, sample, unit, time, d.data, rows,
+        d.tautological_h0, sample, unit, time, d.data, rows,
         CovarianceMatrices.estimator(vcov(first(models)))
     )
     return unit === nothing ? result : result + vcov(CR1(unit))
@@ -1495,7 +1445,11 @@ lpiv(TSLS(), @formula(leads(y) ~ (x ~ z1) + lags(r, 5) + w), df; horizon=10)
 ```
 
 Where:
-- `leads(y)` - response with horizon transformation (also supports `cumul(y)`, `anchor(y, baseline)`)
+- `leads(y)` - response with horizon transformation (also supports `cumul(y)`, `anchor(y, baseline)`,
+  `ldiff(y)`, `hbr(x, y)`, `cumul(ldiff(y))` and `cumul(hbr(x, y))`)
+- a bare `cumul(x)`, `leads(x)`, `ldiff(x)` or `hbr(x, y)` regressor, endogenous or
+  instrument tracks the horizon, e.g. the one-step cumulative multiplier
+  `cumul(y) ~ (cumul(g) ~ z) + lags(y, 4) + lags(g, 4)`
 - `(x ~ z1)` - x is endogenous, instrumented by z1
 - `lags(r, 5)` and `w` - exogenous controls
 
@@ -1554,12 +1508,12 @@ function lpiv(
     )
     d = _lp_design(formula, data, horizon, shock, true, unit, time)
     models, rows = _lp_estimate_horizons(
-        estimator, d.X, d.Z, length(d.endo_names), d.has_intercept, d.coef_names, d.fe,
+        estimator, d.Xs, d.Zs, length(d.endo_names), d.has_intercept, d.coef_names, d.fe,
         d.lhs, d.data, d.groups, horizon, sample
     )
     result = LocalProjectionIV(
         models, horizon, d.response, d.shock, formula, d.coef_names,
-        d.endo_names, d.instr_names, d.response === d.shock, sample, unit, time,
+        d.endo_names, d.instr_names, d.tautological_h0, sample, unit, time,
         d.data, rows, CovarianceMatrices.estimator(vcov(first(models)))
     )
     return unit === nothing ? result : result + vcov(CR1(unit))

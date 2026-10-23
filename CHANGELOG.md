@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased (andrerecio fork, port onto 0.2)
+
+### Added
+
+- **Long differences**: `ldiff(y)` (``y_{t+h} - y_{t-1}``, Piger & Stockwell 2025), `hbr(x, y)` (``(x_{t+h} - x_{t-1})/y_{t-1}``, Hall 2009, Barro & Redlick 2011; `hbr(x)` scales by `x` itself), and `cumul` of either, which sums the changes over horizons `0..h` with the baseline counted `h + 1` times. `firstdiff(x)` gives the lagged-difference controls `lags(firstdiff(y), p)`. A long difference on the left is never treated as a tautological `h = 0`. `cumul(ldiff(y, 3))` is an error; write `cumul(ldiff(y), 3)`.
+- **Horizon-tracking regressors**: a bare `cumul(x)`, `leads(x)`, `ldiff(x)` or `hbr(x, y)` on the right-hand side (exogenous, endogenous or instrument) is rebuilt at every horizon, under one coefficient name, so the one-step cumulative multiplier is a single call, `lpiv(TSLS(), @formula(cumul(y) ~ (cumul(g) ~ z) + ...), df; horizon)`. In panels, these terms are built within each unit. An explicit horizon (`cumul(x, 3)`) pins the column.
+
+### Fixed
+
+- `anchor(y, lag(y))` (any anchor that is `missing` in its first rows) no longer throws when converting the anchored response; it equals `ldiff(y)`.
+
 ## 0.2.0
 
 This release breaks the 0.1 API. No deprecation shims are provided.
