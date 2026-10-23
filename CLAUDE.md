@@ -13,7 +13,7 @@ Port order and status (the `dev` branch is the reference implementation of each 
 1. `ldiff`/`hbr`/`firstdiff` and horizon-tracking right-hand-side terms (done)
 2. EWC with Student-t_B critical values, `ewc_bandwidth` (guide §2, EWC-1) (done; `src/ewc.jl`, hooked into `_irf_result`)
 3. `sample = :common` is **dropped**: upstream's `sample = :fixed` is the same estimator (names `:varying`/`:fixed`)
-4. State dependence (`state`/`statelag`/`regimes`, `statetest`)
+4. State dependence (`state`/`statelag`/`regimes`, `statetest`) (done; `src/state.jl`)
 5. VAR core and `lagselect`
 6. `varbootstrap` (guide §4)
 7. Herbst–Johannsen `biascorrect` (guide §3)
@@ -53,7 +53,10 @@ julia +1.13 --project=docs docs/make.jl
 - `src/longdiff.jl`: `ldiff`/`hbr`/`firstdiff` (`LongDiffTerm`, `DiffTerm`), their StatsModels methods, `_create_long_difference`, and `_check_cumul_inner` (called from upstream's `cumul` `apply_schema`).
 - `src/horizons.jl`: the per-horizon response by dispatch on the left-hand-side term (`_lhs_at`, `_lhs_response`, `_lhs_tautological`), replacing upstream's `_unwrap_lhs`/`_build_lhs_for_horizon` flag tuple; and right-hand-side horizon tracking (`_has_dynamic_horizon`, `_specialize_horizon`, `_rhs_tracks_horizon`).
 
-Both are included after the pipe-operator section and before `AbstractLocalProjection`. A new response transform is a term type plus `_lhs_at`/`_lhs_response`/`_lhs_tautological` methods (and `_specialize_horizon`/`_has_dynamic_horizon`/`_tracks_horizon` if it may appear on the right).
+Both are included after the pipe-operator section and before `AbstractLocalProjection`.
+
+- `src/ewc.jl` (included before the shared `coefpath`/`stderror` methods): `_critical_distribution`/`_critical_value`, `ewc_bandwidth`.
+- `src/state.jl` (included right after `abstract type AbstractLocalProjection`, because `LPState` is a field type of both result structs): `LPState`, `_state_weights` (lag within each panel unit), `_split_by_state`, `_resolve_state_shock`, `_shock_terms`, `statetest`/`StateTestResult` (a Tables.jl table), and the regime-specific `weakivtest` model (`_weakiv_model`, `_regime_iv_model`). Hooks in the main file: a `state` field at the end of `LocalProjection`/`LocalProjectionIV` (pass it on in every constructor call, including the `+` methods), the regime split inside `_lp_design`'s `design(h)`, `_shock_terms` in `coefpath`, and `regime` in `weakivtest`. `lp.shock` is the first-regime name, `lp.state.shock` the unsplit one; `has_intercept` stays true after the split (the regime intercepts span the constant). A new response transform is a term type plus `_lhs_at`/`_lhs_response`/`_lhs_tautological` methods (and `_specialize_horizon`/`_has_dynamic_horizon`/`_tracks_horizon` if it may appear on the right).
 
 Estimation pipeline (shared by `lp` and `lpiv`): `_lp_design` parses the formula, orders panel rows (`_panel_order`), converts `missing` to `NaN` without dropping rows, and returns per-horizon design matrices `Xs`/`Zs` (one shared pair unless a regressor tracks the horizon) plus `tautological_h0`. `_lp_estimate_horizons` builds the response per horizon with `_lhs_at`, masks incomplete rows per horizon (`:varying`) or on their intersection (`:fixed`), and fits `Regress.ols`/`Regress.iv(estimator, ...)`. Panels: every model column is computed per unit block (`_model_columns`), so leads, lags, cumulations and long differences never cross units.
 

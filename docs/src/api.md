@@ -8,12 +8,15 @@ coefpath
 stderror(::AbstractLocalProjection)
 summarize
 ewc_bandwidth
+statetest
 ```
 
 ## Types
 
 ```@docs
 LocalProjection
+LPState
+StateTestResult
 ```
 
 ## Transformation Terms
