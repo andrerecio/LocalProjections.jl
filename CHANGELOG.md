@@ -9,6 +9,8 @@
 
 - **EWC inference with Student-t_B critical values**: bands from `summarize`, `as_irf_result` and the plots use the `t_B` quantile when the stored estimator is `EWC(B)` (fixed-smoothing inference, Lazarus, Lewis, Stock & Watson 2018), and the normal quantile for every other estimator. `ewc_bandwidth(lp)` gives the LLSW rule `B = ⌊0.41·T₀^(2/3)⌋` with `T₀` the horizon-0 sample. EWC standard errors carry Regress's `n/(n−k)` factor (on `lp` and `lpiv` alike), so they are `√(n/(n−k))` times Stata `harreg`'s; the critical values are identical.
 
+- **State-dependent projections** (Ramey & Zubairy 2018): `lp`/`lpiv` take `state`, `statelag` and `regimes`. Every block of the design (exogenous incl. the intercept, endogenous, instruments) is split as `[B .* (1 - I_{t-lag}), B .* I_{t-lag}]`, with regime-suffixed names (`x_s0`/`x_s1`, or `x_exp`/`x_rec`); the state may be a weight in `[0, 1]`, is lagged within each panel unit, and its `missing` values exclude rows. The result carries an `LPState` in its `state` field. `statetest(lp[, estimator])` tests equal regime coefficients horizon by horizon from the full stored covariance (`χ²₁`, or `F(1, B)` under EWC), and `weakivtest(lpiv, h; regime)` runs Montiel Olea–Pflueger on the one-regime regression. Combining `state` with `fe()` is an error. Verified against `ivreg2`/`weakivtest` (Stata 19.5) on the Ramey–Zubairy data, with Regress 0.3's `n/(n−k)` on kernel HAC taken into account.
+
 ### Changed
 
 - **EWC bands are wider than before**: upstream 0.2 used normal critical values for EWC too. This is a deliberate methodological change.
