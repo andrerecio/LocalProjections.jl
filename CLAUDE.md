@@ -11,7 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Port order and status (the `dev` branch is the reference implementation of each piece):
 
 1. `ldiff`/`hbr`/`firstdiff` and horizon-tracking right-hand-side terms (done)
-2. EWC with Student-t_B critical values, `ewc_bandwidth` (guide §2, EWC-1)
+2. EWC with Student-t_B critical values, `ewc_bandwidth` (guide §2, EWC-1) (done; `src/ewc.jl`, hooked into `_irf_result`)
 3. `sample = :common` is **dropped**: upstream's `sample = :fixed` is the same estimator (names `:varying`/`:fixed`)
 4. State dependence (`state`/`statelag`/`regimes`, `statetest`)
 5. VAR core and `lagselect`
@@ -57,11 +57,12 @@ Both are included after the pipe-operator section and before `AbstractLocalProje
 
 Estimation pipeline (shared by `lp` and `lpiv`): `_lp_design` parses the formula, orders panel rows (`_panel_order`), converts `missing` to `NaN` without dropping rows, and returns per-horizon design matrices `Xs`/`Zs` (one shared pair unless a regressor tracks the horizon) plus `tautological_h0`. `_lp_estimate_horizons` builds the response per horizon with `_lhs_at`, masks incomplete rows per horizon (`:varying`) or on their intersection (`:fixed`), and fits `Regress.ols`/`Regress.iv(estimator, ...)`. Panels: every model column is computed per unit block (`_model_columns`), so leads, lags, cumulations and long differences never cross units.
 
-Inference: the result stores `vcov_estimator`; `result + vcov(est)` re-applies it per horizon (clusters and Driscoll–Kraay named by column are rebuilt on each horizon's rows). `stderror(lp; term)`, `summarize`, `as_irf_result` and the plots all go through `_irf_result`, which currently uses **normal** critical values for every estimator (EWC-1).
+Inference: the result stores `vcov_estimator`; `result + vcov(est)` re-applies it per horizon (clusters and Driscoll–Kraay named by column are rebuilt on each horizon's rows). `summarize`, `as_irf_result` and the plots all build bands in `_irf_result`, which takes the critical value from `_critical_value(_vcov_estimator(lp), level)` (`src/ewc.jl`): Student-t_B for `EWC(B)`, normal otherwise. A new estimator with its own reference distribution is one `_critical_distribution` method.
 
 ## Known issues
 
 - **Regress 0.3 conventions (verified 2026-10-23):** the finite-sample factor `n/(n−K)` is applied to kernel HAC, EWC, VARHAC and smoothers on OLS *and* IV models; `vcov(est, m; dofadjust = false)` removes it on both. REG-1 and REG-2 of the 0.1-era fork are resolved. Consequence: `lpiv` kernel HAC equals Stata `ivlpirf`/`ivreg2` (unadjusted) × √(n/(n−k)), and EWC equals `harreg` × √(n/(n−k)).
 - **`m + vcov(est)` cannot carry `dofadjust`** (`VcovSpec` holds only the estimator), so the no-factor `harreg` convention cannot be stored on a result. Draft upstream issue 7 in the fork's local `upstream_issue_drafts.md`.
-- **EWC-1 (methodological):** bands use normal quantiles even for EWC; canonical EWC inference pairs it with Student-t_B. Switching is an explicit methodological change (port step 2).
+- **EWC-1 resolved (port step 2):** EWC bands use Student-t_B critical values; upstream 0.2 used the normal for every estimator. The EWC variance keeps Regress's `n/(n−K)` (user decision, 2026-10-23), so it is `harreg` × √(n/(n−k)) with the same critical values (tested at h = 8 on the Ramey–Zubairy data).
+- **`weakivtest` with EWC:** Regress 0.3 throws an `ArgumentError` for EWC (and HC2–HC5, CR2/CR3), where 0.1 silently fell back to an HC0-style weight; the fork's warning is no longer needed.
 - **LP-1 is fixed upstream:** 0.2 never drops rows before building leads and lags.

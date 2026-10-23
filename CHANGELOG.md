@@ -7,6 +7,12 @@
 - **Long differences**: `ldiff(y)` (``y_{t+h} - y_{t-1}``, Piger & Stockwell 2025), `hbr(x, y)` (``(x_{t+h} - x_{t-1})/y_{t-1}``, Hall 2009, Barro & Redlick 2011; `hbr(x)` scales by `x` itself), and `cumul` of either, which sums the changes over horizons `0..h` with the baseline counted `h + 1` times. `firstdiff(x)` gives the lagged-difference controls `lags(firstdiff(y), p)`. A long difference on the left is never treated as a tautological `h = 0`. `cumul(ldiff(y, 3))` is an error; write `cumul(ldiff(y), 3)`.
 - **Horizon-tracking regressors**: a bare `cumul(x)`, `leads(x)`, `ldiff(x)` or `hbr(x, y)` on the right-hand side (exogenous, endogenous or instrument) is rebuilt at every horizon, under one coefficient name, so the one-step cumulative multiplier is a single call, `lpiv(TSLS(), @formula(cumul(y) ~ (cumul(g) ~ z) + ...), df; horizon)`. In panels, these terms are built within each unit. An explicit horizon (`cumul(x, 3)`) pins the column.
 
+- **EWC inference with Student-t_B critical values**: bands from `summarize`, `as_irf_result` and the plots use the `t_B` quantile when the stored estimator is `EWC(B)` (fixed-smoothing inference, Lazarus, Lewis, Stock & Watson 2018), and the normal quantile for every other estimator. `ewc_bandwidth(lp)` gives the LLSW rule `B = ⌊0.41·T₀^(2/3)⌋` with `T₀` the horizon-0 sample. EWC standard errors carry Regress's `n/(n−k)` factor (on `lp` and `lpiv` alike), so they are `√(n/(n−k))` times Stata `harreg`'s; the critical values are identical.
+
+### Changed
+
+- **EWC bands are wider than before**: upstream 0.2 used normal critical values for EWC too. This is a deliberate methodological change.
+
 ### Fixed
 
 - `anchor(y, lag(y))` (any anchor that is `missing` in its first rows) no longer throws when converting the anchored response; it equals `ldiff(y)`.
