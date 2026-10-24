@@ -13,6 +13,8 @@ lagselect
 nlags
 biascorrect
 varbootstrap
+fevd
+fevdbootstrap
 ```
 
 ## Types
@@ -24,6 +26,9 @@ StateTestResult
 VARLagSelection
 BiasCorrectedLP
 LPBootstrap
+LPFEVD
+FEVDBootstrap
+FEVDSummary
 ```
 
 ## Transformation Terms
