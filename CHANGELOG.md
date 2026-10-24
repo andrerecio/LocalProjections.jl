@@ -11,6 +11,8 @@
 
 - **State-dependent projections** (Ramey & Zubairy 2018): `lp`/`lpiv` take `state`, `statelag` and `regimes`. Every block of the design (exogenous incl. the intercept, endogenous, instruments) is split as `[B .* (1 - I_{t-lag}), B .* I_{t-lag}]`, with regime-suffixed names (`x_s0`/`x_s1`, or `x_exp`/`x_rec`); the state may be a weight in `[0, 1]`, is lagged within each panel unit, and its `missing` values exclude rows. The result carries an `LPState` in its `state` field. `statetest(lp[, estimator])` tests equal regime coefficients horizon by horizon from the full stored covariance (`χ²₁`, or `F(1, B)` under EWC), and `weakivtest(lpiv, h; regime)` runs Montiel Olea–Pflueger on the one-regime regression. Combining `state` with `fe()` is an error. Verified against `ivreg2`/`weakivtest` (Stata 19.5) on the Ramey–Zubairy data, with Regress 0.3's `n/(n−k)` on kernel HAC taken into account.
 
+- **VAR lag-order selection**: `lagselect(data, vars; maxlags, criterion = :aic | :bic)` ports `ic_var.m` of the Montiel Olea, Plagborg-Møller, Qian & Wolf (2025) suite (penalty denominator fixed at `T − p_max`, `Σ̂_p` from the full sample); `nlags(sel)` gives the selected order, and `VARLagSelection` is a Tables.jl table. Any Tables.jl input; `missing`/`NaN` in the VAR columns are rejected. The VAR primitives behind it and the coming bootstraps (`_var_ols`, Pope's bias correction, impact vector, IRF and MA recursions, simulation, Cholesky FEVD) are in `src/var.jl`. `LinearAlgebra` becomes a dependency.
+
 ### Changed
 
 - **EWC bands are wider than before**: upstream 0.2 used normal critical values for EWC too. This is a deliberate methodological change.

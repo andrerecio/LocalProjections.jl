@@ -5,6 +5,7 @@ export lp, lpiv, TSLS, LIML, Fuller, KClass, fe, horizonmodel, coefpath, nobs, s
 export @formula, lag, lead, cumul, lags, leads, anchor, ldiff, hbr, firstdiff
 export as_irf_result, ewc_bandwidth
 export LPState, statetest, StateTestResult
+export lagselect, VARLagSelection, nlags
 export irfplot, irfplot!
 public CumulTerm, LeadTerm, AnchorTerm, LongDiffTerm, DiffTerm
 
@@ -20,6 +21,7 @@ using CovarianceMatrices: CovarianceMatrices, CR, CR0, CR1, CR2, CR3, Cluster, C
     DriscollKraay, EWC, clusters, timekernel, timeindex, unitindex
 using Statistics: quantile
 using Distributions: Chisq, FDist, Normal, TDist, ccdf
+using LinearAlgebra: I, Symmetric, cholesky, eigmin, eigvals, issuccess, logdet
 using RecipesBase: RecipesBase, @recipe
 using ShiftedArrays: lag, lead
 using StatsBase: StatsBase, StatisticalModel, coef, nobs, response, stderror, vcov
@@ -1682,6 +1684,7 @@ function Regress.weakivtest(lpiv::LocalProjectionIV; regime = nothing, kwargs...
 end
 
 include("ewc.jl")
+include("var.jl")
 
 # ============================================================================
 # Shared methods for LocalProjection and LocalProjectionIV

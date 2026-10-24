@@ -9,6 +9,8 @@ stderror(::AbstractLocalProjection)
 summarize
 ewc_bandwidth
 statetest
+lagselect
+nlags
 ```
 
 ## Types
@@ -17,6 +19,7 @@ statetest
 LocalProjection
 LPState
 StateTestResult
+VARLagSelection
 ```
 
 ## Transformation Terms
