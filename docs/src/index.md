@@ -11,6 +11,11 @@ A Julia package for estimating Local Projection Impulse Response Functions.
 - Robust inference via CovarianceMatrices.jl (HC, HAC, cluster-robust)
 - Plot recipes for IRF visualization
 - Tabular summaries with `summarize()`
+- Long differences `ldiff()` and Hall–Barro–Redlick units `hbr()`
+- Equal-weighted cosine (EWC) HAR inference with Student-t critical values
+- State-dependent projections (Ramey–Zubairy) with `statetest()`
+- Herbst–Johannsen bias correction (`biascorrect`) and VAR moving-block bootstrap bands (`varbootstrap`, `lagselect`)
+- Gorodnichenko–Lee forecast-error variance decompositions (`fevd`, `fevdbootstrap`)
 
 ## Installation
 
@@ -46,3 +51,5 @@ summarize(lp_hac)
 - [Getting Started](tutorials/basic.md) - Basic local projections without transformations
 - [Transformations](tutorials/transformations.md) - Lags, leads, and cumulative responses
 - [Inference and Plotting](tutorials/inference.md) - Robust standard errors and visualization
+- [Plotting](tutorials/plotting.md) - Plots.jl and Makie figures
+- [FEVD (Gorodnichenko–Lee)](tutorials/fevd.md) - Forecast-error variance decompositions with local projections and their bias corrections

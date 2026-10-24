@@ -26,6 +26,7 @@
 ### Fixed
 
 - `anchor(y, lag(y))` (any anchor that is `missing` in its first rows) no longer throws when converting the anchored response; it equals `ldiff(y)`.
+- The documentation builds again: `docs/src/api.md` lists every exported docstring (it was missing 18, including `lpiv`, `horizonmodel`, `as_irf_result` and the `irfplot` methods) and no longer asks for a `lags` docstring, which Regress.jl does not provide; the `@ref`s that pointed to undocumented names resolve. The manual adds the Plotting and FEVD tutorials and an EWC section in the inference tutorial; `pagesonly = true` skips stray `.md` files.
 
 ## 0.2.0
 

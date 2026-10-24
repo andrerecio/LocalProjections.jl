@@ -7,7 +7,7 @@ This tutorial covers robust variance estimation and IRF visualization.
 ```@example infer
 using LocalProjections, DataFrames, Random
 using StatsModels: @formula
-using CovarianceMatrices: HC1, HC3, Bartlett, Parzen, NeweyWest
+using CovarianceMatrices: HC1, HC3, Bartlett, Parzen, NeweyWest, EWC
 Random.seed!(456)
 
 n = 200
@@ -65,6 +65,20 @@ println("Parzen SEs: ", round.(se_parzen, digits=4))
 # Fixed bandwidth of 5
 se_fixed = stderror(lp_result + vcov(Bartlett(5)); term=:x)
 println("Fixed bandwidth SEs: ", round.(se_fixed, digits=4))
+```
+
+### Equal-Weighted Cosine (EWC)
+
+The EWC estimator of Lazarus, Lewis, Stock and Watson (2018) averages `B` cosine-weighted
+periodogram terms. `ewc_bandwidth` gives their rule ``B = \lfloor 0.41\,T_0^{2/3} \rfloor``
+from the horizon-0 sample, to be held fixed across horizons. Bands on an EWC covariance
+use Student-``t_B`` critical values instead of normal ones (fixed-smoothing asymptotics),
+so they are wider than a normal band with the same standard errors.
+
+```@example infer
+B = ewc_bandwidth(lp_result)
+lp_ewc = lp_result + vcov(EWC(B))
+summarize(lp_ewc; term=:x, level=0.90)
 ```
 
 ## Summary Tables with `summarize()`
@@ -146,5 +160,6 @@ plot(p1, p2, p3, layout=(1,3), size=(900, 300))
 | `Bartlett(bw)` | HAC with fixed bandwidth |
 | `Parzen{NeweyWest}()` | HAC with Parzen kernel |
 | `QuadraticSpectral{Andrews}()` | HAC with QS kernel |
+| `EWC(B)` | Equal-weighted cosine, Student-``t_B`` bands (`B = ewc_bandwidth(lp_result)`) |
 
 See [CovarianceMatrices.jl documentation](https://gragusa.github.io/CovarianceMatrices.jl/stable/) for more options.
