@@ -7,6 +7,7 @@ export as_irf_result, ewc_bandwidth
 export LPState, statetest, StateTestResult
 export lagselect, VARLagSelection, nlags
 export biascorrect, BiasCorrectedLP
+export varbootstrap, LPBootstrap
 export irfplot, irfplot!
 public CumulTerm, LeadTerm, AnchorTerm, LongDiffTerm, DiffTerm
 
@@ -19,8 +20,9 @@ using Regress: Regress, OLSMatrixEstimator, IVMatrixEstimator, ols, iv, TSLS, LI
     KClass, AbstractIVEstimator,
     VcovSpec, lags, fe, first_stage, weakivtest
 using CovarianceMatrices: CovarianceMatrices, CR, CR0, CR1, CR2, CR3, Cluster, Clustering,
-    DriscollKraay, EWC, clusters, timekernel, timeindex, unitindex
+    DriscollKraay, EWC, HC1, clusters, timekernel, timeindex, unitindex
 using Statistics: mean, quantile
+using Random: AbstractRNG, Xoshiro, default_rng
 using Distributions: Chisq, FDist, Normal, TDist, ccdf
 using LinearAlgebra: I, Symmetric, cholesky, cond, eigmin, eigvals, factorize, issuccess,
     logdet, tr
@@ -1689,6 +1691,7 @@ end
 include("ewc.jl")
 include("var.jl")
 include("biascorrect.jl")
+include("varbootstrap.jl")
 
 # ============================================================================
 # Shared methods for LocalProjection and LocalProjectionIV

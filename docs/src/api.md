@@ -12,6 +12,7 @@ statetest
 lagselect
 nlags
 biascorrect
+varbootstrap
 ```
 
 ## Types
@@ -22,6 +23,7 @@ LPState
 StateTestResult
 VARLagSelection
 BiasCorrectedLP
+LPBootstrap
 ```
 
 ## Transformation Terms
