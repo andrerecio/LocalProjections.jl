@@ -244,8 +244,9 @@ irf = as_irf_result(b; coverage = [0.68, 0.90])
 The default vertical range covers ``[0, 1]`` and the bands. `as_irf_result`
 returns a MacroEconometricTools `LocalProjectionIRFResult` whose `data` are
 **shares**, with `metadata.fevd = true` and `metadata.quantity = :fevd_share`.
-The Makie `irfplot` methods of this package do not cover FEVD results; plot the
-converted `LocalProjectionIRFResult` instead.
+With a Makie backend loaded, `irfplot(f; levels, prewhiten)` and
+`irfplot(b; levels, band, biascorrected, prewhiten)` draw the same bands from that
+object.
 
 ## Conventions and reproducing the paper
 

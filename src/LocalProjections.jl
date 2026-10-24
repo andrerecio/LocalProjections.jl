@@ -439,7 +439,7 @@ Supertype of local projection results: [`LocalProjection`](@ref) (OLS, from
 [`lp`](@ref)) and [`LocalProjectionIV`](@ref) (IV, from [`lpiv`](@ref)). Each holds
 one fitted Regress.jl model per horizon `0:horizon`.
 
-Per-horizon models are reached with [`horizonmodel`](@ref); [`coefnames`](@ref) and
+Per-horizon models are reached with [`horizonmodel`](@ref); `coefnames` and
 [`nobs`](@ref) give the coefficient names and the sample size at each horizon.
 """
 abstract type AbstractLocalProjection end

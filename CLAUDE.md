@@ -18,7 +18,7 @@ Port order and status (the `dev` branch is the reference implementation of each 
 6. Herbst–Johannsen `biascorrect` (guide §3) (done; `src/biascorrect.jl`; swapped with the bootstrap, which calls it in every draw)
 7. `varbootstrap` (guide §4) (done; `src/varbootstrap.jl`)
 8. Gorodnichenko–Lee `fevd`/`fevdbootstrap` (done; `src/fevd_core.jl`, `fevd.jl`, `fevd_bootstrap.jl`, `fevd_summary.jl`, `fevd_plotting.jl`)
-9. Plots for the new result types, docs and tutorials (the upstream docs build already fails on missing docstrings and broken `@ref`s)
+9. Plots for the new result types, docs and tutorials: (a) docs build fixed, API page complete, Plotting/FEVD tutorials and an EWC section in the manual (done); (b) Ramey–Zubairy tutorial with its figure scripts, the inference procedures guide (its §6 audit needs a 0.2 status), README; (c) `benchmark/coverage_study.jl`
 
 New features of upstream 0.2 that a ported procedure does not support (panel `unit`/`time`, `fe()`, LIML/Fuller/k-class) must throw a clear `ArgumentError`, not run silently.
 
@@ -41,6 +41,8 @@ julia +1.13 --project=dev -m Runic --inplace src test
 # Docs (local build only)
 julia +1.13 --project=docs docs/make.jl
 ```
+
+`docs/build/` is tracked upstream, so a local docs build rewrites it: don't commit it (`git stash push -- docs/build`), or build from a copy of `make.jl` with `build = <scratch dir>`. In this git worktree Documenter cannot find the remote, so that copy also needs `remotes = nothing` and `root = "<worktree>/docs"`. After a dependency change, `Pkg.resolve()` the `docs` environment (its Manifest is local).
 
 - `dev/Project.toml` holds the dev tools (Runic, TestEnv, StableRNGs, Revise), deliberately not in the package `[deps]`: Aqua's `stale_deps` check fails on unused dependencies. `test_pkg/` is upstream's personal environment with local paths; do not use it.
 - `Regress`, `MacroEconometricTools` are unregistered git packages pinned to `rev = "main"` in `[sources]`; instantiation needs network and can break when their `main` moves.
