@@ -8,6 +8,7 @@ export LPState, statetest, StateTestResult
 export lagselect, VARLagSelection, nlags
 export biascorrect, BiasCorrectedLP
 export varbootstrap, LPBootstrap
+export fevd, LPFEVD, fevdbootstrap, FEVDBootstrap, FEVDSummary
 export irfplot, irfplot!
 public CumulTerm, LeadTerm, AnchorTerm, LongDiffTerm, DiffTerm
 
@@ -18,15 +19,15 @@ using StatsModels: StatsModels, AbstractTerm, Term, FunctionTerm, ConstantTerm,
     FormulaTerm, term, @formula
 using Regress: Regress, OLSMatrixEstimator, IVMatrixEstimator, ols, iv, TSLS, LIML, Fuller,
     KClass, AbstractIVEstimator,
-    VcovSpec, lags, fe, first_stage, weakivtest
+    VcovSpec, LagTerm, lags, fe, first_stage, weakivtest
 using CovarianceMatrices: CovarianceMatrices, CR, CR0, CR1, CR2, CR3, Cluster, Clustering,
     DriscollKraay, EWC, HC1, clusters, timekernel, timeindex, unitindex
-using Statistics: mean, quantile
-using Random: AbstractRNG, Xoshiro, default_rng
+using Statistics: mean, quantile, std, var
+using Random: AbstractRNG, Xoshiro, default_rng, randn!
 using Distributions: Chisq, FDist, Normal, TDist, ccdf
-using LinearAlgebra: I, Symmetric, cholesky, cond, eigmin, eigvals, factorize, issuccess,
-    logdet, tr
-using RecipesBase: RecipesBase, @recipe
+using LinearAlgebra: Factorization, I, Symmetric, cholesky, cond, dot, eigen, eigmin, eigvals,
+    factorize, issuccess, logdet, lu, tr
+using RecipesBase: RecipesBase, @recipe, @series
 using ShiftedArrays: lag, lead
 using StatsBase: StatsBase, StatisticalModel, coef, modelmatrix, nobs, response, stderror,
     vcov
@@ -1692,6 +1693,11 @@ include("ewc.jl")
 include("var.jl")
 include("biascorrect.jl")
 include("varbootstrap.jl")
+include("fevd_core.jl")
+include("fevd.jl")
+include("fevd_bootstrap.jl")
+include("fevd_summary.jl")
+include("fevd_plotting.jl")
 
 # ============================================================================
 # Shared methods for LocalProjection and LocalProjectionIV

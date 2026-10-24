@@ -1,0 +1,5 @@
+# The fixture CSVs (~6.9 MB) are generated locally and not committed: run the
+# drivers as described in README.md. Without them test/runtests.jl skips the
+# :octave items of test/testitems_fevd_octave.jl; the key application values
+# are pinned in test/testitems_fevd_checks.jl.
+*.csv
