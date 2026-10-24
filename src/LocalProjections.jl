@@ -6,6 +6,7 @@ export @formula, lag, lead, cumul, lags, leads, anchor, ldiff, hbr, firstdiff
 export as_irf_result, ewc_bandwidth
 export LPState, statetest, StateTestResult
 export lagselect, VARLagSelection, nlags
+export biascorrect, BiasCorrectedLP
 export irfplot, irfplot!
 public CumulTerm, LeadTerm, AnchorTerm, LongDiffTerm, DiffTerm
 
@@ -19,12 +20,14 @@ using Regress: Regress, OLSMatrixEstimator, IVMatrixEstimator, ols, iv, TSLS, LI
     VcovSpec, lags, fe, first_stage, weakivtest
 using CovarianceMatrices: CovarianceMatrices, CR, CR0, CR1, CR2, CR3, Cluster, Clustering,
     DriscollKraay, EWC, clusters, timekernel, timeindex, unitindex
-using Statistics: quantile
+using Statistics: mean, quantile
 using Distributions: Chisq, FDist, Normal, TDist, ccdf
-using LinearAlgebra: I, Symmetric, cholesky, eigmin, eigvals, issuccess, logdet
+using LinearAlgebra: I, Symmetric, cholesky, cond, eigmin, eigvals, factorize, issuccess,
+    logdet, tr
 using RecipesBase: RecipesBase, @recipe
 using ShiftedArrays: lag, lead
-using StatsBase: StatsBase, StatisticalModel, coef, nobs, response, stderror, vcov
+using StatsBase: StatsBase, StatisticalModel, coef, modelmatrix, nobs, response, stderror,
+    vcov
 using AxisArrays: AxisArrays, AxisArray, Axis
 using MacroEconometricTools: MacroEconometricTools, LocalProjectionIRFResult, irfplot, irfplot!,
     point_estimate, lowerbounds, upperbounds, coverages
@@ -1685,6 +1688,7 @@ end
 
 include("ewc.jl")
 include("var.jl")
+include("biascorrect.jl")
 
 # ============================================================================
 # Shared methods for LocalProjection and LocalProjectionIV
@@ -1944,6 +1948,7 @@ function _irf_result(lp::AbstractLocalProjection, term::Symbol, coverage; diagno
     upper = [cube(beta .+ zc .* se) for zc in z]
 
     meta = (horizon = lp.horizon, formula = lp.base_formula, term = term)
+    lp isa BiasCorrectedLP && (meta = (meta..., bias_corrected = true))
     if diagnostics && lp isa LocalProjectionIV
         meta = (meta..., is_iv = true, first_stage = [first_stage(lp, h) for h in 0:lp.horizon])
     end

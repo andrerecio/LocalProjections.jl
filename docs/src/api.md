@@ -11,6 +11,7 @@ ewc_bandwidth
 statetest
 lagselect
 nlags
+biascorrect
 ```
 
 ## Types
@@ -20,6 +21,7 @@ LocalProjection
 LPState
 StateTestResult
 VARLagSelection
+BiasCorrectedLP
 ```
 
 ## Transformation Terms

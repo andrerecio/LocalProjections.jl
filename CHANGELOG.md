@@ -13,6 +13,8 @@
 
 - **VAR lag-order selection**: `lagselect(data, vars; maxlags, criterion = :aic | :bic)` ports `ic_var.m` of the Montiel Olea, Plagborg-Møller, Qian & Wolf (2025) suite (penalty denominator fixed at `T − p_max`, `Σ̂_p` from the full sample); `nlags(sel)` gives the selected order, and `VARLagSelection` is a Tables.jl table. Any Tables.jl input; `missing`/`NaN` in the VAR columns are rejected. The VAR primitives behind it and the coming bootstraps (`_var_ols`, Pope's bias correction, impact vector, IRF and MA recursions, simulation, Cholesky FEVD) are in `src/var.jl`. `LinearAlgebra` becomes a dependency.
 
+- **Herbst–Johannsen bias correction**: `biascorrect(lp)` returns a `BiasCorrectedLP`, an `AbstractLocalProjection` whose `coefpath` is the corrected path `θ̂ᶜ_h = θ̂_h + (T₀ − h)⁻¹ Σⱼ ĉⱼ θ̂ᶜ_{h−j}` (port of `lp_biascorr.m`). `summarize`, `as_irf_result` and the plots center on the corrected path with the standard errors of the uncorrected coefficients, from the stored estimator; `bc + vcov(est)` keeps the correction, and `as_irf_result` flags `bias_corrected = true`. The correction throws where it is not derived: IV, `sample = :fixed`, panels, `fe()`, state dependence, horizon-tracking regressors, `ldiff`/`hbr` responses, and samples that are not the horizon-0 sample truncated by `h` rows.
+
 ### Changed
 
 - **EWC bands are wider than before**: upstream 0.2 used normal critical values for EWC too. This is a deliberate methodological change.

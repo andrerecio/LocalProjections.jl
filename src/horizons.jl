@@ -60,6 +60,27 @@ _lhs_tautological(::LongDiffTerm) = false
 _lhs_tautological(::CumulTerm{<:LongDiffTerm}) = false
 _lhs_tautological(t::AnchorTerm) = _lhs_tautological(t.response)
 
+"""
+    _lhs_kind(formula) -> Symbol
+
+Which response transform the local-projection formula uses: `:leads`, `:cumul`,
+`:anchor`, `:longdiff` (`ldiff`, `hbr`, or `cumul` of either), or `:unknown`.
+Determines how the VAR-implied pseudo-truth must be accumulated across horizons,
+and which responses the bias correction and the VAR bootstrap cover.
+"""
+function _lhs_kind(formula::FormulaTerm)
+    lhs = formula.lhs
+    if lhs isa FunctionTerm
+        nm = nameof(lhs.f)
+        _is_longdiff_call(lhs) && return :longdiff
+        nm === :cumul && _is_longdiff_call(first(lhs.args)) && return :longdiff
+        nm === :leads && return :leads
+        nm === :cumul && return :cumul
+        (nm === :anchor || nm === :|) && return :anchor
+    end
+    return :unknown
+end
+
 # ============================================================================
 # Horizon-tracking terms on the right-hand side
 # A bare cumul(x), leads(x), ldiff(x) or hbr(x, y) among the regressors (exogenous,
