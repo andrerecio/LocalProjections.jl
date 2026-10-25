@@ -16,6 +16,7 @@ makedocs(
             "Transformations" => "tutorials/transformations.md",
             "Inference and Plotting" => "tutorials/inference.md",
             "Plotting" => "tutorials/plotting.md",
+            "Ramey-Zubairy Multipliers" => "tutorials/ramey_zubairy.md",
             "FEVD (Gorodnichenko-Lee)" => "tutorials/fevd.md",
         ],
         "API Reference" => "api.md",

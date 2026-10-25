@@ -18,7 +18,7 @@ Port order and status (the `dev` branch is the reference implementation of each 
 6. Herbst–Johannsen `biascorrect` (guide §3) (done; `src/biascorrect.jl`; swapped with the bootstrap, which calls it in every draw)
 7. `varbootstrap` (guide §4) (done; `src/varbootstrap.jl`)
 8. Gorodnichenko–Lee `fevd`/`fevdbootstrap` (done; `src/fevd_core.jl`, `fevd.jl`, `fevd_bootstrap.jl`, `fevd_summary.jl`, `fevd_plotting.jl`)
-9. Plots for the new result types, docs and tutorials: (a) docs build fixed, API page complete, Plotting/FEVD tutorials and an EWC section in the manual (done); (b) Ramey–Zubairy tutorial with its figure scripts, the inference procedures guide (its §6 audit needs a 0.2 status), README; (c) `benchmark/coverage_study.jl`
+9. Plots for the new result types, docs and tutorials: (a) docs build fixed, API page complete, Plotting/FEVD tutorials and an EWC section in the manual (done); (b) Ramey–Zubairy tutorial with its four `docs/make_rz_*.jl` figure scripts and `docs/src/assets/` (done; the scripts read the CSV with a local `readclean` because the docs env has no CSV.jl, and the tutorial's `julia` blocks are not executed, so rerun them by hand after API changes); (c) README with the Piger–Stockwell figure (`docs/make_ps_figure.jl`); (d) the inference procedures guide (its §6 audit needs a 0.2 status: LP-1, REG-1 and EWC-1 are resolved); (e) `benchmark/coverage_study.jl`. The `dev` Quarto site (`docs/quarto`) is not ported
 
 New features of upstream 0.2 that a ported procedure does not support (panel `unit`/`time`, `fe()`, LIML/Fuller/k-class) must throw a clear `ArgumentError`, not run silently.
 
