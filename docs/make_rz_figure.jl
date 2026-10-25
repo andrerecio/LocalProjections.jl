@@ -80,14 +80,19 @@ summ(m, term) = summarize(m, NW; term = term, level = LEVEL)
 summ(m) = summarize(m, NW; level = LEVEL)
 
 # Montiel Olea–Pflueger effective F, computed off the same HAC covariance
-function mop(m)
+# (NaN at the horizons left out)
+function mop(m; hs = 0:HMAX)
     hac = m + vcov(NW)
-    ws = [weakivtest(hac, h) for h in 0:HMAX]
-    return (F = [w.F_eff for w in ws], cv = ws[1].cv_TSLS[2])   # cv[2] = 23.1085
+    ws = [weakivtest(hac, h) for h in hs]
+    F = fill(NaN, HMAX + 1)
+    F[hs .+ 1] = [w.F_eff for w in ws]
+    return (F = F, cv = first(ws).cv_TSLS[2])   # cv[2] = 23.1085
 end
 
 mop_news = mop(mult_news)
-mop_bp = mop(mult_bp)
+# Under Blanchard–Perotti the instrument equals the regressor at h = 0: Regress.jl
+# treats it as exogenous there, so there is no first stage to test.
+mop_bp = mop(mult_bp; hs = 1:HMAX)
 
 # ---------------------------------------------------------------- plotting
 
@@ -121,9 +126,8 @@ function irfpanel(s; title, reference = 0.0, xlab = "")
 end
 
 function fpanel(m; title, labelpos = :top, xlab = "")
-    # h = 0 under Blanchard–Perotti has instrument == regressor, so the first
-    # stage is degenerate and F is numerically infinite: drop that point.
-    ok = isfinite.(m.F) .& (m.F .< 1.0e4)
+    # Horizons without a first stage (h = 0 under Blanchard–Perotti) are NaN
+    ok = isfinite.(m.F)
     F = m.F[ok]
     lo = min(minimum(F), m.cv) / 1.7
     hi = max(maximum(F), m.cv) * 1.7

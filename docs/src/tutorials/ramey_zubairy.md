@@ -458,8 +458,9 @@ their sample; the slack multiplier moves by at most 0.004.
   `weakivtest` returns the Montiel Olea–Pflueger effective *F* and a robust
   first-stage *F*; for the just-identified case the latter is the closer
   analogue. For the Blanchard–Perotti shock at `h = 0` the instrument *equals*
-  the endogenous regressor, so the first stage is degenerate by construction and
-  2SLS collapses to OLS.
+  the endogenous regressor: Regress.jl then treats the regressor as exogenous,
+  so 2SLS is OLS and there is no first stage, and `weakivtest` throws at that
+  horizon.
 * The state-dependent results are shown for the slack state. The ZLB state is
   the same call with `state = :zlb`; it has not been compared with the
   published output. Anderson–Rubin confidence sets, which the paper uses where
