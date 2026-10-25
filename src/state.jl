@@ -243,14 +243,24 @@ test, defined for a single endogenous regressor, is run on. It carries the
 covariance estimator of `model`.
 """
 function _regime_iv_model(model::IVMatrixEstimator, r::Int)
+    # `X` holds the estimated columns (collinear ones dropped) with the endogenous ones at
+    # `endo_cols`; `Z` holds the exogenous columns of `X`, then the excluded instruments.
     pe = model.postestimation
-    n_endo = pe.n_endogenous
-    n_exo = size(pe.X, 2) - n_endo
+    exo_cols = setdiff(axes(pe.X, 2), pe.endo_cols)
+    n_endo, n_exo = length(pe.endo_cols), length(exo_cols)
     n_instr = size(pe.Z, 2) - n_exo
+    (n_endo > 0 && iseven(n_endo) && iseven(n_instr)) || throw(
+        ArgumentError(
+            "the fitted model has $n_endo endogenous regressors and $n_instr excluded " *
+                "instruments after collinear columns were dropped or recategorized as " *
+                "exogenous (e.g. an instrument equal to its endogenous regressor), so " *
+                "they cannot be split into the two regimes"
+        )
+    )
     k, q = n_endo ÷ 2, n_instr ÷ 2
-    endo_cols = n_exo .+ (((r - 1) * k + 1):(r * k))
+    endo_cols = pe.endo_cols[((r - 1) * k + 1):(r * k)]
     instr_cols = n_exo .+ (((r - 1) * q + 1):(r * q))
-    X = hcat(pe.X[:, 1:n_exo], pe.X[:, endo_cols])
+    X = hcat(pe.X[:, exo_cols], pe.X[:, endo_cols])
     Z = hcat(pe.Z[:, 1:n_exo], pe.Z[:, instr_cols])
     aux = iv(TSLS(), Z, X, pe.y; has_intercept = model.has_intercept, n_endogenous = k)
     return aux + vcov(model.vcov_estimator)

@@ -46,6 +46,7 @@ julia +1.13 --project=docs docs/make.jl
 
 - `dev/Project.toml` holds the dev tools (Runic, TestEnv, StableRNGs, Revise), deliberately not in the package `[deps]`: Aqua's `stale_deps` check fails on unused dependencies. `test_pkg/` is upstream's personal environment with local paths; do not use it.
 - `Regress`, `MacroEconometricTools` are unregistered git packages pinned to `rev = "main"` in `[sources]`; instantiation needs network and can break when their `main` moves.
+  The code needs Regress `main` at or after `c7957a01` (Regress.jl pull request 24, "Unify paths", 2026-10-24; the version is still 0.3.0, so compat cannot express it): `_regime_iv_model` reads `PostEstimationDataIVMatrix.endo_cols`. That PR also made matrix fits drop collinear columns by sweep in formula order and recategorize endogenous regressors the instruments explain as exogenous (so `weakivtest` throws where an instrument equals its regressor). After it moves, `Pkg.update("Regress")` in the package **and** the `docs` environment (separate manifests) and rerun the suite.
 - Aqua runs with type piracy checks **on** and `test/ExplicitImports.jl` checks every import: import names explicitly, and only extend StatsModels/Regress functions for types or functions this package owns.
 
 ## Architecture

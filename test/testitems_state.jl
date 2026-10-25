@@ -273,6 +273,14 @@ end
     miv = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z) + lags(y, 1)), df; horizon = 2)
     @test miv.state === nothing
     @test_throws "`regime` applies to state-dependent projections only" weakivtest(miv, 1; regime = 1)
+
+    # instrument equal to the regressor at h = 0 (Blanchard-Perotti): Regress.jl treats
+    # the regressor as exogenous there, so there is no regime first stage to test
+    dbp = transform(df, :x => identity => :xz)
+    mbp = lpiv(TSLS(), @formula(cumul(y) ~ (cumul(x) ~ xz) + lags(y, 1)), dbp; horizon = 2, state = :s)
+    @test_throws "cannot be split into the two regimes" weakivtest(mbp, 0; regime = 2)
+    @test isfinite(weakivtest(mbp, 1; regime = 2).F_eff)
+
     @test occursin("State:", sprint(show, MIME("text/plain"), r))
     @test !occursin("State:", sprint(show, MIME("text/plain"), miv))
 end
