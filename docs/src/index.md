@@ -52,4 +52,5 @@ summarize(lp_hac)
 - [Transformations](tutorials/transformations.md) - Lags, leads, and cumulative responses
 - [Inference and Plotting](tutorials/inference.md) - Robust standard errors and visualization
 - [Plotting](tutorials/plotting.md) - Plots.jl and Makie figures
+- [Ramey–Zubairy Multipliers](tutorials/ramey_zubairy.md) - Replication of the cumulative fiscal multipliers: IV local projections, state dependence, EWC inference, bias correction and bootstrap bands
 - [FEVD (Gorodnichenko–Lee)](tutorials/fevd.md) - Forecast-error variance decompositions with local projections and their bias corrections
