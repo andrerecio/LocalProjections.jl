@@ -19,6 +19,7 @@ makedocs(
             "Ramey-Zubairy Multipliers" => "tutorials/ramey_zubairy.md",
             "FEVD (Gorodnichenko-Lee)" => "tutorials/fevd.md",
         ],
+        "Inference Procedures Guide" => "inference_procedures_guide.md",
         "API Reference" => "api.md",
     ]
 )

@@ -187,7 +187,9 @@ raises the standard errors by 1–1.5%. And the two implementations select
 different bandwidths on the same regression, which matters more: the
 standard errors in the table are 0.77–1.14 times the published ones. With a
 fixed bandwidth, `Bartlett(bw)` equals `ivreg2 …, robust bw(bw)` once the
-``n/(n-k)`` factor is removed.
+``n/(n-k)`` factor is removed. Section 8 of
+[the inference procedures guide](../inference_procedures_guide.md) gives the
+formula each side implements and measures the difference horizon by horizon.
 
 ## The two-step multiplier
 
