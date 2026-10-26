@@ -79,20 +79,18 @@ mult_bp = lpiv(
 summ(m, term) = summarize(m, NW; term = term, level = LEVEL)
 summ(m) = summarize(m, NW; level = LEVEL)
 
-# Montiel Olea–Pflueger effective F, computed off the same HAC covariance
-# (NaN at the horizons left out)
-function mop(m; hs = 0:HMAX)
-    hac = m + vcov(NW)
-    ws = [weakivtest(hac, h) for h in hs]
-    F = fill(NaN, HMAX + 1)
-    F[hs .+ 1] = [w.F_eff for w in ws]
-    return (F = F, cv = first(ws).cv_TSLS[2])   # cv[2] = 23.1085
+# Montiel Olea–Pflueger effective F, computed off the same HAC covariance. Under
+# Blanchard–Perotti the instrument equals the regressor at h = 0: Regress.jl treats it
+# as exogenous there, there is no first stage to test, and weakivtest returns nothing
+# (NaN here).
+function mop(m)
+    ws = weakivtest(m + vcov(NW))
+    F = [w === nothing ? NaN : w.F_eff for w in ws]
+    return (F = F, cv = first(w for w in ws if w !== nothing).cv_TSLS[2])   # cv[2] = 23.1085
 end
 
 mop_news = mop(mult_news)
-# Under Blanchard–Perotti the instrument equals the regressor at h = 0: Regress.jl
-# treats it as exogenous there, so there is no first stage to test.
-mop_bp = mop(mult_bp; hs = 1:HMAX)
+mop_bp = mop(mult_bp)
 
 # ---------------------------------------------------------------- plotting
 

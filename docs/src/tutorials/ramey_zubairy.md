@@ -461,8 +461,8 @@ their sample; the slack multiplier moves by at most 0.004.
   first-stage *F*; for the just-identified case the latter is the closer
   analogue. For the Blanchard–Perotti shock at `h = 0` the instrument *equals*
   the endogenous regressor: Regress.jl then treats the regressor as exogenous,
-  so 2SLS is OLS and there is no first stage, and `weakivtest` throws at that
-  horizon.
+  so 2SLS is OLS and there is no first stage: `weakivtest(m, 0)` throws and
+  `weakivtest(m)` returns `nothing` at that horizon.
 * The state-dependent results are shown for the slack state. The ZLB state is
   the same call with `state = :zlb`; it has not been compared with the
   published output. Anderson–Rubin confidence sets, which the paper uses where
