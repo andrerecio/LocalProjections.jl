@@ -1,42 +1,727 @@
 # LocalProjections.jl
 
-[![CI](https://github.com/gragusa/LocalProjections.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/gragusa/LocalProjections.jl/actions/workflows/CI.yml) [![codecov.io](http://codecov.io/github/gragusa/LocalProjections.jl/coverage.svg?branch=master)](http://codecov.io/github/gragusa/LocalProjections.jl?branch=master) [![Aqua QA](https://juliatesting.github.io/Aqua.jl/dev/assets/badge.svg)](https://github.com/JuliaTesting/Aqua.jl) ![SciML Code Style](https://img.shields.io/static/v1?label=code%20style&message=SciML&color=9558b2&labelColor=389826) ![lifecycle](https://img.shields.io/badge/lifecycle-maturing-blue.svg)
+[![CI](https://github.com/andrerecio/LocalProjections.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/andrerecio/LocalProjections.jl/actions/workflows/CI.yml) [![codecov.io](http://codecov.io/github/andrerecio/LocalProjections.jl/coverage.svg?branch=main)](http://codecov.io/github/andrerecio/LocalProjections.jl?branch=main) [![Aqua QA](https://raw.githubusercontent.com/JuliaTesting/Aqua.jl/master/badge.svg)](https://github.com/JuliaTesting/Aqua.jl) ![SciML Code Style](https://img.shields.io/static/v1?label=code%20style&message=SciML&color=9558b2&labelColor=389826) ![lifecycle](https://img.shields.io/badge/lifecycle-maturing-blue.svg)
 
-Estimate local projection impulse response functions using horizon-specific linear regressions.
+Impulse response functions by local projections (Jordà, 2005): horizon-specific
+linear regressions with a formula interface, robust and HAR inference,
+small-sample bias correction, bootstrap confidence bands, and
+instrumental-variable support.
+
+**Website:** [andrearecine.me/LocalProjections.jl](https://andrearecine.me/LocalProjections.jl),
+with the Ramey–Zubairy (2018) example worked through on live output (built from
+the fork's earlier `dev` branch, on the 0.1 API).
+
+This is a fork of [gragusa/LocalProjections.jl](https://github.com/gragusa/LocalProjections.jl),
+ported onto its 0.2 release (stored covariance estimators, panels and fixed
+effects, a fixed estimation sample, LIML/Fuller/k-class IV), that extends the
+inference procedures: equal-weighted-cosine (EWC) HAR
+inference with Student-`t` critical values, the Herbst–Johannsen bias
+correction, the VAR residual moving-block bootstrap with VAR lag selection,
+horizon-tracking regressors for cumulative multipliers, state-dependent
+local projections, long-difference local projections (Piger–Stockwell),
+the Hall–Barro–Redlick transformation for fiscal multipliers, and the
+Gorodnichenko–Lee local-projection forecast-error variance decompositions.
+
+## Contents
+
+  - [Installation](#installation)
+  - [Quick start](#quick-start)
+  - [Formula interface](#formula-interface)
+  - [Panels, fixed effects and the estimation sample](#panels-fixed-effects-and-the-estimation-sample)
+  - [Inference](#inference)
+  - [Bias correction](#bias-correction)
+  - [Lag selection](#lag-selection)
+  - [Bootstrap inference](#bootstrap-inference)
+  - [Variance decompositions](#variance-decompositions)
+  - [Instrumental variables](#instrumental-variables)
+  - [Worked example: Ramey–Zubairy (2018)](#worked-example-rameyzubairy-2018)
+  - [Worked example: Piger–Stockwell (2025)](#worked-example-pigerstockwell-2025)
+  - [Plotting](#plotting)
+  - [Scope and known limitations](#scope-and-known-limitations)
+  - [Development](#development)
 
 ## Installation
 
 ```julia
 using Pkg
-Pkg.add(url="https://github.com/gragusa/LocalProjections.jl")
+Pkg.add(url = "https://github.com/andrerecio/LocalProjections.jl", rev = "port-0.2")
 ```
 
-## Example
+Julia 1.13 or newer is required. Two dependencies, `Regress.jl` and
+`MacroEconometricTools.jl`, are unregistered and are resolved from the `main`
+branch on GitHub automatically.
+
+## Quick start
 
 ```julia
 using LocalProjections, DataFrames, CovarianceMatrices, Plots
 
-# Generate sample data
+# Simulated data: y responds to cumulated shocks
 n = 200
 shock = randn(n)
-y = cumsum(shock) + 0.5 * randn(n)  # y responds to cumulative shocks
+y = cumsum(shock) + 0.5 * randn(n)
 df = DataFrame(y = y, shock = shock)
 
-# Estimate local projections: y_{t+h} = α + β * shock_t + ε
-# The coefficient β at each horizon h gives the impulse response
-lp_result = lp(@formula(leads(y) ~ shock), df; horizon=20)
+# y_{t+h} = α_h + θ_h·shock_t + controls,  h = 0, …, 20
+lp_result = lp(@formula(leads(y) ~ shock + lags(y, 2)), df; horizon = 20)
 
-# Use HAC-robust standard errors (Newey-West); the default is HC1
-lp_result = lp_result + vcov(Bartlett{NeweyWest}())
-
-# Extract the impulse response function
-irf = coefpath(lp_result; term=:shock)
-se = stderror(lp_result; term=:shock)
-
-# Plot IRF with 95% confidence bands
-plot(lp_result; term=:shock, levels=[0.95])
+coefpath(lp_result; term = :shock)                              # θ_0, …, θ_20
+summarize(lp_result, Bartlett{NeweyWest}(); level = 0.90)       # table with bands
+plot(lp_result, Bartlett{NeweyWest}(); term = :shock, levels = [0.68, 0.95])
 ```
+
+## Formula interface
+
+The left-hand side selects how the response is transformed at each horizon:
+
+| LHS                               | Response at horizon `h`                   |
+| --------------------------------- | ----------------------------------------- |
+| `leads(y)`                        | `y[t+h]`                                  |
+| `cumul(y)`                        | `y[t] + ⋯ + y[t+h]`                       |
+| `anchor(y, z)` (or `leads(y)\|z`) | `y[t+h] − z[t]`                           |
+| `ldiff(y)`                        | `y[t+h] − y[t−1]`                         |
+| `hbr(x, y)`                       | `(x[t+h] − x[t−1]) / y[t−1]`              |
+| `cumul(ldiff(y))`                 | `Σ_{j≤h} (y[t+j] − y[t−1])`               |
+| `cumul(hbr(x, y))`                | `Σ_{j≤h} (x[t+j] − x[t−1]) / y[t−1]`      |
+
+A plain left-hand side is rejected: a local projection needs one of these.
+The right-hand side accepts `lags(x, n)`, `lags(firstdiff(x), n)` for lagged
+first differences, interactions, and the usual StatsModels transformations. The right-hand-side design is built once and
+reused at every horizon, unless it contains a horizon-tracking term.
+
+### Horizon-tracking regressors
+
+`cumul(x)` and `leads(x)` may also appear on the right-hand side, in OLS and
+IV formulas alike. There they *track the projection horizon*: at horizon `h`
+the column is rebuilt as `x[t] + ⋯ + x[t+h]` (or `x[t+h]`) instead of being
+computed once. Writing an explicit horizon, `cumul(x, 3)`, pins the column and
+it then behaves like any fixed regressor.
+
+```julia
+# Cumulative multiplier: cumulative y on cumulative g through the same horizon,
+# with g instrumented by a shock. One call gives the whole path.
+mult = lpiv(TSLS(), @formula(cumul(y) ~ (cumul(g) ~ shock) + lags(y, 4) + lags(g, 4)),
+            df; horizon = 20)
+```
+
+The coefficient keeps the horizon-free name `cumul(g)`, so `coefpath`,
+`summarize` and the plot recipes work unchanged. The estimand of such a
+regression is a multiplier, not an impulse response, which is why
+`biascorrect` and `varbootstrap` reject formulas that contain one.
+
+### Long differences and Hall–Barro–Redlick units
+
+`ldiff(y)` is the response of the long-difference local projections of Piger
+and Stockwell (2025), `y[t+h] − y[t−1]`; the matching controls are lagged first
+differences, `lags(firstdiff(y), p)`. `hbr(x, y)` is the Hall (2009) and
+Barro–Redlick (2011) transformation `(x[t+h] − x[t−1]) / y[t−1]`, which puts
+the responses of output and spending in one unit (a share of lagged GDP) so
+that their ratio is a dollar multiplier; `hbr(y)` is `hbr(y, y)`, a growth
+rate.
+
+```julia
+# Long differences: y_{t+h} − y_{t−1} on the shock and lagged differences
+lp(@formula(ldiff(y) ~ shock + lags(firstdiff(y), 12) + lags(firstdiff(x), 12)),
+   df; horizon = 36)
+
+# One-step cumulative multiplier in HBR units:
+#   Σ_{j≤h} (Y_{t+j} − Y_{t−1})/Y_{t−1}  on  Σ_{j≤h} (G_{t+j} − G_{t−1})/Y_{t−1}
+lpiv(TSLS(), @formula(cumul(hbr(gdp)) ~ (cumul(hbr(gov, gdp)) ~ news) +
+                      lags(news, 4) + lags(log(gdp), 4) + lags(log(gov), 4)), df; horizon = 20)
+```
+
+Inside `cumul`, the change relative to `t − 1` is what gets summed, so the
+baseline enters `h + 1` times; a horizon, if any, goes on `cumul`
+(`cumul(ldiff(y), 3)`). Like `cumul(x)`, a bare `ldiff(x)` or `hbr(x, y)` on
+the right-hand side tracks the horizon, as the endogenous regressor above does.
+The per-horizon loop builds the response by dispatch on the left-hand-side
+term, so these specifications share every downstream tool: `+ vcov`,
+`summarize`, `plot`, `state`, `weakivtest`, `statetest`. `biascorrect` and
+`varbootstrap` are derived for responses in levels and reject them.
+
+## Panels, fixed effects and the estimation sample
+
+These come from upstream 0.2. `time = :t` sorts the rows by a time column, and
+`unit = :id` (with `time`) makes a panel: leads, lags, cumulations and long
+differences are computed within each unit, and standard errors are clustered by
+unit (`CR1(:id)`) by default. `fe(id)` terms absorb fixed effects. Each horizon
+uses its own complete rows by default (`sample = :varying`); `sample = :fixed`
+estimates every horizon on the rows available at all of them.
+
+```julia
+lp(@formula(leads(y) ~ shock + lags(y, 2) + fe(id)), panel;
+   horizon = 12, unit = :id, time = :t)
+lp(@formula(leads(y) ~ shock + lags(y, 2)), df; horizon = 12, sample = :fixed)
+```
+
+`biascorrect`, `varbootstrap` and `fevd` are time-series procedures and reject
+panels and `sample = :fixed`; state dependence cannot be combined with `fe()`.
+
+## Inference
+
+Any covariance estimator from
+[CovarianceMatrices.jl](https://github.com/gragusa/CovarianceMatrices.jl) is
+applied horizon by horizon. A result stores its estimator: `HC1()` by default
+(`CR1(unit)` for panels), replaced by `lp_result + vcov(estimator)`, and
+`stderror`, `summarize`, the plots and `as_irf_result` all use it; passing an
+estimator to `summarize` or `plot` is the same as adding it first. `summarize`
+returns coefficients, standard errors and confidence bands as a table:
+
+```julia
+# Heteroskedasticity-robust (Eicker–Huber–White, HC1)
+summarize(lp_result, HC1(); level = 0.90)
+
+# HAC with a fixed Bartlett bandwidth, or with Newey–West (1994) automatic selection
+summarize(lp_result, Bartlett(30.0); level = 0.90)
+summarize(lp_result, Bartlett{NeweyWest}(); level = 0.90)
+
+# Equal-weighted cosine (EWC) HAR inference, Lazarus–Lewis–Stock–Watson (2018)
+B = ewc_bandwidth(lp_result)        # B = ⌊0.41·T₀^(2/3)⌋ from the h = 0 sample
+summarize(lp_result, EWC(B); level = 0.90)
+```
+
+Confidence bands use the critical values canonically paired with the
+estimator: Student-`t_B` for `EWC(B)` (fixed-smoothing asymptotics), standard
+normal otherwise. The same rule applies in `summarize`, `plot` and
+`as_irf_result`.
+
+To reuse one estimator, store it in the result:
+
+```julia
+lp_ewc = lp_result + vcov(EWC(B))
+se = stderror(lp_ewc; term = :shock)
+plot(lp_ewc; term = :shock, levels = [0.90])
+```
+
+Regress.jl applies the finite-sample factor `n/(n−k)` to kernel HAC, EWC and
+VARHAC on OLS and IV models alike, as Stata's `newey` does and `ivreg2, robust`
+and `harreg` do not. The unadjusted matrix of one horizon is
+`vcov(estimator, horizonmodel(lp_result, h); dofadjust = false)`.
+
+The horizon-`h` residual of a local projection is a moving average of order
+`h` by construction, so a fixed, horizon-aware HAC bandwidth is usually the
+defensible choice. Section 8 of
+[the inference guide](docs/src/inference_procedures_guide.md) documents why
+the automatic Newey–West rule does not reproduce Stata's `ivreg2, bw(auto)`.
+
+## Bias correction
+
+`biascorrect` applies the Herbst–Johannsen (2024) small-sample correction to
+the impulse-response path (the "BCC" estimator). The persistence of the
+controls is estimated from the horizon-zero regression, and each horizon is
+corrected recursively through the already-corrected lower horizons:
+
+```julia
+bc = biascorrect(lp_result)         # OLS local projections only
+coefpath(bc)                        # corrected θ̂ᶜ path (θ̂₀ unchanged)
+summarize(bc, HC1(); level = 0.90)  # bands centered on θ̂ᶜ
+```
+
+Following the reference implementation (Montiel Olea, Plagborg-Møller, Qian &
+Wolf, 2025), the bands are centered on the corrected path but use the standard
+errors of the *uncorrected* coefficients. `plot` and `as_irf_result` accept
+the corrected result anywhere a plain one is accepted. The correction requires
+the same regressors at every horizon and a horizon-`h` sample that is the
+horizon-zero sample minus its last `h` rows; anything else is rejected with an
+explanation.
+
+## Lag selection
+
+`lagselect` chooses the lag order of a reduced-form VAR by an information
+criterion, following `ic_var.m` in the Montiel Olea, Plagborg-Møller, Qian &
+Wolf (2025) replication suite. A single order is selected for the whole system
+and used both for the local-projection controls and for the bootstrap VAR:
+
+```julia
+sel = lagselect(df, [:shock, :y]; maxlags = 10, criterion = :aic)
+nlags(sel)          # selected p
+DataFrame(sel)      # the full AIC/BIC path over p = 1:maxlags
+```
+
+`@formula` takes a literal lag count, so the selected `p` cannot be spliced in
+programmatically: read it off `nlags(sel)`, write it into the formula, and pass
+the same value as `nlags` to `varbootstrap` so the controls and the bootstrap
+VAR agree.
+
+With `n` variables and `T` observations,
+
+```
+AIC(p) = logdet Σ̂ₚ + 2(n²p + n) / (T − p_max)
+BIC(p) = logdet Σ̂ₚ + (n²p + n)·log(T − p_max) / (T − p_max)
+```
+
+Both criteria are always computed; `criterion` only decides which one is
+minimized. Two conventions are inherited deliberately from the reference: the
+penalty denominator is the fixed `T − p_max` for every `p`, so the criteria are
+comparable across the grid, while `Σ̂ₚ` is estimated on the full sample. The
+grid starts at `p = 1`.
+
+## Bootstrap inference
+
+`varbootstrap` implements the VAR residual moving-block bootstrap with Hall
+percentile-`t` bands. A reduced-form VAR is fitted and used as the bootstrap
+data-generating process. In each draw its residuals are resampled in
+overlapping blocks with position-specific recentering
+(Brüggemann–Jentsch–Trenkler), the VAR is iterated from randomly drawn
+contiguous initial conditions, and **the complete local projection is
+re-estimated** on the artificial sample:
+
+```julia
+# nlags(sel) was 4 here, so the formula uses lags(·, 4) to match.
+m = lp(@formula(leads(y) ~ shock + lags(y, 4) + lags(shock, 4)), df; horizon = 20)
+
+b = varbootstrap(m, df; vars = [:shock, :y], nlags = 4,
+                 nboot = 1000, rng = Xoshiro(20260831))
+
+summarize(b; level = 0.90)              # Hall percentile-t bands
+plot(b; levels = [0.68, 0.90])
+```
+
+`vars` is the VAR data vector in identification order. It must contain the
+shock and every variable the formula refers to, since the local projection is
+rebuilt in each draw. The block length defaults to `ceil(5.03·T^(1/4))`, the
+reference rule.
+
+By default both analytical corrections are applied, which together give the
+procedure the reference recommends:
+
+  - `popecorrect = true`: Pope (1990) bias-corrected VAR slopes as the
+    bootstrap data-generating process (intercept and residuals stay the OLS ones);
+  - `biascorrect = true`: the Herbst–Johannsen correction applied to the
+    real-data path *and* to every bootstrap path.
+
+Setting both to `false` reproduces the simpler uncorrected variant.
+
+Three centers are involved and should not be confused:
+
+| Object                                 | Center used                        |
+| -------------------------------------- | ---------------------------------- |
+| Reported response                      | bias-corrected LP, `θ̂ᶜ`            |
+| Bootstrap responses                    | bias-corrected bootstrap LP        |
+| Center of the bootstrap `t`-statistic  | Pope-corrected VAR pseudo-truth    |
+
+Centering the statistic at the VAR-implied response, not at the real-data LP
+estimate, is essential: the fitted VAR is what generates the bootstrap samples.
+`summarize` also accepts `method = :hall` or `method = :efron` for the other
+two constructions in `boot_ci.m`.
+
+Bands are **pointwise across horizons, not simultaneous**, and are generally
+asymmetric around the point estimate. They may also fail to *contain* it: the
+percentile-`t` and Hall constructions both correct for bias, so a shifted
+bootstrap `t`-distribution can push the whole interval to one side of `θ̂`. In
+the Monte Carlo study under `benchmark/coverage_study.jl` this happens in at
+most 0.3% of horizon-replications.
+
+Draws in which the LP cannot be estimated are counted in `b.nfail` and excluded
+from the quantiles. Because the Pope correction carries stability safeguards it
+may be attenuated or skipped entirely; inspect `b.pope_delta` (`1.0` full,
+`0.0` skipped). On near-unit-root data the full correction applies in only
+about three quarters of samples.
+
+Per-draw seeds are drawn from `rng` before the loop, so results are
+reproducible and identical whether or not `threaded = true` is passed. On a
+typical macro sample (T ≈ 240, horizon 20) a draw costs about a millisecond,
+dominated by rebuilding the StatsModels design rather than by linear algebra.
+
+## Variance decompositions
+
+`fevd` estimates the share of the forecast-error variance of
+`y_{t+h} − y_{t−1}` due to an observed shock with the local-projection
+estimators of Gorodnichenko and Lee (2020, *JBES*): the `R²` of the forecast
+error on the current and future shocks (`:r2`, the paper's main estimator), and
+the two LP-based ratios `:lpa` and `:lpb`. The formula is the local projection;
+its lags form the information set. `fevdbootstrap` bias-corrects the shares by
+the paper's VAR bootstrap (`:var`), Kilian–Kim block bootstrap (`:block`, R²
+only) or asymptotic simulation (`:simulation`). On the paper's data
+(`docs/src/data/gorodnichenko_lee.csv`, TFP shock, GDP):
+
+```julia
+using LocalProjections, DataFrames, CSV, Random, Plots
+
+gl = CSV.read("docs/src/data/gorodnichenko_lee.csv", DataFrame)
+fm = @formula(cumul(dy) ~ tfp + lags(tfp, 4) + lags(dy, 4) + lags(infl, 4) +
+                          lags(rr, 4) + lags(effr, 4))
+f = fevd(fm, gl; horizon = 20, estimator = :r2)
+f.share[[1, 9, 21]]                 # 0.0437, 0.1025, 0.3906 at h = 0, 8, 20
+
+# VAR bootstrap: HQIC over 1:10 picks p = 2 on [tfp, dy, infl, rr, effr]
+b = fevdbootstrap(f, gl; method = :var, nboot = 2000, rng = Xoshiro(1))
+b.biascorrected[[1, 9, 21]]         # 0.0463, 0.0692, 0.2817
+summarize(b; level = 0.90)          # the paper's band: shifted type-5 quantiles
+plot(b)                             # bias-corrected share, band, estimate dashed
+
+# LP-B with the paper's parsimonious impulse-response regression
+fl = fevd(fm, gl; horizon = 20, estimator = :lpb,
+          irf_formula = @formula(cumul(dy) ~ tfp + lags(tfp, 1) + lags(firstdiff(y), 1)))
+summarize(fevdbootstrap(fl; method = :simulation, rng = Xoshiro(1)))
+```
+
+Bias-corrected shares and bands are not clamped to `[0, 1]`. The
+[FEVD tutorial](docs/src/tutorials/fevd.md) covers the estimators, the band
+conventions and the points where the port departs from the authors' MATLAB
+code.
+
+## Instrumental variables
+
+`lpiv` estimates local projections with endogenous regressors using
+`(endogenous ~ instruments)` syntax and the estimator as first argument
+(`TSLS()`, `LIML()`, `Fuller(a)` or `KClass(κ)`), with first-stage diagnostics
+and the Montiel Olea–Pflueger weak-instrument test:
+
+```julia
+# x is endogenous, z is its instrument
+result = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z) + lags(y, 2)), df; horizon = 10)
+
+first_stage(result, 0)                                # first stage at horizon 0
+weakivtest(result + vcov(Bartlett{NeweyWest}()), 0)   # effective F and critical values
+```
+
+`weakivtest` uses the covariance estimator attached to the model. Kernel HAC
+estimators and CR0/CR1 cluster estimators are supported; Regress.jl rejects
+the others, notably `EWC`, because the Montiel Olea–Pflueger critical values
+assume a consistently estimated weight matrix, which fixed-smoothing
+estimators do not provide. Where an instrument equals its endogenous regressor
+(Blanchard–Perotti at `h = 0` below), Regress.jl treats the regressor as
+exogenous, 2SLS is OLS, and `weakivtest` throws at that horizon.
+
+## Worked example: Ramey–Zubairy (2018)
+
+![Ramey–Zubairy replication](docs/src/assets/ramey_zubairy_replication.png)
+
+The baseline linear model of Ramey and Zubairy (2018, *JPE*) on US quarterly
+data, 1889Q1–2015Q4. The cleaned dataset ships as
+`docs/src/data/ramey_zubairy.csv`, with the variable definitions of the
+authors' `jordagk.do`.
+
+The authors' Stata code builds the leads, cumulated variables and state
+interactions by hand and loops `ivreg2` over horizons. Rerun in Stata on their
+data with a fixed bandwidth, it agrees with this package to about `1e-10` on
+every coefficient, IV standard error, first-stage *F* and state-equality test.
+Three small differences remain, none in the point estimates of the linear
+model:
+
+  - **Bandwidth.** The published standard errors use `ivreg2, bw(auto)`, whose
+    Newey–West rule selects a different bandwidth than `Bartlett{NeweyWest}()`;
+    use a fixed `Bartlett(b)` ↔ `bw(b)` for a digit-level match.
+  - **Degrees of freedom.** `ivreg2` applies no small-sample factor; HAC
+    standard errors here carry `n/(n−k)`, on the impulse responses and the
+    multipliers alike, and are 1–3% larger.
+  - **One quarter.** Stata evaluates `unemp >= 6.5` to true where `unemp` is
+    missing (1889), which places 1890Q1 in the slack regime of the
+    state-dependent Blanchard–Perotti regressions. The shipped data has
+    `missing` there, so that quarter drops out; the slack multiplier moves by
+    at most 0.004. `rz.slack = coalesce.(rz.slack, 1)` restores Stata's sample.
+
+```julia
+using LocalProjections, DataFrames, CSV, CovarianceMatrices
+
+rz = CSV.read("docs/src/data/ramey_zubairy.csv", DataFrame; missingstring = "")
+rz.bp = rz.g                       # Blanchard–Perotti shock: current spending
+
+# Impulse responses of government spending and GDP to the military-news shock
+irf = lp(@formula(leads(g) ~ newsy + lags(newsy, 4) + lags(y, 4) + lags(g, 4)),
+         rz; horizon = 20)
+summarize(irf, Bartlett{NeweyWest}(); term = :newsy, level = 0.90)
+
+# One-step cumulative multiplier: cumulative GDP on cumulative spending through
+# the same horizon, spending instrumented by the news shock.
+mult = lpiv(TSLS(), @formula(cumul(y) ~ (cumul(g) ~ newsy) +
+                             lags(newsy, 4) + lags(y, 4) + lags(g, 4)), rz; horizon = 20)
+summarize(mult, Bartlett{NeweyWest}(); level = 0.90)
+
+# Weak-instrument diagnostic at the two-year horizon
+weakivtest(mult + vcov(Bartlett{NeweyWest}()), 8)
+```
+
+The two-year multiplier is **0.67** for the military-news shock and **0.41**
+for Blanchard–Perotti, below one as in the paper. The estimation samples match
+Stata's exactly, and every point estimate lands within 0.19 published standard
+errors of the authors' value. The news instrument never clears the Montiel
+Olea–Pflueger 5% critical value (the effective *F* peaks at 19.6 at five
+quarters), and Blanchard–Perotti falls below it from horizon 11 on.
+
+Standard errors, confidence bands and the weak-instrument test all use the
+automatic Newey–West bandwidth, and so does the figure, which
+`julia +1.13 --project=docs docs/make_rz_figure.jl` regenerates. The full
+walkthrough, including the two-step multiplier and a table against the
+published numbers, is in [the tutorial](docs/src/tutorials/ramey_zubairy.md).
+
+### State dependence
+
+Is the multiplier larger when there is slack? `state = :slack` lets every
+coefficient depend on the state of the previous quarter (unemployment at or
+above 6.5%): the intercept, the controls, the endogenous regressor and the
+instrument are each split by regime and both regimes are estimated jointly,
+which replaces the hand-built `rec*`/`exp*` interactions of `jordagk.do`.
+
+![Ramey–Zubairy multipliers by state](docs/src/assets/ramey_zubairy_state.png)
+
+```julia
+mult_s = lpiv(TSLS(), @formula(cumul(y) ~ (cumul(g) ~ newsy) +
+                               lags(newsy, 4) + lags(y, 4) + lags(g, 4)), rz;
+              horizon = 20, state = :slack, regimes = ("expansion", "slack"))
+
+hac = Bartlett{NeweyWest}()
+summarize(mult_s, hac; term = Symbol("cumul(g)_expansion"), level = 0.90)
+summarize(mult_s, hac; term = Symbol("cumul(g)_slack"), level = 0.90)
+statetest(mult_s, hac)                            # H0: equal multipliers, by horizon
+weakivtest(mult_s + vcov(hac), 8; regime = "expansion")
+```
+
+`regimes` names the two states, here expansion (no slack) and slack, and each
+gets its own coefficient path; the dashed line in the figure is the linear
+multiplier of the previous section. With the news shock the two-year multiplier
+is **0.59** in expansion and **0.62** under slack (p = 0.83); with
+Blanchard–Perotti it is **0.33** against **0.70** (p = 0.008), larger under
+slack but still below one — the paper's result. The news instrument is weak in
+expansion (effective *F* of at most 10.0). `state` works the same way in `lp` for impulse responses, and
+also accepts a weight in [0, 1] such as the Auerbach–Gorodnichenko transition
+function. `julia +1.13 --project=docs docs/make_rz_state_figure.jl` regenerates the
+figure, which omits the first two quarters, where the instrument is weakest.
+
+### HAR inference with EWC
+
+The news-shock impulse responses again, now with the HAR inference Lazarus,
+Lewis, Stock and Watson (2018) recommend: the equal-weighted-cosine (EWC)
+variance estimator with `B = ⌊0.41·T₀^(2/3)⌋` cosine terms, paired with
+Student-`t_B` critical values from fixed-smoothing asymptotics. The point
+estimates are those of the first figure; only the bands change. The dashed
+lines are the 90% automatic Newey–West band with normal critical values, for
+comparison.
+
+![Ramey–Zubairy EWC bands](docs/src/assets/ramey_zubairy_ewc.png)
+
+```julia
+using Plots
+
+irf_g = lp(@formula(leads(g) ~ newsy + lags(newsy, 4) + lags(y, 4) + lags(g, 4)),
+           rz; horizon = 20)
+irf_y = lp(@formula(leads(y) ~ newsy + lags(newsy, 4) + lags(y, 4) + lags(g, 4)),
+           rz; horizon = 20)
+
+B = ewc_bandwidth(irf_g)            # 25, from the T₀ = 500 rows of the h = 0 sample
+
+summarize(irf_y, EWC(B); term = :newsy, level = 0.90)     # Student-t₂₅ bands
+plot(irf_g, EWC(B); term = :newsy, levels = [0.68, 0.90])
+```
+
+With `B = 25` the 90% critical value is 1.708 instead of the normal 1.645. At
+the peaks the EWC standard errors are 2–5% above the Newey–West ones, so the
+band around the GDP peak of **0.29** at ten quarters widens from [0.16, 0.42]
+to [0.16, 0.43], and the one around the spending peak of **0.37** at eleven
+quarters from [0.15, 0.58] to [0.13, 0.60]. At short horizons the ranking
+reverses: between two and five quarters the EWC standard errors are 13–45%
+smaller. The conclusions barely move. The spending band excludes zero through
+horizon 18 under both procedures, and the GDP band through horizon 14; after
+that it includes zero at horizons 15–16, where Newey–West only does so at 15.
+`julia +1.13 --project=docs docs/make_rz_ewc_figure.jl` regenerates the figure.
+
+### Bias correction and bootstrap bands
+
+The same impulse responses with the procedure the reference recommends:
+Herbst–Johannsen bias correction and the VAR moving-block bootstrap with a
+Pope-corrected data-generating process, first with the four lags of the
+Ramey–Zubairy specification and then with the VAR order chosen by `lagselect`.
+The procedure is defined for OLS local projections, so it covers the impulse
+responses but not the IV multiplier or the weak-instrument test above, which
+stay on analytical HAC inference.
+
+**Four lags, the Ramey–Zubairy specification.** Same regressions as `irf`
+above, now for both responses. The VAR columns must be free of `missing`
+values, so the four leading rows without a news observation are dropped; the
+estimation samples are unchanged.
+
+![Ramey–Zubairy bootstrap, 4 lags](docs/src/assets/ramey_zubairy_bootstrap_lags4.png)
+
+```julia
+using Random, Plots
+
+rzc = dropmissing(rz, [:newsy, :y, :g])
+
+irf_y = lp(@formula(leads(y) ~ newsy + lags(newsy, 4) + lags(y, 4) + lags(g, 4)),
+           rzc; horizon = 20)
+irf_g = lp(@formula(leads(g) ~ newsy + lags(newsy, 4) + lags(y, 4) + lags(g, 4)),
+           rzc; horizon = 20)
+
+# Moving-block bootstrap; popecorrect and biascorrect are both on by default.
+# The same seed gives both responses the same artificial samples.
+boot_y = varbootstrap(irf_y, rzc; vars = [:newsy, :y, :g], nlags = 4,
+                      nboot = 1000, rng = Xoshiro(20260916))
+boot_g = varbootstrap(irf_g, rzc; vars = [:newsy, :y, :g], nlags = 4,
+                      nboot = 1000, rng = Xoshiro(20260916))
+
+summarize(boot_y; level = 0.90)     # bias-corrected path, Hall percentile-t bands
+plot(boot_g; levels = [0.68, 0.90])
+```
+
+Both responses are hump-shaped, peaking at about **0.30** for GDP after ten
+quarters and **0.38** for spending after eleven, per unit of news. The bias
+correction raises the paths by at most 0.02 on this long sample. The 90% band
+for GDP excludes zero through horizon 13, the one for spending from horizon 1
+to 17. All 1000 draws estimate successfully (`nfail = 0`) and the Pope
+correction applies in full (`pope_delta = 1.0`).
+
+**Lag order selected by AIC.** The reference selects the VAR order by AIC over
+`p = 1:10` and uses it for the local-projection controls and the bootstrap VAR
+alike. On the (news, GDP, spending) system that gives nine lags; BIC would pick
+two.
+
+![Ramey–Zubairy bootstrap, 9 lags](docs/src/assets/ramey_zubairy_bootstrap_lags9.png)
+
+```julia
+sel = lagselect(rzc, [:newsy, :y, :g]; maxlags = 10, criterion = :aic)
+nlags(sel)                          # 9
+
+irf_y = lp(@formula(leads(y) ~ newsy + lags(newsy, 9) + lags(y, 9) + lags(g, 9)),
+           rzc; horizon = 20)
+irf_g = lp(@formula(leads(g) ~ newsy + lags(newsy, 9) + lags(y, 9) + lags(g, 9)),
+           rzc; horizon = 20)
+
+boot_y = varbootstrap(irf_y, rzc; vars = [:newsy, :y, :g], nlags = 9,
+                      nboot = 1000, rng = Xoshiro(20260916))
+boot_g = varbootstrap(irf_g, rzc; vars = [:newsy, :y, :g], nlags = 9,
+                      nboot = 1000, rng = Xoshiro(20260916))
+
+summarize(boot_y; level = 0.90)
+plot(boot_g; levels = [0.68, 0.90])
+```
+
+The extra lags leave the shape intact: both responses now peak eleven quarters
+out, at about **0.29** for GDP and **0.39** for spending. The bands widen at
+long horizons and become right-skewed, with the upper half-width at the GDP
+peak nearly twice the lower one; the GDP band excludes zero through horizon 19
+and the spending band from horizon 1 to 16. Again no draw fails and the Pope
+correction applies in full. Each bootstrap of 1000 draws takes a few seconds.
+Both figures are regenerated by `julia +1.13 --project=docs docs/make_rz_bootstrap_figure.jl`,
+with the uncorrected OLS path dashed.
+
+### Hall–Barro–Redlick units
+
+Ramey and Zubairy also report multipliers under the Hall–Barro–Redlick
+transformation (`transformation = 2` in their MATLAB files): output and
+spending per capita, each change measured from `t − 1` and divided by lagged
+GDP, with the news shock scaled by lagged nominal GDP and log levels as
+controls. The shipped data carries those columns (`ypc`, `gpc`, `newsy_hbr`),
+and `hbr` expresses the transformation directly:
+
+```julia
+f = @formula(cumul(hbr(ypc)) ~ (cumul(hbr(gpc, ypc)) ~ newsy_hbr) +
+             lags(newsy_hbr, 4) + lags(log(ypc), 4) + lags(log(gpc), 4))
+
+mult_hbr = lpiv(TSLS(), f, rz; horizon = 20)
+summarize(mult_hbr, Bartlett{NeweyWest}(); level = 0.90)
+
+mult_hbr_s = lpiv(TSLS(), f, rz; horizon = 20, state = :slack, regimes = ("expansion", "slack"))
+statetest(mult_hbr_s, Bartlett{NeweyWest}())
+```
+
+The two-year multiplier is **0.70** (90% band [0.60, 0.80]), close to the
+0.67 of the Gordon–Krenn scaling above, and rises to 0.77 after four years. By
+state it is **0.77** in expansion and **0.63** under slack at two years
+(p = 0.33). The first stage is somewhat stronger than with Gordon–Krenn
+scaling, peaking at an effective *F* of 16.6 at six quarters, but it never
+clears the Montiel Olea–Pflueger 5% critical value of 23.1 either. Rerun in
+Stata with the variables rebuilt by hand from `rzdatnew.csv` and a fixed
+bandwidth (`newey, lag(5)` and `ivreg2, robust bw(6)` against `Bartlett(6)`),
+the impulse responses agree to 1e-11, the linear and state-dependent
+multipliers, their standard errors (once the `n/(n−k)` factor is removed) and
+the equality test to 1e-7 or better,
+and the Kleibergen–Paap *F* to 1e-13, on identical samples.
+
+## Worked example: Piger–Stockwell (2025)
+
+![Piger–Stockwell application](docs/src/assets/piger_stockwell_application.png)
+
+Piger and Stockwell (2025, *JAE*) ask whether local projections with an
+observed shock should be estimated in levels or in long differences. Their
+application, rerun here, projects 100·log industrial production and 100·log
+CPI on the standardized Jarocinski–Karadi (2020) monetary-policy and
+central-bank-information shocks, 1990:2–2019:12, with twelve monthly lags of
+five variables, either in levels or in differences. The data, from their
+replication package, ships as `docs/src/data/piger_stockwell.csv`.
+
+```julia
+using LocalProjections, DataFrames, CSV, CovarianceMatrices, Statistics
+
+ps = CSV.read("docs/src/data/piger_stockwell.csv", DataFrame; missingstring = "")
+ps = ps[1:(end - 57), :]                                  # through 2019:12
+ps.mp = ps.mp ./ std(skipmissing(ps.mp))                  # standardized shock
+
+levels = lp(@formula(leads(lip) ~ mp + lags(lip, 12) + lags(lcpi, 12) +
+                     lags(lsp500, 12) + lags(ebp, 12) + lags(gs1, 12)), ps; horizon = 36)
+diffs  = lp(@formula(ldiff(lip) ~ mp + lags(firstdiff(lip), 12) + lags(firstdiff(lcpi), 12) +
+                     lags(firstdiff(lsp500), 12) + lags(firstdiff(ebp), 12) +
+                     lags(firstdiff(gs1), 12)), ps; horizon = 36)
+
+summarize(diffs, Bartlett(38); level = 0.90)   # Newey–West with 37 lags, as in their code
+```
+
+The shock is `missing` before 1990:2. Those months still supply the lagged
+controls: lags and leads are built on the original time axis, and only the rows
+a horizon cannot use are dropped.
+
+The figure shows the paper's point. In levels (dashed) the responses revert
+toward zero at long horizons; in long differences (solid) they stay persistent
+— industrial production is 0.33 lower three years after a one-standard-deviation
+monetary-policy shock, against +0.09 in levels — at the price of bands 1.6 to 2.2
+times as wide at 36 months. Rerun in Stata (`newey, lag(37)`) and through a literal port of
+their MATLAB loop, the long-difference estimates and standard errors agree to
+1e-14 at every horizon, the levels ones to 1e-6 (a near-collinear design of 61
+log-level regressors), on identical samples. `julia +1.13 --project=docs docs/make_ps_figure.jl`
+regenerates the figure.
+
+## Plotting
+
+Every plot draws the `LocalProjectionIRFResult` (MacroEconometricTools.jl)
+that `as_irf_result` returns, so it shows the bands of `summarize`. With
+Plots.jl: `plot(lp; term, levels)` or `plot(lp, estimator; term, levels)` for
+OLS, IV and bias-corrected results, `plot(b; levels, method)` for bootstrap
+bands, and `plot(f)` / `plot(b; band, biascorrected)` for variance
+decompositions. With a Makie backend loaded, `irfplot` and `irfplot!` have
+methods for the same results.
+
+## Scope and known limitations
+
+  - **Bootstrap and bias correction scope.** Both are defined for OLS local
+    projections with `leads` or `cumul` responses and a horizon-invariant
+    regressor set on a single time series. `lpiv` results, horizon-tracking
+    regressors, state-dependent projections, panels and `sample = :fixed` are
+    rejected with an explanation, and so are
+    long-difference responses (`ldiff`, `hbr`); the bootstrap also rejects
+    anchored responses. The VAR columns must be free of `missing` and `NaN`.
+  - **Variance decompositions.** `fevd` covers the R², LP-A and LP-B estimators
+    with `cumul(v)` or `ldiff(y)` responses on a gap-free single time series
+    (`fevd(lp_result, data)` rejects IV, state dependence, panels and
+    `sample = :fixed`). Not implemented:
+    the VAR FEVD estimator and its VAR–VAR bootstrap, joint inference across
+    horizons, Driscoll–Kraay standard errors, and `method = :var` with a trend.
+  - **Finite-sample factor.** Kernel HAC, EWC and VARHAC carry `n/(n−k)` on
+    `lp` and `lpiv` results alike (see [Inference](#inference)); Stata's
+    `ivreg2, robust` and `harreg` apply none. `lp_result + vcov(estimator)`
+    cannot pass `dofadjust`; use `vcov(estimator, horizonmodel(lp_result, h);
+    dofadjust = false)` per horizon.
+  - **Regress.jl version.** The package follows Regress.jl's `main` branch and
+    needs commit `c7957a01` (2026-10-24) or later, which compat cannot express
+    because the version is still 0.3.0.
+
+The mathematical background, the mapping to the reference MATLAB
+implementation, and the audit behind these notes are in
+[`docs/src/inference_procedures_guide.md`](docs/src/inference_procedures_guide.md).
+
+## Development
+
+```bash
+julia +1.13 --project -e 'using Pkg; Pkg.test()'                  # tests (TestItemRunner, Aqua, ExplicitImports)
+julia +1.13 --project=dev -m Runic --inplace src test             # formatting, checked by CI
+julia +1.13 --project=docs docs/make.jl                           # local docs build
+julia +1.13 --project=benchmark benchmark/run_asv.jl              # benchmarks
+julia +1.13 --project=benchmark -t 4 benchmark/coverage_study.jl  # bootstrap coverage study
+```
+
+Test items are tagged (`:vcov`, `:ewc`, `:biascorr`, `:bootstrap`,
+`:lagselect`, `:lpiv`, `:state`, `:ldiff`, `:hbr`, `:fevd`, …) and can be run in isolation with
+TestItemRunner.
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+MIT License. See [LICENSE](LICENSE) for details.
