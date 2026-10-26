@@ -1643,7 +1643,10 @@ Montiel-Olea-Pflueger robust weak instrument test for horizon `h` (0-indexed).
 
 When the response is the endogenous shock, horizon 0 is tautological (the coefficient
 is exactly 1) and there is no IV estimate to test; `weakivtest(lpiv, 0)` then throws an
-`ArgumentError`. `first_stage(lpiv, 0)` remains available.
+`ArgumentError`. `first_stage(lpiv, 0)` remains available. It also throws at a horizon
+where the instruments explain the endogenous regressors exactly (e.g. an instrument equal
+to its regressor, as for the Blanchard-Perotti shock at `h = 0`): Regress.jl then treats
+them as exogenous, so there is no first stage to test.
 
 # Keyword Arguments
 - `level::Real=0.05`: Confidence level alpha
@@ -1660,6 +1663,13 @@ A `Regress.WeakIVTestResult` containing effective F, robust F, critical values, 
 See also: [`lpiv`](@ref), [`first_stage`](@ref)
 """
 function Regress.weakivtest(lpiv::LocalProjectionIV, h::Int; regime = nothing, kwargs...)
+    _no_first_stage(lpiv, h) && throw(
+        ArgumentError(
+            "weakivtest is undefined at horizon $h: the instruments explain the " *
+                "endogenous regressors exactly (e.g. an instrument equal to its regressor), " *
+                "so Regress.jl treats them as exogenous and there is no first stage to test"
+        )
+    )
     m = _weakiv_model(lpiv, horizonmodel(lpiv, h), regime)
     if h == 0 && lpiv.tautological_h0
         throw(
@@ -1678,16 +1688,23 @@ end
 
 Montiel-Olea-Pflueger robust weak instrument test for all horizons.
 
-Returns a vector with one `Regress.WeakIVTestResult` per horizon `0:lpiv.horizon`. When the
-response is the endogenous shock, the entry for horizon 0 is `nothing` (see
-`weakivtest(lpiv, h)`), so the vector stays aligned with the horizons.
+Returns a vector with one `Regress.WeakIVTestResult` per horizon `0:lpiv.horizon`. The entry
+is `nothing` at a horizon with nothing to test (see `weakivtest(lpiv, h)`): horizon 0 when
+the response is the endogenous shock, and any horizon where the instruments explain the
+endogenous regressors exactly. The vector stays aligned with the horizons.
 """
 function Regress.weakivtest(lpiv::LocalProjectionIV; regime = nothing, kwargs...)
     return [
-        h == 0 && lpiv.tautological_h0 ? nothing : weakivtest(lpiv, h; regime, kwargs...)
+        (h == 0 && lpiv.tautological_h0) || _no_first_stage(lpiv, h) ? nothing :
+            weakivtest(lpiv, h; regime, kwargs...)
             for h in 0:lpiv.horizon
     ]
 end
+
+# Regress.jl recategorizes endogenous regressors that the instruments explain exactly as
+# exogenous; a horizon where none is left has no first stage.
+_no_first_stage(lpiv::LocalProjectionIV, h::Integer) =
+    isempty(horizonmodel(lpiv, h).postestimation.endo_cols)
 
 include("ewc.jl")
 include("var.jl")

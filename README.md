@@ -382,7 +382,8 @@ the others, notably `EWC`, because the Montiel Olea–Pflueger critical values
 assume a consistently estimated weight matrix, which fixed-smoothing
 estimators do not provide. Where an instrument equals its endogenous regressor
 (Blanchard–Perotti at `h = 0` below), Regress.jl treats the regressor as
-exogenous, 2SLS is OLS, and `weakivtest` throws at that horizon.
+exogenous, 2SLS is OLS, and there is no first stage to test: `weakivtest(result, h)`
+throws at that horizon and `weakivtest(result)` returns `nothing` there.
 
 ## Worked example: Ramey–Zubairy (2018)
 

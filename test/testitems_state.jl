@@ -278,8 +278,15 @@ end
     # the regressor as exogenous there, so there is no regime first stage to test
     dbp = transform(df, :x => identity => :xz)
     mbp = lpiv(TSLS(), @formula(cumul(y) ~ (cumul(x) ~ xz) + lags(y, 1)), dbp; horizon = 2, state = :s)
-    @test_throws "cannot be split into the two regimes" weakivtest(mbp, 0; regime = 2)
+    @test_throws "no first stage to test" weakivtest(mbp, 0; regime = 2)
     @test isfinite(weakivtest(mbp, 1; regime = 2).F_eff)
+    wbp = weakivtest(mbp; regime = 2)
+    @test wbp[1] === nothing && wbp[2].F_eff == weakivtest(mbp, 1; regime = 2).F_eff
+    # the same horizon of the linear projection
+    mbl = lpiv(TSLS(), @formula(cumul(y) ~ (cumul(x) ~ xz) + lags(y, 1)), dbp; horizon = 2)
+    @test_throws "no first stage to test" weakivtest(mbl, 0)
+    wbl = weakivtest(mbl)
+    @test wbl[1] === nothing && all(w -> isfinite(w.F_eff), wbl[2:end])
 
     @test occursin("State:", sprint(show, MIME("text/plain"), r))
     @test !occursin("State:", sprint(show, MIME("text/plain"), miv))
