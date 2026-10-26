@@ -53,4 +53,5 @@ summarize(lp_hac)
 - [Inference and Plotting](tutorials/inference.md) - Robust standard errors and visualization
 - [Plotting](tutorials/plotting.md) - Plots.jl and Makie figures
 - [Ramey–Zubairy Multipliers](tutorials/ramey_zubairy.md) - Replication of the cumulative fiscal multipliers: IV local projections, state dependence, EWC inference, bias correction and bootstrap bands
+- [Inference Procedures Guide](inference_procedures_guide.md) - The mathematics of EWC, the Herbst–Johannsen correction and the VAR moving-block bootstrap, mapped to the Montiel Olea–Plagborg-Møller–Qian–Wolf replication code
 - [FEVD (Gorodnichenko–Lee)](tutorials/fevd.md) - Forecast-error variance decompositions with local projections and their bias corrections
