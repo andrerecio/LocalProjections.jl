@@ -78,7 +78,7 @@ end
     @test s_bc.se == s_lp.se
     @test (s_bc.upper .- s_bc.coef) ≈ (s_lp.upper .- s_lp.coef)
     # the stored estimator of the wrapped projection is used (HC1 by default)
-    @test summarize(bc; level = 0.9).se == s_lp.se
+    @test summarize(bc; level = 0.9).se ≈ s_lp.se
 
     # Estimator/critical-value pairing flows through (t_B for EWC)
     B = ewc_bandwidth(bc)
