@@ -6,9 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `port-0.2` in the fork [andrerecio/LocalProjections.jl](https://github.com/andrerecio/LocalProjections.jl) (`origin`). It starts from [gragusa/LocalProjections.jl](https://github.com/gragusa/LocalProjections.jl) 0.2.0 (`upstream`, merge `a08af5f`, 2026-10-21) and re-applies, one PR per piece, the fork's extensions developed on `dev` against upstream 0.1. Each piece is rewritten for the 0.2 API, where the covariance estimator is stored on the result.
 
-**Never open a pull request against gragusa's repository.** `gh pr create` on a fork defaults to the parent repo, so always pass `--repo andrerecio/LocalProjections.jl` (and `--base port-0.2` for port PRs).
+**Never open a pull request against gragusa's repository.** `gh pr create` on a fork defaults to the parent repo, so always pass `--repo andrerecio/LocalProjections.jl` (and `--base main`).
 
-`port-0.2` is the fork's default branch since 2026-10-27, and CI (tests on Julia 1.13 and the latest release, Runic, benchmarks on pull requests) runs on pushes and pull requests to it. The old 0.1-based `main` is kept unchanged and tagged `v0.1-fork`.
+Since 2026-10-27 the port is the fork's `main` (default branch): the old 0.1-based `main` was merged in with the `ours` strategy (PR #34) and is tagged `v0.1-fork`; `port-0.2` is the finished port branch. CI (tests on Julia 1.13 and the latest release, Runic, benchmarks on pull requests) runs on pushes and pull requests to `main` and `port-0.2`.
 
 Port order and status (the `dev` branch is the reference implementation of each piece):
 
@@ -20,7 +20,7 @@ Port order and status (the `dev` branch is the reference implementation of each 
 6. Herbst–Johannsen `biascorrect` (guide §3) (done; `src/biascorrect.jl`; swapped with the bootstrap, which calls it in every draw)
 7. `varbootstrap` (guide §4) (done; `src/varbootstrap.jl`)
 8. Gorodnichenko–Lee `fevd`/`fevdbootstrap` (done; `src/fevd_core.jl`, `fevd.jl`, `fevd_bootstrap.jl`, `fevd_summary.jl`, `fevd_plotting.jl`)
-9. Plots for the new result types, docs and tutorials: (a) docs build fixed, API page complete, Plotting/FEVD tutorials and an EWC section in the manual (done); (b) Ramey–Zubairy tutorial with its four `docs/make_rz_*.jl` figure scripts and `docs/src/assets/` (done; the scripts read the CSV with a local `readclean` because the docs env has no CSV.jl, and the tutorial's `julia` blocks are not executed, so rerun them by hand after API changes); (c) README with the Piger–Stockwell figure (`docs/make_ps_figure.jl`) (done; README numbers are rechecked by running its blocks, the scratch checks are not in the repo); (d) the inference procedures guide (done: kept as the 0.1.0 audit, with a status note and dated updates; math in Documenter syntax, ` ```math ` and double-backtick inline, since `\[…\]` and `$…$` do not render); (e) `benchmark/coverage_study.jl` (done, with the `lagselect`/`varbootstrap` benchmarks; the default 300×500 run takes ~2.5 min on 4 threads and reproduces its docstring numbers). The `dev` Quarto site (`docs/quarto`) is not ported
+9. Plots for the new result types, docs and tutorials: (a) docs build fixed, API page complete, Plotting/FEVD tutorials and an EWC section in the manual (done); (b) Ramey–Zubairy tutorial with its four `docs/make_rz_*.jl` figure scripts and `docs/src/assets/` (done; the scripts read the CSV with a local `readclean` because the docs env has no CSV.jl, and the tutorial's `julia` blocks are not executed, so rerun them by hand after API changes); (c) README with the Piger–Stockwell figure (`docs/make_ps_figure.jl`) (done; README numbers are rechecked by running its blocks, the scratch checks are not in the repo); (d) the inference procedures guide (done: kept as the 0.1.0 audit, with a status note and dated updates; math in Documenter syntax, ` ```math ` and double-backtick inline, since `\[…\]` and `$…$` do not render); (e) `benchmark/coverage_study.jl` (done, with the `lagselect`/`varbootstrap` benchmarks; the default 300×500 run takes ~2.5 min on 4 threads and reproduces its docstring numbers). The Quarto site (`docs/quarto`, from the old `main`) is ported: the pages run the 0.2 API (`lpiv(TSLS(), …)`, `weakivtest(lpiv)` with `nothing` at Blanchard–Perotti h = 0, `missing` shocks in Piger–Stockwell) and every number is computed at render time
 
 New features of upstream 0.2 that a ported procedure does not support (panel `unit`/`time`, `fe()`, LIML/Fuller/k-class) must throw a clear `ArgumentError`, not run silently.
 
@@ -42,7 +42,14 @@ julia +1.13 --project=dev -m Runic --inplace src test
 
 # Docs (local build only)
 julia +1.13 --project=docs docs/make.jl
+
+# Quarto site (docs/quarto): render with Julia 1.13, then publish by hand to gh-pages
+cd docs/quarto && julia +1.13 --project=. -e 'using Pkg; Pkg.instantiate()'
+QUARTO_JULIA=$(julia +1.13 -e 'print(joinpath(Sys.BINDIR, "julia"))') quarto render
+QUARTO_JULIA=... quarto publish gh-pages      # serves andrearecine.me/LocalProjections.jl
 ```
+
+The Quarto pages are not run by CI: re-render them by hand after an API change. `_freeze/` is local (gitignored); move it aside to force every page to re-run.
 
 `docs/build/` is tracked upstream, so a local docs build rewrites it: don't commit it (`git stash push -- docs/build`), or build from a copy of `make.jl` with `build = <scratch dir>`. In this git worktree Documenter cannot find the remote, so that copy also needs `remotes = nothing` and `root = "<worktree>/docs"`. After a dependency change, `Pkg.resolve()` the `docs` environment (its Manifest is local).
 
