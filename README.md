@@ -1,6 +1,6 @@
 # LocalProjections.jl
 
-[![CI](https://github.com/andrerecio/LocalProjections.jl/actions/workflows/CI.yml/badge.svg)](https://github.com/andrerecio/LocalProjections.jl/actions/workflows/CI.yml) [![codecov.io](http://codecov.io/github/andrerecio/LocalProjections.jl/coverage.svg?branch=main)](http://codecov.io/github/andrerecio/LocalProjections.jl?branch=main) [![Aqua QA](https://raw.githubusercontent.com/JuliaTesting/Aqua.jl/master/badge.svg)](https://github.com/JuliaTesting/Aqua.jl) ![SciML Code Style](https://img.shields.io/static/v1?label=code%20style&message=SciML&color=9558b2&labelColor=389826) ![lifecycle](https://img.shields.io/badge/lifecycle-maturing-blue.svg)
+[![CI](https://github.com/andrerecio/LocalProjections.jl/actions/workflows/CI.yml/badge.svg?branch=port-0.2)](https://github.com/andrerecio/LocalProjections.jl/actions/workflows/CI.yml) [![codecov.io](http://codecov.io/github/andrerecio/LocalProjections.jl/coverage.svg?branch=port-0.2)](http://codecov.io/github/andrerecio/LocalProjections.jl?branch=port-0.2) [![Aqua QA](https://raw.githubusercontent.com/JuliaTesting/Aqua.jl/master/badge.svg)](https://github.com/JuliaTesting/Aqua.jl) [![code style: runic](https://img.shields.io/badge/code_style-%E1%9A%B1%E1%9A%A2%E1%9A%BE%E1%9B%81%E1%9A%B2-black)](https://github.com/fredrikekre/Runic.jl) ![lifecycle](https://img.shields.io/badge/lifecycle-maturing-blue.svg)
 
 Impulse response functions by local projections (Jordà, 2005): horizon-specific
 linear regressions with a formula interface, robust and HAR inference,

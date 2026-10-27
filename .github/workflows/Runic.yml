@@ -3,9 +3,11 @@ on:
   pull_request:
     branches:
       - main
+      - port-0.2
   push:
     branches:
       - main
+      - port-0.2
     tags: ['*']
 jobs:
   runic:

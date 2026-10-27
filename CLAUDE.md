@@ -8,6 +8,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Never open a pull request against gragusa's repository.** `gh pr create` on a fork defaults to the parent repo, so always pass `--repo andrerecio/LocalProjections.jl` (and `--base port-0.2` for port PRs).
 
+`port-0.2` is the fork's default branch since 2026-10-27, and CI (tests on Julia 1.13 and the latest release, Runic, benchmarks on pull requests) runs on pushes and pull requests to it. The old 0.1-based `main` is kept unchanged and tagged `v0.1-fork`.
+
 Port order and status (the `dev` branch is the reference implementation of each piece):
 
 1. `ldiff`/`hbr`/`firstdiff` and horizon-tracking right-hand-side terms (done)
