@@ -64,3 +64,9 @@ test_pkg/
 AGENTS.md
 GEMINI.md
 JULIA.md
+# Local-only material, not in the repository
+.Rhistory
+docs/src/code/
+stata_test/
+.venv/
+stata/
