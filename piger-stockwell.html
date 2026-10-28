@@ -247,8 +247,8 @@ window.Quarto = {
 <th class="stubheadLabel" data-quarto-table-cell-role="th" style="text-align: right; font-weight: bold;"></th>
 <th style="text-align: left;" data-quarto-table-cell-role="th" title="Int64">Int64</th>
 <th style="text-align: left;" data-quarto-table-cell-role="th" title="Int64">Int64</th>
-<th style="text-align: left;" data-quarto-table-cell-role="th" title="Float64">Float64</th>
-<th style="text-align: left;" data-quarto-table-cell-role="th" title="Float64">Float64</th>
+<th style="text-align: left;" data-quarto-table-cell-role="th" title="Union{Missing, Float64}">Float64?</th>
+<th style="text-align: left;" data-quarto-table-cell-role="th" title="Union{Missing, Float64}">Float64?</th>
 <th style="text-align: left;" data-quarto-table-cell-role="th" title="Float64">Float64</th>
 <th style="text-align: left;" data-quarto-table-cell-role="th" title="Float64">Float64</th>
 </tr>
@@ -286,7 +286,7 @@ window.Quarto = {
 </div>
 </div>
 </div>
-<p>The shocks begin in 1990:2. Before that they are <code>NaN</code>, not <code>missing</code>: those months are not estimation rows, but the lagged controls of the first estimation rows reach back into them, and <code>lp</code> drops rows with <code>missing</code> values before it builds lags.</p>
+<p>The shocks begin in 1990:2 and are <code>missing</code> before. Those months are not estimation rows, but the lagged controls of the first estimation rows reach back into them: <code>lp</code> builds lags and leads on the full time axis and only then drops the incomplete rows of each horizon.</p>
 <p>For a response <span class="math inline">\(y\)</span> and shock <span class="math inline">\(s_t\)</span>, with <span class="math inline">\(x_t\)</span> the five series, the two specifications are</p>
 <p><span class="math display">\[
 \begin{aligned}
@@ -306,25 +306,25 @@ window.Quarto = {
 <span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a><span class="fu">summarize</span>(diffs, nw; level <span class="op">=</span> <span class="fl">0.90</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="cell-output cell-output-display" data-execution_count="1">
 <div class="ansi-escaped-output">
-<pre><span class="ansi-bold">                  Impulse Response: mp</span>
+<pre><span class="ansi-bold">             Impulse response of lip to mp</span>
 ╭─────────┬─────────┬──────────┬───────────┬───────────╮
 │<span class="ansi-bold"> Horizon </span>│<span class="ansi-bold">    Coef </span>│<span class="ansi-bold"> Std.Err. </span>│<span class="ansi-bold"> Lower 90% </span>│<span class="ansi-bold"> Upper 90% </span>│
 ├─────────┼─────────┼──────────┼───────────┼───────────┤
-│     0.0 │ -0.0243 │   0.0327 │   -0.0781 │    0.0294 │
-│     1.0 │  0.0411 │   0.0333 │   -0.0136 │    0.0959 │
-│     2.0 │ -0.0174 │   0.0492 │   -0.0984 │    0.0635 │
-│     3.0 │ -0.0539 │   0.0701 │   -0.1692 │    0.0614 │
-│     4.0 │ -0.0887 │    0.094 │   -0.2434 │    0.0659 │
-│     5.0 │ -0.0922 │   0.1228 │   -0.2943 │    0.1098 │
-│     6.0 │ -0.1019 │   0.1541 │   -0.3554 │    0.1516 │
-│     7.0 │ -0.1262 │   0.1651 │   -0.3978 │    0.1454 │
-│     8.0 │   -0.11 │   0.1776 │   -0.4021 │    0.1822 │
-│     9.0 │ -0.1921 │    0.215 │   -0.5457 │    0.1614 │
-│    10.0 │ -0.2098 │    0.226 │   -0.5816 │    0.1619 │
-│    11.0 │ -0.2066 │   0.2363 │   -0.5953 │    0.1821 │
-│    12.0 │ -0.2547 │   0.2251 │   -0.6249 │    0.1155 │
-│    13.0 │ -0.3183 │   0.2649 │   -0.7541 │    0.1175 │
-│    14.0 │ -0.3813 │   0.2685 │    -0.823 │    0.0604 │
+│       0 │ -0.0243 │   0.0327 │   -0.0781 │    0.0294 │
+│       1 │  0.0411 │   0.0333 │   -0.0136 │    0.0959 │
+│       2 │ -0.0174 │   0.0492 │   -0.0984 │    0.0635 │
+│       3 │ -0.0539 │   0.0701 │   -0.1692 │    0.0614 │
+│       4 │ -0.0887 │    0.094 │   -0.2434 │    0.0659 │
+│       5 │ -0.0922 │   0.1228 │   -0.2943 │    0.1098 │
+│       6 │ -0.1019 │   0.1541 │   -0.3554 │    0.1516 │
+│       7 │ -0.1262 │   0.1651 │   -0.3978 │    0.1454 │
+│       8 │   -0.11 │   0.1776 │   -0.4021 │    0.1822 │
+│       9 │ -0.1921 │    0.215 │   -0.5457 │    0.1614 │
+│      10 │ -0.2098 │    0.226 │   -0.5816 │    0.1619 │
+│      11 │ -0.2066 │   0.2363 │   -0.5953 │    0.1821 │
+│      12 │ -0.2547 │   0.2251 │   -0.6249 │    0.1155 │
+│      13 │ -0.3183 │   0.2649 │   -0.7541 │    0.1175 │
+│      14 │ -0.3813 │   0.2685 │    -0.823 │    0.0604 │
 │       ⋮ │       ⋮ │        ⋮ │         ⋮ │         ⋮ │
 ╰─────────┴─────────┴──────────┴───────────┴───────────╯
 <span class="ansi-cyan-fg">                                         22 rows omitted</span>
@@ -428,12 +428,12 @@ window.Quarto = {
 <span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a>T <span class="op">=</span> <span class="fu">nrow</span>(ps)</span>
 <span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a>rows <span class="op">=</span> <span class="fl">14</span><span class="op">:</span>(T <span class="op">-</span> h)                                   <span class="co"># 1990:2 to T − h</span></span>
 <span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a><span class="fu">Δ</span>(v) <span class="op">=</span> [<span class="cn">NaN</span>; <span class="fu">diff</span>(<span class="fu">Float64</span>.(v))]</span>
-<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a>X <span class="op">=</span> <span class="fu">hcat</span>(ps.mp[rows], <span class="fu">ones</span>(<span class="fu">length</span>(rows)),</span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a>X <span class="op">=</span> <span class="fu">hcat</span>(<span class="fu">Float64</span>.(ps.mp[rows]), <span class="fu">ones</span>(<span class="fu">length</span>(rows)),</span>
 <span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a>    [<span class="fu">Δ</span>(ps[!, v])[rows <span class="op">.-</span> j] for v <span class="kw">in</span> (<span class="op">:</span>lip, <span class="op">:</span>lcpi, <span class="op">:</span>lsp500, <span class="op">:</span>ebp, <span class="op">:</span>gs1), j <span class="kw">in</span> <span class="fl">1</span><span class="op">:</span><span class="fl">12</span>]<span class="op">...</span>)</span>
 <span id="cb5-7"><a href="#cb5-7" aria-hidden="true" tabindex="-1"></a>Y <span class="op">=</span> ps.lip[rows <span class="op">.+</span> h] <span class="op">.-</span> ps.lip[rows <span class="op">.-</span> <span class="fl">1</span>]</span>
 <span id="cb5-8"><a href="#cb5-8" aria-hidden="true" tabindex="-1"></a>(by_hand <span class="op">=</span> (X <span class="op">\</span> Y)[<span class="fl">1</span>], ldiff <span class="op">=</span> <span class="fu">coefpath</span>(diffs)[h <span class="op">+</span> <span class="fl">1</span>])</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 <div class="cell-output cell-output-display" data-execution_count="1">
-<pre><code>(by_hand = -0.27233853739248953, ldiff = -0.2723385373924888)</code></pre>
+<pre><code>(by_hand = -0.27233853739248953, ldiff = -0.27233853739248887)</code></pre>
 </div>
 </div>
 <p>Beyond this page, the paths were checked against Stata (<code>newey, lag(37)</code> on variables built with time-series operators) and against a line-by-line port of the authors’ MATLAB loop, including its Newey–West sum. The long-difference coefficients and standard errors agree with both to <span class="math inline">\(10^{-14}\)</span> at every horizon, on identical samples; the levels ones to <span class="math inline">\(10^{-6}\)</span>, the precision allowed by 61 nearly collinear log-level regressors.</p>
@@ -441,7 +441,7 @@ window.Quarto = {
 <section id="other-long-difference-responses" class="level2">
 <h2 class="anchored" data-anchor-id="other-long-difference-responses">Other long-difference responses</h2>
 <p><code>ldiff</code> has two relatives. <code>cumul(ldiff(y))</code> sums the long differences over horizons <span class="math inline">\(0, \dots, h\)</span>, for cumulative responses. <code>hbr(x, y)</code> divides the change by a lagged scale variable, <span class="math inline">\((x_{t+h} - x_{t-1}) / y_{t-1}\)</span>: the Hall–Barro–Redlick transformation used for fiscal multipliers, where output and spending changes are both measured as shares of lagged GDP. All of them can also appear on the right-hand side, as the instrumented regressor of a cumulative multiplier:</p>
-<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb7"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="fu">lpiv</span>(<span class="pp">@formula</span>(<span class="fu">cumul</span>(<span class="fu">hbr</span>(gdp)) <span class="op">~</span> (<span class="fu">cumul</span>(<span class="fu">hbr</span>(gov, gdp)) <span class="op">~</span> news) <span class="op">+</span></span>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb7"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="fu">lpiv</span>(<span class="fu">TSLS</span>(), <span class="pp">@formula</span>(<span class="fu">cumul</span>(<span class="fu">hbr</span>(gdp)) <span class="op">~</span> (<span class="fu">cumul</span>(<span class="fu">hbr</span>(gov, gdp)) <span class="op">~</span> news) <span class="op">+</span></span>
 <span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a>              <span class="fu">lags</span>(news, <span class="fl">4</span>) <span class="op">+</span> <span class="fu">lags</span>(<span class="fu">log</span>(gdp), <span class="fl">4</span>) <span class="op">+</span> <span class="fu">lags</span>(<span class="fu">log</span>(gov), <span class="fl">4</span>)), df; horizon <span class="op">=</span> <span class="fl">20</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
 
 
