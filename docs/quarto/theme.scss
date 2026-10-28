@@ -1,0 +1,64 @@
+/*-- scss:defaults --*/
+// House palette of the package figures: navy lines and ribbons, brick thresholds
+$lp-navy: #1B2E4F;
+$lp-brick: #C24A3C;
+$lp-ink: #18222E;
+$lp-paper: #FBFCFD;
+$lp-rule: #DDE3EA;
+
+$primary: $lp-navy;
+$body-bg: $lp-paper;
+$body-color: $lp-ink;
+$link-color: $lp-navy;
+$navbar-bg: $lp-paper;
+$navbar-fg: $lp-ink;
+$navbar-hl: $lp-navy;
+$border-color: $lp-rule;
+$code-color: #8A2F1D;
+$code-block-bg: #F1F4F8;
+
+$font-family-sans-serif: "Source Sans 3", "Segoe UI", Helvetica, Arial, sans-serif;
+$headings-font-family: "Source Serif 4", Georgia, "Times New Roman", serif;
+$font-family-monospace: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+$font-size-root: 17px;
+$headings-font-weight: 600;
+
+/*-- scss:rules --*/
+@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&display=swap");
+
+h1, h2, h3 { text-wrap: balance; }
+.navbar { border-bottom: 1px solid $lp-rule; }
+.navbar-brand { font-family: $headings-font-family; font-weight: 600; }
+
+// tables of statistics: aligned digits, quiet rules
+table { font-variant-numeric: tabular-nums; }
+.table > :not(caption) > * > * { padding: 0.35rem 0.6rem; }
+div.cell-output-display table, .table-responsive { overflow-x: auto; display: block; }
+
+// one light theme: the figures are drawn on white
+.cell-output-display img { max-width: 100%; height: auto; background: #fff; }
+
+// the one-line takeaway under a section
+.lead-in {
+  font-size: 1.05rem;
+  border-left: 3px solid $lp-navy;
+  padding-left: 0.9rem;
+  margin-block: 1rem 1.4rem;
+}
+.brick { color: $lp-brick; font-weight: 600; }
+
+// overview cards on the landing page
+.example-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: 1rem;
+  margin-block: 1.2rem 2rem;
+}
+.example-card {
+  border: 1px solid $lp-rule;
+  border-radius: 6px;
+  padding: 1rem 1.1rem;
+  h3 { margin-top: 0; font-size: 1.15rem; }
+  p { margin-bottom: 0.4rem; }
+  .figs { font-variant-numeric: tabular-nums; font-size: 0.92rem; opacity: 0.85; }
+}
