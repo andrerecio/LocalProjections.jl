@@ -11,28 +11,48 @@ The guide describes **the code as it currently runs**. Where the current code
 differs from the corresponding reference recommendation, the difference is
 flagged explicitly.
 
+!!! note "Status on LocalProjections 0.2 (2026-10-26)"
+    This guide was written for scripts 21--23 against LocalProjections 0.1.0, and
+    it is kept as that record; dated updates mark what has changed since. The three
+    procedures are now part of the package:
+
+    - **EWC** (§2): `lp_result + vcov(EWC(B))` with `B = ewc_bandwidth(lp_result)`;
+      `summarize`, the plots and `as_irf_result` pair it with Student-``t_B``
+      critical values.
+    - **Herbst--Johannsen** (§3): `biascorrect(lp_result)`.
+    - **VAR moving-block bootstrap** (§4): `varbootstrap(lp_result, data; vars, nlags)`.
+      Its defaults, `popecorrect = true` and `biascorrect = true`, are the
+      `lp_var_nberma` recommendation of §4.5--4.6; `popecorrect = false,
+      biascorrect = false` is the script-23 variant. `lagselect` selects the VAR
+      order by AIC or BIC.
+
+    The findings of the §6 audit are resolved: LP-1 upstream in 0.2, REG-1 (and
+    the IV/OLS convention gap) in Regress.jl 0.3, EWC-1 in this package. In §8 the
+    bandwidth comparison still holds, but the IV standard errors now carry the
+    ``n/(n-k)`` factor; its numbers are recomputed on 0.2.
+
 ## 1. Common local-projection setup
 
-For outcome $y_t$, observed shock $s_t$ (`NASAshock`), and control vector
-$w_t$, the horizon-$h$ local projection is
+For outcome ``y_t``, observed shock ``s_t`` (`NASAshock`), and control vector
+``w_t``, the horizon-``h`` local projection is
 
-\[
+```math
 y_{t+h} = \alpha_h + \theta_h s_t + \gamma_h'w_t + e_{t,h},
 \qquad h=0,\ldots,H.
-\]
+```
 
 The controls in the baseline application are four lags of the shock and four
 lags of the variables selected in `baseline_lp_common.jl`. Define
 
-\[
+```math
 q_t = (1,s_t,w_t')', \qquad
 Q_h = \sum_{t\in\mathcal I_h} q_tq_t',
-\]
+```
 
-where $\mathcal I_h$ is the usable sample at horizon $h$, with size $T_h$.
+where ``\mathcal I_h`` is the usable sample at horizon ``h``, with size ``T_h``.
 Horizon-by-horizon OLS gives
 
-\[
+```math
 \widehat\delta_h
 =
 \begin{pmatrix}
@@ -41,10 +61,10 @@ Horizon-by-horizon OLS gives
 \widehat\gamma_h
 \end{pmatrix}
 = Q_h^{-1}\sum_{t\in\mathcal I_h}q_ty_{t+h}.
-\]
+```
 
 The impulse response is the coefficient on the contemporaneous shock,
-$\widehat\theta_h$. In the Julia code it is extracted by
+``\widehat\theta_h``. In the Julia code it is extracted by
 
 ```julia
 beta = coefpath(lp_out; term=:NASAshock)
@@ -52,16 +72,16 @@ beta = coefpath(lp_out; term=:NASAshock)
 
 All three scripts apply the baseline peak normalization
 
-\[
+```math
 a = \frac{1}{\max_{0\leq h\leq H}
 |\widehat\theta_h^{\,\mathrm{grdk}}|},
 \qquad
 \widetilde\theta_h=a\widehat\theta_h.
-\]
+```
 
-The same fixed estimate $a$ multiplies point estimates, standard errors, and
+The same fixed estimate ``a`` multiplies point estimates, standard errors, and
 confidence limits. The scripts therefore **condition on the estimated
-normalization**: uncertainty in $a$ is not included in any band.
+normalization**: uncertainty in ``a`` is not included in any band.
 
 ### What each procedure changes
 
@@ -69,7 +89,7 @@ normalization**: uncertainty in $a$ is not included in any band.
 |---|---|---|---|
 | `21_nasa_baseline_ewc.jl` | OLS LP | EWC HAR covariance | Symmetric, normal critical value |
 | `22_nasa_baseline_biascorr.jl` | Bias-corrected OLS LP | HC1 covariance of the uncorrected LP | Symmetric around corrected estimate |
-| `23_nasa_baseline_bootstrap.jl` | OLS LP | HC1 studentization inside a VAR residual MBB | Pointwise percentile-$t$, generally asymmetric |
+| `23_nasa_baseline_bootstrap.jl` | OLS LP | HC1 studentization inside a VAR residual MBB | Pointwise percentile-``t``, generally asymmetric |
 
 The dashed lines in all three figures are the baseline Bartlett/Newey-West
 90% limits. They are comparisons only and do not enter the alternative
@@ -81,69 +101,69 @@ procedures.
 
 At each horizon, form the OLS residual and score
 
-\[
+```math
 \widehat e_{t,h}=y_{t+h}-q_t'\widehat\delta_h,
 \qquad
 \widehat g_{t,h}=q_t\widehat e_{t,h}.
-\]
+```
 
-Serial correlation in $\widehat g_{t,h}$ makes the usual
+Serial correlation in ``\widehat g_{t,h}`` makes the usual
 heteroskedasticity-only covariance inappropriate. EWC estimates its long-run
 covariance using projections on Type-II discrete cosine basis functions.
 
 ### 2.2 Cosine projections and long-run covariance
 
-For $j=1,\ldots,B$, define
+For ``j=1,\ldots,B``, define
 
-\[
+```math
 \widehat\Lambda_{h,j}
 =
 \sqrt{\frac{2}{T_h}}
 \sum_{t=1}^{T_h}
 \cos\!\left[\frac{\pi j(t-1/2)}{T_h}\right]
 \widehat g_{t,h}.
-\]
+```
 
 The equal-weighted-cosine estimator is
 
-\[
+```math
 \widehat\Omega_{h}^{\mathrm{EWC}}
 =
 \frac{1}{B}\sum_{j=1}^{B}
 \widehat\Lambda_{h,j}\widehat\Lambda_{h,j}'.
-\]
+```
 
 Because it is an average of outer products,
-$\widehat\Omega_h^{\mathrm{EWC}}$ is positive semidefinite. Let
+``\widehat\Omega_h^{\mathrm{EWC}}`` is positive semidefinite. Let
 
-\[
+```math
 \widehat A_h=\frac{1}{T_h}\sum_{t\in\mathcal I_h}q_tq_t'.
-\]
+```
 
 Before the regression degrees-of-freedom adjustment, the OLS sandwich
 covariance is
 
-\[
+```math
 \widehat V_{h,\mathrm{EWC}}^{\,0}
 =
 \frac{1}{T_h}
 \widehat A_h^{-1}
 \widehat\Omega_h^{\mathrm{EWC}}
 \widehat A_h^{-1}.
-\]
+```
 
-For $k_h$ estimated coefficients, the `Regress.jl` covariance interface
+For ``k_h`` estimated coefficients, the `Regress.jl` covariance interface
 used by `LocalProjections.jl` applies the correlated-error
 degrees-of-freedom factor:
 
-\[
+```math
 \widehat V_{h,\mathrm{EWC}}
 =
 \frac{T_h}{T_h-k_h}\widehat V_{h,\mathrm{EWC}}^{\,0}.
-\]
+```
 
-The standard error $\widehat{se}_{h,\mathrm{EWC}}$ is the square root of the
-diagonal element corresponding to $s_t$. `CovarianceMatrices.jl`
+The standard error ``\widehat{se}_{h,\mathrm{EWC}}`` is the square root of the
+diagonal element corresponding to ``s_t``. `CovarianceMatrices.jl`
 constructs the score projections, the `Regress.jl` covariance method
 applies the sandwich and the finite-sample adjustment, and
 `LocalProjections.vcov` loops over the horizon-specific models
@@ -154,34 +174,37 @@ cv_ewc = LocalProjections.vcov(EWC(B), lp_out)
 se_ewc = stderror(cv_ewc; term=:NASAshock)
 ```
 
-### 2.3 Choice of $B$ and intervals in script 21
+On 0.2 the result stores its covariance estimator, and the same standard errors
+are `stderror(lp_out + vcov(EWC(B)); term = :NASAshock)`.
+
+### 2.3 Choice of ``B`` and intervals in script 21
 
 The script uses the Lazarus--Lewis--Stock--Watson rule calibrated for a single
 restriction,
 
-\[
+```math
 B=\left\lfloor 0.41T_0^{2/3}\right\rfloor,
-\]
+```
 
-where $T_0$ is the effective sample size of the horizon-zero LP. The same
-integer $B$ is held fixed at every horizon, even though $T_h=T_0-h$ in a
+where ``T_0`` is the effective sample size of the horizon-zero LP. The same
+integer ``B`` is held fixed at every horizon, even though ``T_h=T_0-h`` in a
 balanced sample.
 
 The current 90% and 68% pointwise bands are
 
-\[
+```math
 \widehat\theta_h
 \ \pm\ z_{0.95}\widehat{se}_{h,\mathrm{EWC}},
 \qquad
 \widehat\theta_h
 \ \pm\ z_{0.84}\widehat{se}_{h,\mathrm{EWC}},
-\]
+```
 
-with hard-coded values $z_{0.95}=1.6449$ and $z_{0.84}=0.9945$.
+with hard-coded values ``z_{0.95}=1.6449`` and ``z_{0.84}=0.9945``.
 
 > **Reference-procedure distinction.** The canonical EWC test in Lazarus et
 > al. (2018) uses fixed-smoothing critical values, which for one restriction
-> are Student-$t_B$ critical values. Script 21 uses normal critical values.
+> are Student-``t_B`` critical values. Script 21 uses normal critical values.
 > Replacing `Z90` and `Z68` by `quantile(TDist(B), ...)`
 > would therefore be a methodological change, not a refactor.
 
@@ -190,7 +213,7 @@ with hard-coded values $z_{0.95}=1.6449$ and $z_{0.84}=0.9945$.
 Only three inputs are specification-specific:
 
 1. the LP formula and shock coefficient name;
-2. the effective horizon-zero sample $T_0$, from which $B$ is computed;
+2. the effective horizon-zero sample ``T_0``, from which ``B`` is computed;
 3. any deterministic response scaling.
 
 Do not manually construct autocovariances in addition to calling `EWC(B)`;
@@ -203,7 +226,7 @@ serial correlation in the regression score.
 
 ### 3.1 Control autocovariances
 
-Let $w_t$ contain all LP regressors except the intercept and the
+Let ``w_t`` contain all LP regressors except the intercept and the
 contemporaneous shock. In script 22 it is taken from the horizon-zero model
 matrix:
 
@@ -212,49 +235,49 @@ keep = [!(n in ("(Intercept)", "NASAshock")) for n in coefnames(lp_out)]
 w = modelmatrix(lp_out.models[1])[:, keep]
 ```
 
-For $T=T_0$, demean the controls,
+For ``T=T_0``, demean the controls,
 
-\[
+```math
 \widetilde w_t=w_t-\bar w,
-\]
+```
 
-and estimate their variance and lag-$j$ autocovariance:
+and estimate their variance and lag-``j`` autocovariance:
 
-\[
+```math
 \widehat\Sigma_0
 =\frac{1}{T-1}\sum_{t=1}^{T}\widetilde w_t\widetilde w_t',
-\]
+```
 
-\[
+```math
 \widehat\Sigma_j
 =\frac{1}{T-j-1}\sum_{t=1}^{T-j}
 \widetilde w_t\widetilde w_{t+j}',
 \qquad j=1,\ldots,H.
-\]
+```
 
 Define the persistence adjustment
 
-\[
+```math
 \widehat c_j
 =1+\operatorname{tr}
 \left(\widehat\Sigma_0^{-1}\widehat\Sigma_j\right).
-\]
+```
 
 The Julia expression `Σ0 \ Σj` computes
-$\widehat\Sigma_0^{-1}\widehat\Sigma_j$ without explicitly forming an
+``\widehat\Sigma_0^{-1}\widehat\Sigma_j`` without explicitly forming an
 inverse.
 
 ### 3.2 Recursive correction
 
 Leave the impact response unchanged:
 
-\[
+```math
 \widehat\theta_0^{\,c}=\widehat\theta_0.
-\]
+```
 
-For $h=1,\ldots,H$, recursively compute
+For ``h=1,\ldots,H``, recursively compute
 
-\[
+```math
 \boxed{
 \widehat\theta_h^{\,c}
 =
@@ -263,40 +286,40 @@ For $h=1,\ldots,H$, recursively compute
 \sum_{j=1}^{h}
 \widehat c_j\widehat\theta_{h-j}^{\,c}
 }.
-\]
+```
 
 The recursion uses already-corrected lower-horizon responses on the right-hand
-side. Replacing them with the original $\widehat\theta_{h-j}$ changes the
+side. Replacing them with the original ``\widehat\theta_{h-j}`` changes the
 estimator.
 
-This formula assumes the only horizon-related sample loss is the $h$ future
+This formula assumes the only horizon-related sample loss is the ``h`` future
 observations. If an adapted LP has horizon-specific missingness, the use of
-$T-h$ must be checked rather than copied mechanically.
+``T-h`` must be checked rather than copied mechanically.
 
 ### 3.3 HC1 standard errors and bands
 
-For the original horizon-$h$ OLS regression, the HC0 covariance is
+For the original horizon-``h`` OLS regression, the HC0 covariance is
 
-\[
+```math
 \widehat V_{h,\mathrm{HC0}}
 =Q_h^{-1}
 \left(\sum_{t\in\mathcal I_h}
 \widehat e_{t,h}^{\,2}q_tq_t'\right)
 Q_h^{-1}.
-\]
+```
 
-With $k_h$ estimated coefficients, HC1 applies the degrees-of-freedom
+With ``k_h`` estimated coefficients, HC1 applies the degrees-of-freedom
 correction
 
-\[
+```math
 \widehat V_{h,\mathrm{HC1}}
 =\frac{T_h}{T_h-k_h}\widehat V_{h,\mathrm{HC0}}.
-\]
+```
 
 Script 22 centers the bands on the corrected estimate but uses the HC1
 standard error of the **uncorrected** OLS coefficient:
 
-\[
+```math
 CI_{h,1-\alpha}^{\mathrm{BCC+HC1}}
 =
 \left[
@@ -305,27 +328,27 @@ CI_{h,1-\alpha}^{\mathrm{BCC+HC1}}
 \ \widehat\theta_h^{\,c}
 +z_{1-\alpha/2}\widehat{se}_{h,\mathrm{HC1}}
 \right].
-\]
+```
 
-Thus the code does not propagate estimation uncertainty in $\widehat c_j$,
+Thus the code does not propagate estimation uncertainty in ``\widehat c_j``,
 nor the covariance across lower-horizon responses in the recursion. This
 matches the convention in the `lp_var_nberma` implementation, where
 bias correction changes `irs` after the ordinary LP standard errors
 have been calculated.
 
 In the figure, the shaded bands are centered on the corrected estimate
-$\widehat\theta_h^{\,c}$; the dashed comparison lines are the baseline
+``\widehat\theta_h^{\,c}``; the dashed comparison lines are the baseline
 Newey--West 90% limits around the **uncorrected** estimate
-$\widehat\theta_h$, and the uncorrected path itself is drawn dotted.
+``\widehat\theta_h``, and the uncorrected path itself is drawn dotted.
 
 ### 3.4 What must change for another LP
 
-The crucial adaptation is the definition of $w_t$: it must include every
+The crucial adaptation is the definition of ``w_t``: it must include every
 control used by the LP and exclude only the intercept and contemporaneous
 shock. Hard-coding column positions is unsafe; select columns by coefficient
-name as in script 22. Also verify that $\widehat\Sigma_0$ is nonsingular.
+name as in script 22. Also verify that ``\widehat\Sigma_0`` is nonsingular.
 
-## 4. VAR residual moving-block bootstrap with percentile-$t$ bands
+## 4. VAR residual moving-block bootstrap with percentile-``t`` bands
 
 This procedure uses a fitted VAR as a bootstrap data-generating process
 (DGP), re-estimates the LP on each artificial sample, and uses the bootstrap
@@ -333,83 +356,83 @@ distribution of a studentized statistic.
 
 ### 4.1 Bootstrap VAR and pseudo-true response
 
-For the panel-specific vector $Y_t\in\mathbb R^m$, fit
+For the panel-specific vector ``Y_t\in\mathbb R^m``, fit
 
-\[
+```math
 Y_t=c+A_1Y_{t-1}+\cdots+A_pY_{t-p}+u_t,
 \qquad p=4.
-\]
+```
 
-Let $\widehat\Sigma_u$ be the fitted residual covariance, and let $L$ be its
+Let ``\widehat\Sigma_u`` be the fitted residual covariance, and let ``L`` be its
 lower-triangular Cholesky factor:
 
-\[
+```math
 \widehat\Sigma_u=LL'.
-\]
+```
 
 `NASAshock` is ordered first. The impact vector is normalized to a unit
 impact change in the shock:
 
-\[
+```math
 v=\frac{Le_1}{e_1'Le_1}=\frac{L_{:,1}}{L_{11}}.
-\]
+```
 
-If $C$ is the VAR companion matrix and
+If ``C`` is the VAR companion matrix and
 
-\[
+```math
 b=(v',0',\ldots,0')',
-\]
+```
 
-then the VAR-implied response of outcome $r$ is
+then the VAR-implied response of outcome ``r`` is
 
-\[
+```math
 \theta_{h}^{\mathrm{VAR}}=e_r'C^hb.
-\]
+```
 
 This is the **pseudo-true value** used to center the bootstrap statistic. It
 is not the real-data LP estimate.
 
 ### 4.2 Moving-block resampling of VAR residuals
 
-Let $T_u$ be the number of fitted VAR residuals and choose
+Let ``T_u`` be the number of fitted VAR residuals and choose
 
-\[
+```math
 \ell=\left\lceil 5.03T^{1/4}\right\rceil,
-\]
+```
 
-where script 23 uses the number $T$ of observations in the VAR data matrix,
-not $T_u$. Set $N=\lceil T_u/\ell\rceil$.
+where script 23 uses the number ``T`` of observations in the VAR data matrix,
+not ``T_u``. Set ``N=\lceil T_u/\ell\rceil``.
 
-For block $b=1,\ldots,N$, independently draw a starting index
+For block ``b=1,\ldots,N``, independently draw a starting index
 
-\[
+```math
 I_b\sim\operatorname{Uniform}\{0,\ldots,T_u-\ell\}.
-\]
+```
 
-At within-block position $s=1,\ldots,\ell$, the uncentered resampled residual
+At within-block position ``s=1,\ldots,\ell``, the uncentered resampled residual
 is
 
-\[
+```math
 \widehat u^{*,\mathrm{unc}}_{(b-1)\ell+s}
 =\widehat u_{I_b+s}.
-\]
+```
 
 The position-specific mean is
 
-\[
+```math
 \bar u_s
 =\frac{1}{T_u-\ell+1}
 \sum_{r=0}^{T_u-\ell}\widehat u_{s+r}.
-\]
+```
 
 The centered bootstrap residual is
 
-\[
+```math
 \widehat u^*_{(b-1)\ell+s}
 =\widehat u^{*,\mathrm{unc}}_{(b-1)\ell+s}-\bar u_s.
-\]
+```
 
-After concatenation, the sequence is truncated to $T_u$ observations. This
+After concatenation, the sequence is truncated to ``T_u`` observations. This
 position-specific recentering is part of the
 Brüggemann--Jentsch--Trenkler procedure; subtracting only the overall
 residual mean is not equivalent.
@@ -418,17 +441,17 @@ residual mean is not equivalent.
 
 For each draw:
 
-1. Draw one of the $T-p+1$ contiguous blocks of $p$ observations from the
+1. Draw one of the ``T-p+1`` contiguous blocks of ``p`` observations from the
    real data as initial conditions.
 2. Iterate the fitted VAR with those initial conditions and the resampled
-   residuals to produce $Y_1^*,\ldots,Y_T^*$.
+   residuals to produce ``Y_1^*,\ldots,Y_T^*``.
 3. Re-estimate exactly the same horizon-by-horizon LP on the artificial data.
-4. Store its shock coefficient $\widehat\theta_{b,h}^*$ and HC1 standard
-   error $\widehat{se}_{b,h}^*$.
+4. Store its shock coefficient ``\widehat\theta_{b,h}^*`` and HC1 standard
+   error ``\widehat{se}_{b,h}^*``.
 
 The bootstrap statistic is
 
-\[
+```math
 t_{b,h}^*
 =
 \frac{
@@ -436,19 +459,19 @@ t_{b,h}^*
 }{
 \widehat{se}_{b,h}^*
 }.
-\]
+```
 
-Centering at $\theta_h^{\mathrm{VAR}}$ is essential because the fitted VAR,
+Centering at ``\theta_h^{\mathrm{VAR}}`` is essential because the fitted VAR,
 not the unrestricted LP, generates the bootstrap sample.
 
-### 4.4 Hall percentile-$t$ confidence interval
+### 4.4 Hall percentile-``t`` confidence interval
 
-Let $q_{h,a}^*$ denote the empirical $a$-quantile of the bootstrap statistics
-$\{t_{b,h}^*\}_{b=1}^{R}$. For real-data LP estimate $\widehat\theta_h$ and
-real-data HC1 standard error $\widehat{se}_h$, the pointwise $1-\alpha$
+Let ``q_{h,a}^*`` denote the empirical ``a``-quantile of the bootstrap statistics
+``\{t_{b,h}^*\}_{b=1}^{R}``. For real-data LP estimate ``\widehat\theta_h`` and
+real-data HC1 standard error ``\widehat{se}_h``, the pointwise ``1-\alpha``
 interval is
 
-\[
+```math
 \boxed{
 CI_{h,1-\alpha}^{\mathrm{boot}}
 =
@@ -457,34 +480,39 @@ CI_{h,1-\alpha}^{\mathrm{boot}}
 \ \widehat\theta_h-\widehat{se}_h q_{h,\alpha/2}^*
 \right]
 }.
-\]
+```
 
 The reversal of the quantiles follows from solving the studentized inequality
-for $\theta_h$. The resulting interval need not be symmetric around
-$\widehat\theta_h$.
+for ``\theta_h``. The resulting interval need not be symmetric around
+``\widehat\theta_h``.
 
-Script 23 uses $R=1000$, quantiles $0.05/0.95$ for 90% bands, and
-$0.16/0.84$ for 68% bands. The bands are **pointwise across horizons**, not
+Script 23 uses ``R=1000``, quantiles ``0.05/0.95`` for 90% bands, and
+``0.16/0.84`` for 68% bands. The bands are **pointwise across horizons**, not
 simultaneous confidence bands.
 
 ### 4.5 Current implementation versus the replication recommendation
 
-The core resampling and percentile-$t$ formulas follow
+The core resampling and percentile-``t`` formulas follow
 `lp_var_nberma`, but script 23 implements a simpler variant:
 
 | Component | Script 23 | `lp_var_nberma` recommendation |
 |---|---|---|
-| Lag length | Fixed $p=4$ | Fixed by the researcher or selected by VAR AIC |
+| Lag length | Fixed ``p=4`` | Fixed by the researcher or selected by VAR AIC |
 | Bootstrap VAR coefficients | OLS | Pope (1990) bias-corrected VAR coefficients |
 | Real and bootstrap LP estimates | Uncorrected OLS LP | Normally Herbst--Johannsen bias-corrected LP |
-| LP studentizing SE | HC1 | Same: the Eicker--Huber--White sandwich with the $T_h/(T_h-k_h)$ adjustment in `linreg.m` **is** HC1 |
-| Bootstrap interval | Hall percentile-$t$ | Same: Hall percentile-$t$ recommended |
+| LP studentizing SE | HC1 | Same: the Eicker--Huber--White sandwich with the ``T_h/(T_h-k_h)`` adjustment in `linreg.m` **is** HC1 |
+| Bootstrap interval | Hall percentile-``t`` | Same: Hall percentile-``t`` recommended |
 
 Therefore, adding VAR coefficient bias correction or calling
 `lp_biascorr` inside script 23 would change the implemented procedure.
 If either is added, it must be applied consistently when computing the
 pseudo-truth, simulating every bootstrap sample, estimating the real-data LP,
 and estimating each bootstrap LP.
+
+In the package, `varbootstrap` applies both consistently by default, which is
+the right-hand column of the table; `popecorrect = false, biascorrect = false`
+reproduces script 23. `benchmark/coverage_study.jl` measures what the two
+corrections buy in a Monte Carlo.
 
 ### 4.6 Exact implementation in `lp_var_nberma`
 
@@ -530,14 +558,14 @@ In the non-shrinkage LP branch of `ir_estim.m`, every horizon calls
 `lp_ir_estim.m` runs the horizon-specific OLS regression and calls
 `linreg.m` for its covariance. With
 `se_homosk=false`, `linreg.m` constructs the Eicker--Huber--White
-sandwich and multiplies it by the finite-sample factor $T_h/(T_h-k_h)$.
+sandwich and multiplies it by the finite-sample factor ``T_h/(T_h-k_h)``.
 Therefore, at this point,
 
-\[
+```math
 \widehat\theta_h^{\,\mathrm{OLS}}
 \quad\text{and}\quad
 \widehat{se}_{h,\mathrm{HC1}}
-\]
+```
 
 have been stored for all horizons.
 
@@ -550,19 +578,19 @@ w = w(p+1:end, :);
 irs = lp_biascorr(irs, w);
 ```
 
-Thus $w_t$ contains the contemporaneous variables ordered before the
-innovation and $p$ lags of all VAR variables, but excludes the
+Thus ``w_t`` contains the contemporaneous variables ordered before the
+innovation and ``p`` lags of all VAR variables, but excludes the
 contemporaneous innovation itself. For an observed shock ordered first,
-`innov_ind=1`, the first block is empty and $w_t$ consists only of the
-$p$ lags.
+`innov_ind=1`, the first block is empty and ``w_t`` consists only of the
+``p`` lags.
 
 `lp_biascorr.m` then replaces the OLS path with
 
-\[
+```math
 \widehat\theta_0^{\,c}=\widehat\theta_0^{\,\mathrm{OLS}},
-\]
+```
 
-\[
+```math
 \widehat\theta_h^{\,c}
 =
 \widehat\theta_h^{\,\mathrm{OLS}}
@@ -573,20 +601,20 @@ $p$ lags.
 \left(\widehat\Sigma_0^{-1}\widehat\Sigma_j\right)
 \right]
 \widehat\theta_{h-j}^{\,c}.
-\]
+```
 
-In these equations, $T=\operatorname{size}(w,1)$, which is the control
-sample after removing the first $p$ observations—not the full row count of
+In these equations, ``T=\operatorname{size}(w,1)``, which is the control
+sample after removing the first ``p`` observations—not the full row count of
 `Y` used later by the Pope correction.
 
 The standard errors are **not recomputed after this correction**. The
 real-data objects passed to the bootstrap interval routine are therefore
 
-\[
+```math
 \texttt{irs}_h=\widehat\theta_h^{\,c},
 \qquad
 \texttt{ses}_h=\widehat{se}_{h,\mathrm{HC1}}.
-\]
+```
 
 #### Step 2: estimate the VAR bootstrap DGP
 
@@ -602,17 +630,19 @@ Because `bootstrap='var'`, the bootstrap section of
 Inside `var_ir_estim.m`:
 
 1. `var_estim.m` estimates the reduced-form VAR by OLS;
-2. it stores the OLS residuals $\widehat u_t$;
+2. it stores the OLS residuals ``\widehat u_t``;
 3. it estimates
-   \[
+
+   ```math
    \widehat\Sigma_u
    =\frac{\sum_t\widehat u_t\widehat u_t'}
           {T_u-k_{\mathrm{VAR}}};
-   \]
+   ```
+
 4. because `bias_corr=true`, it sends only the VAR slope matrices, not
    the intercept, to `var_biascorr.m`.
 
-The residuals and $\widehat\Sigma_u$ are computed from the original OLS VAR.
+The residuals and ``\widehat\Sigma_u`` are computed from the original OLS VAR.
 They are **not recomputed** after the Pope correction. The corrected slope
 matrices are combined with the original intercept and OLS residuals when
 bootstrap samples are generated.
@@ -621,69 +651,69 @@ bootstrap samples are generated.
 
 Let
 
-\[
+```math
 \widehat A=(\widehat A_1,\ldots,\widehat A_p)
-\]
+```
 
 be the OLS VAR slopes, and define their companion form
 
-\[
+```math
 \mathcal A
 =
 \begin{pmatrix}
 \widehat A_1 & \cdots & \widehat A_p\\
 I            & \cdots & 0
 \end{pmatrix}.
-\]
+```
 
 Let
 
-\[
+```math
 G=\operatorname{diag}
 \left(\widehat\Sigma_u,0,\ldots,0\right),
-\]
+```
 
-and compute the companion-state covariance $\Gamma_0$ from the discrete
+and compute the companion-state covariance ``\Gamma_0`` from the discrete
 Lyapunov equation
 
-\[
+```math
 \Gamma_0=\mathcal A\Gamma_0\mathcal A'+G.
-\]
+```
 
 The code in `var_biascorr.m` constructs
 
-\[
+```math
 M
 =
 (I-\mathcal A')^{-1}
 +\mathcal A'(I-\mathcal A'\mathcal A')^{-1}
 +\sum_{\lambda\in\operatorname{eig}(\mathcal A)}
 \lambda(I-\lambda\mathcal A')^{-1},
-\]
+```
 
 followed by
 
-\[
+```math
 b=G\,M\,\Gamma_0^{-1}.
-\]
+```
 
 The Pope-corrected companion matrix is
 
-\[
+```math
 \mathcal A^{\,c}=\mathcal A+\frac{b}{T}.
-\]
+```
 
-Here $T$ is the full row count of `Y` from
+Here ``T`` is the full row count of `Y` from
 `T = size(Y,1)` in `var_ir_estim.m`, not the shorter number
-$T_u=T-p$ of fitted VAR residuals.
+``T_u=T-p`` of fitted VAR residuals.
 
-Only the first $n$ rows are returned as the corrected VAR slope matrices.
+Only the first ``n`` rows are returned as the corrected VAR slope matrices.
 The correction has two stability safeguards:
 
 1. if the original companion matrix has an eigenvalue outside the unit
    circle, `var_biascorr.m` returns the original OLS slopes;
 2. if the fully corrected matrix is unstable, the code replaces
-   $b/T$ by $\delta b/T$ and lowers $\delta$ from 1 toward 0 in increments
+   ``b/T`` by ``\delta b/T`` and lowers ``\delta`` from 1 toward 0 in increments
    of 0.01 until stability is restored.
 
 Thus requesting `bias_corr=true` does not guarantee a full Pope
@@ -693,7 +723,7 @@ checks.
 #### Step 4: compute the corrected-VAR pseudo-truth
 
 `var_ir_estim.m` computes the identified VAR response using the
-corrected slopes $\widehat A^{\,c}$ and a shock vector estimated from the
+corrected slopes ``\widehat A^{\,c}`` and a shock vector estimated from the
 original OLS VAR residuals. The selected response is stored as
 
 ```matlab
@@ -702,19 +732,19 @@ pseudo_truth = irs_var(resp_ind, :);
 
 Therefore,
 
-\[
+```math
 \theta_h^{\mathrm{pseudo}}
 =
 \theta_h^{\mathrm{VAR}}
 \left(\widehat A^{\,c},\widehat\Sigma_u\right),
-\]
+```
 
 not the real-data corrected LP response
-$\widehat\theta_h^{\,c}$.
+``\widehat\theta_h^{\,c}``.
 
 #### Step 5: generate each bootstrap sample from the corrected VAR
 
-For draw $b$, `ir_estim.m` calls
+For draw ``b``, `ir_estim.m` calls
 
 ```matlab
 Y_boot = var_boot(Ahat_var, res_var, Y, p, ...
@@ -725,14 +755,15 @@ Y_boot = var_boot(Ahat_var, res_var, Y, p, ...
 
 1. resamples blocks of the original OLS VAR residuals;
 2. applies position-specific recentering;
-3. draws a contiguous block of $p$ real observations as initial conditions;
+3. draws a contiguous block of ``p`` real observations as initial conditions;
 4. simulates
-   \[
+
+   ```math
    Y_t^*
    =\widehat c
    +\sum_{\ell=1}^{p}\widehat A_\ell^{\,c}Y_{t-\ell}^*
    +\widehat u_t^*.
-   \]
+   ```
 
 Hence the bootstrap DGP combines:
 
@@ -757,11 +788,12 @@ The original `varargin` is passed again, including
 2. computes their HC1 standard errors;
 3. applies `lp_biascorr.m` to the entire bootstrap LP path;
 4. returns
-   \[
+
+   ```math
    \widehat\theta_{b,h}^{*,c}
    \quad\text{and}\quad
    \widehat{se}_{b,h,\mathrm{HC1}}^*.
-   \]
+   ```
 
 Although `varargin` still contains `bootstrap='var'`, this call
 does **not** start a bootstrap inside the bootstrap. It requests only two
@@ -776,11 +808,11 @@ end
 is reached immediately after point estimates and standard errors are
 computed, before the bootstrap section of `ir_estim.m`.
 
-#### Step 7: construct the percentile-$t$ interval
+#### Step 7: construct the percentile-``t`` interval
 
 `boot_ci.m` forms
 
-\[
+```math
 t_{b,h}^*
 =
 \frac{
@@ -789,12 +821,12 @@ t_{b,h}^*
 }{
 \widehat{se}_{b,h,\mathrm{HC1}}^*
 }.
-\]
+```
 
-If $q_{h,a}^*$ is the empirical $a$-quantile of these statistics, the
-recommended Hall percentile-$t$ interval is
+If ``q_{h,a}^*`` is the empirical ``a``-quantile of these statistics, the
+recommended Hall percentile-``t`` interval is
 
-\[
+```math
 \left[
 \widehat\theta_h^{\,c}
 -\widehat{se}_{h,\mathrm{HC1}}q_{h,1-\alpha/2}^*,
@@ -802,19 +834,19 @@ recommended Hall percentile-$t$ interval is
 \widehat\theta_h^{\,c}
 -\widehat{se}_{h,\mathrm{HC1}}q_{h,\alpha/2}^*
 \right].
-\]
+```
 
 The three centers in this calculation must not be confused:
 
 | Object | Center or estimate used |
 |---|---|
-| Reported real-data response | Bias-corrected LP, $\widehat\theta_h^{\,c}$ |
-| Bootstrap response | Bias-corrected bootstrap LP, $\widehat\theta_{b,h}^{*,c}$ |
-| Center of bootstrap $t$-statistic | Pope-corrected VAR pseudo-truth, $\theta_h^{\mathrm{pseudo}}$ |
+| Reported real-data response | Bias-corrected LP, ``\widehat\theta_h^{\,c}`` |
+| Bootstrap response | Bias-corrected bootstrap LP, ``\widehat\theta_{b,h}^{*,c}`` |
+| Center of bootstrap ``t``-statistic | Pope-corrected VAR pseudo-truth, ``\theta_h^{\mathrm{pseudo}}`` |
 
 This is the complete recommended `lp_var_nberma` combination:
 **Pope-corrected VAR DGP + bias-corrected LP in the real and bootstrap
-samples + HC1 studentization + Hall percentile-$t$ inversion**.
+samples + HC1 studentization + Hall percentile-``t`` inversion**.
 
 ## 5. Safe adaptation checklist
 
@@ -835,21 +867,21 @@ in order.
 
 ### EWC
 
-- Compute $B$ from the intended sample size and decide explicitly whether it
+- Compute ``B`` from the intended sample size and decide explicitly whether it
   is fixed across horizons.
 - Decide explicitly between the repository's normal critical values and the
-  reference EWC $t_B$ critical values.
+  reference EWC ``t_B`` critical values.
 - Confirm that `EWC(B)` is applied to the target LP models, not to a
   separate regression with a different sample.
 
 ### Bias correction
 
-- Construct $w_t$ from the actual LP design and remove only the intercept and
+- Construct ``w_t`` from the actual LP design and remove only the intercept and
   contemporaneous shock.
 - Keep the controls in their regression units; do not standardize only for the
   bias correction.
-- Check the rank and conditioning of $\widehat\Sigma_0$.
-- Check whether the usable horizon-$h$ sample is actually $T-h$.
+- Check the rank and conditioning of ``\widehat\Sigma_0``.
+- Check whether the usable horizon-``h`` sample is actually ``T-h``.
 - Preserve the recursion through corrected lower-horizon responses.
 
 ### Moving-block bootstrap
@@ -865,7 +897,7 @@ in order.
 - If reproducing the recommended `lp_var_nberma` procedure, apply the
   Pope correction to the bootstrap VAR slopes and the Herbst--Johannsen
   correction to both the real-data and every bootstrap LP path.
-- Center bootstrap $t$-statistics at the VAR-implied response, not at the
+- Center bootstrap ``t``-statistics at the VAR-implied response, not at the
   real-data LP response.
 - Record failed draws and ensure the number of successful draws remains
   adequate at every horizon.
@@ -901,11 +933,11 @@ and compared the results with direct matrix calculations and the routines in
 |---|---|---|---|
 | LP-1 | Confirmed package bug | Missing-value handling before lag/lead construction | No effect on the present complete baseline sample; dangerous for adapted LPs with internal missing values |
 | REG-1 | Confirmed package API bug | `dofadjust=false` is ignored for HAC/EWC | No effect because the scripts use the default adjustment |
-| EWC-1 | Confirmed method-specific interval mismatch | Normal rather than Student-$t_B$ critical values | Affects the EWC bands in script 21 relative to the Lazarus et al. procedure |
+| EWC-1 | Confirmed method-specific interval mismatch | Normal rather than Student-``t_B`` critical values | Affects the EWC bands in script 21 relative to the Lazarus et al. procedure |
 
 No error was found in the default OLS coefficient path, HC1 covariance, EWC
 cosine covariance, BCC recursion, moving-block residual recentering, or
-percentile-$t$ inversion.
+percentile-``t`` inversion.
 
 ### 6.2 LP-1: internal missing values are removed before lags are built
 
@@ -919,9 +951,9 @@ then become adjacent.
 
 For example, consider
 
-\[
+```math
 y=(1,2,\mathrm{missing},4,5,6)'.
-\]
+```
 
 For the formula
 
@@ -931,14 +963,14 @@ For the formula
 
 the pinned package constructs the following horizon-zero rows:
 
-| Current $y_t$ | Constructed lag |
+| Current ``y_t`` | Constructed lag |
 |---:|---:|
 | 2 | 1 |
 | 4 | 2 |
 | 5 | 4 |
 | 6 | 5 |
 
-The row for $y_t=4$ should not be usable because its true time-series lag is
+The row for ``y_t=4`` should not be usable because its true time-series lag is
 missing. Instead, the package assigns it the value 2 from two periods earlier.
 This changes both the regression sample and the regressors.
 
@@ -957,6 +989,11 @@ missing values explicitly or preserve their positions as `NaN` values
 so that the package's post-transformation `isnan` filter removes the
 correct current and lagged/led rows. Do not rely on `lp` to construct
 time-correct lags from columns containing Julia `missing` values.
+
+**Update (2026-10-26, LocalProjections 0.2).** Fixed upstream: `lp` and `lpiv`
+convert `missing` to `NaN` without dropping rows, build lags and leads on the
+original time axis, and mask incomplete rows per horizon. An internal `missing`
+now gives the same coefficients and sample sizes as a `NaN` in its place.
 
 ### 6.3 REG-1: the `dofadjust` keyword is accepted but ignored
 
@@ -977,19 +1014,19 @@ vcov(estimator, model; dofadjust=false)
 
 returns exactly the same matrix as the default call.
 
-In an $n=80$, $k=3$ numerical check:
+In an ``n=80``, ``k=3`` numerical check:
 
 - package HC1 versus the direct HC1 formula differed by at most
-  $6.9\times10^{-17}$;
+  ``6.9\times10^{-17}``;
 - package EWC versus the direct EWC formula **with** the
-  $n/(n-k)$ adjustment differed by at most $4.2\times10^{-17}$;
+  ``n/(n-k)`` adjustment differed by at most ``4.2\times10^{-17}``;
 - `dofadjust=false` versus the default differed by exactly zero for
   both Bartlett HAC and EWC;
 - the returned EWC matrix differed from the requested unadjusted matrix by
   up to 0.0032.
 
 The same equality for HC1 is not separate evidence of a bug: the
-$n/(n-k)$ factor defines HC1 itself, so requesting HC1 should not turn it
+``n/(n-k)`` factor defines HC1 itself, so requesting HC1 should not turn it
 into HC0. REG-1 concerns the additional finite-sample correction applied by
 the package to HAC/EWC even when `dofadjust=false`.
 
@@ -1010,10 +1047,18 @@ concerns disabling the factor is unchanged. On `lpiv` models any keyword
 routes the call to CovarianceMatrices' generic sandwich, which Regress 0.2 now
 supports. There `dofadjust = false` reproduces the default IV covariance
 exactly for HR0--HR3, kernel HAC and EWC, and `dofadjust = true` multiplies
-only kernel HAC by $n/(n-k)$: the generic `dofcorrect!` is defined for `HAC`
+only kernel HAC by ``n/(n-k)``: the generic `dofcorrect!` is defined for `HAC`
 alone. So `vcov(Bartlett(6), lpiv_obj; dofadjust = true)` equals the `lp`
 convention to machine precision, and EWC stays on the unscaled Lazarus et al.
 convention.
+
+**Update (2026-10-26, Regress.jl 0.3).** Resolved. The default covariance
+applies the factor ``n/(n-k)`` to kernel HAC, EWC and VARHAC on OLS *and* IV
+models, so `lp` and `lpiv` follow one convention, and `dofadjust = false`
+removes it on both. In LocalProjections 0.2 the estimator is stored in the
+result (`lp_result + vcov(estimator)`), which carries no keyword; the unadjusted
+matrix of one horizon is `vcov(estimator, horizonmodel(lp_result, h); dofadjust
+= false)`.
 
 ### 6.4 EWC-1: covariance is correct, but the canonical critical value is not used
 
@@ -1024,9 +1069,9 @@ The EWC score projections and sandwich covariance produced by
 implementation:
 
 - EWC long-run covariance maximum difference:
-  $1.8\times10^{-15}$;
+  ``1.8\times10^{-15}``;
 - final EWC regression covariance maximum difference:
-  $4.2\times10^{-17}$.
+  ``4.2\times10^{-17}``.
 
 The problem is interval construction. The pinned `LocalProjections.jl`
 uses
@@ -1038,20 +1083,20 @@ quantile(Normal(), 0.5 + level / 2)
 unconditionally in `summarize`, the plot recipe, and
 `as_irf_result`. It does so even when the covariance object contains an
 `EWC(B)` estimator. Lazarus et al. (2018) instead pair the EWC
-long-run variance estimator with fixed-smoothing Student-$t_B$ critical
+long-run variance estimator with fixed-smoothing Student-``t_B`` critical
 values for one restriction.
 
 Script 21 bypasses those package helpers, but independently hard-codes the
 same normal critical values. In the current baseline,
 
-\[
+```math
 T_0=256,\qquad
 B=\lfloor0.41T_0^{2/3}\rfloor=16.
-\]
+```
 
 The relevant comparisons are:
 
-| Band | Normal critical value | $t_{16}$ critical value | Canonical/current half-width |
+| Band | Normal critical value | ``t_{16}`` critical value | Canonical/current half-width |
 |---|---:|---:|---:|
 | 90% | 1.6449 | 1.7459 | 1.0614 |
 | 68% | 0.9945 | 1.0263 | 1.0321 |
@@ -1067,23 +1112,28 @@ Using `TDist(B)` would be an inference correction relative to that
 reference, but it would change the current figures and must be treated as a
 methodological change.
 
+**Update (2026-10-26).** Resolved, as that deliberate change: `summarize`, the
+plots and `as_irf_result` take the critical value from the stored estimator,
+Student-``t_B`` for `EWC(B)` and normal otherwise, and `statetest` refers its
+statistic to ``F_{1,B}`` under `EWC(B)`.
+
 ### 6.5 Results checked against `lp_var_nberma`
 
 The following parts agree with the replication code:
 
 - **OLS LP coefficients.** Synthetic horizon-by-horizon coefficients from
   `LocalProjections.jl` matched direct OLS calculations within
-  $5.6\times10^{-17}$.
+  ``5.6\times10^{-17}``.
 - **HC1/EHW covariance.** `Regress.jl` matches
   `linreg.m`: the Eicker--Huber--White sandwich is multiplied by
-  $T/(T-k)$.
+  ``T/(T-k)``.
 - **BCC.** Script 22 reproduces `lp_biascorr.m`, including the
-  denominators in $\widehat\Sigma_j$, the trace adjustment, and recursion
+  denominators in ``\widehat\Sigma_j``, the trace adjustment, and recursion
   through already-corrected lower-horizon responses.
 - **Residual MBB.** Script 23 reproduces `var_boot.m` block sampling,
   position-specific residual recentering, and random contiguous initial
   conditions.
-- **Percentile-$t$.** Script 23 reproduces `boot_ci.m`, including
+- **Percentile-``t``.** Script 23 reproduces `boot_ci.m`, including
   centering the bootstrap statistic at the VAR-implied pseudo-truth and
   reversing its quantiles when the interval is inverted.
 
@@ -1109,7 +1159,7 @@ The local files most useful for checking an implementation are:
 - `21_nasa_baseline_ewc.jl`: EWC bandwidth and covariance calls;
 - `22_nasa_baseline_biascorr.jl`: direct Julia port of the BCC recursion;
 - `23_nasa_baseline_bootstrap.jl`: VAR pseudo-truth, residual MBB, and
-  percentile-$t$ inversion;
+  percentile-``t`` inversion;
 - `docs/code/lp_var_nberma-main/_estim/lp_ir_estim.m`: MATLAB LP design
   and Eicker--Huber--White covariance;
 - `docs/code/lp_var_nberma-main/_estim/lp_biascorr.m`: original BCC
@@ -1124,7 +1174,7 @@ The local files most useful for checking an implementation are:
 - `docs/code/lp_var_nberma-main/_estim/var_boot.m`: original MBB routine
   ported by script 23;
 - `docs/code/lp_var_nberma-main/_estim/boot_ci.m`: Efron, Hall, and Hall
-  percentile-$t$ formulas;
+  percentile-``t`` formulas;
 - `docs/code/lp_var_nberma-main/_estim/ir_estim.m`: orchestration and use
   of the VAR-implied pseudo-truth.
 
@@ -1157,78 +1207,84 @@ what each does.
 ### 8.1 What `CovarianceMatrices.Bartlett{NeweyWest}` computes
 
 Verified against `CovarianceMatrices` v0.30.5, `src/HAC.jl:398-417`, and
-reproduced by a hand-built sandwich. Let $M$ be the $T \times k$ moment matrix
-($m_t = z_t \hat u_t$ for IV, $x_t \hat u_t$ for OLS). With the default
+reproduced by a hand-built sandwich. Let ``M`` be the ``T \times k`` moment matrix
+(``m_t = z_t \hat u_t`` for IV, ``x_t \hat u_t`` for OLS). With the default
 `prewhite = false`:
 
 1. **Lag-selection parameter** (`getrates`, `lagtruncation(Bartlett) = 2/9`):
 
-\[
+```math
 n = \left\lfloor 4 \left(\tfrac{T}{100}\right)^{2/9} \right\rfloor .
-\]
+```
 
-2. **Weight vector** (`setkernelweights!`): $w_i = 1$ for every moment column
-   that is not constant, $0$ otherwise. For a regression with an intercept the
-   intercept's moment column is $\hat u_t$, which is not constant, so in
-   practice $w = \mathbf{1}$.
+2. **Weight vector** (`setkernelweights!`): ``w_i = 1`` for every moment column
+   that is not constant, ``0`` otherwise. For a regression with an intercept the
+   intercept's moment column is ``\hat u_t``, which is not constant, so in
+   practice ``w = \mathbf{1}``.
 
-3. **Weighted autocovariances** of the scalar series $\tilde m_t = m_t' w$:
+3. **Weighted autocovariances** of the scalar series ``\tilde m_t = m_t' w``:
 
-\[
+```math
 \hat\sigma_j = \frac{1}{T}\sum_{t} \tilde m_t \tilde m_{t+j},
 \qquad j = 0,\dots,n .
-\]
+```
 
 4. **Newey--West (1994) moments**:
 
-\[
+```math
 \hat s_0 = \hat\sigma_0 + 2\sum_{j=1}^{n}\hat\sigma_j ,
 \qquad
 \hat s_1 = 2\sum_{j=1}^{n} j\,\hat\sigma_j .
-\]
+```
 
 5. **Bandwidth** (`bwnw`, `growthrate(Bartlett) = 1/3`):
 
-\[
+```math
 \boxed{\;
 S_T = 1.1447 \left(\frac{\hat s_1}{\hat s_0}\right)^{2/3} T^{1/3}
 \;}
-\]
+```
 
 which is exactly the Bartlett line of Newey and West (1994).
 
 Two consequences matter for replication:
 
-- $S_T$ is a **real number** and is used as such: the Bartlett weight on lag
-  $j$ is $1 - j/S_T$, non-zero for $j < S_T$. It is never rounded.
+- ``S_T`` is a **real number** and is used as such: the Bartlett weight on lag
+  ``j`` is ``1 - j/S_T``, non-zero for ``j < S_T``. It is never rounded.
 - **No degrees-of-freedom correction is applied.** A hand-built sandwich with
-  the same $S_T$ reproduces the package's standard error to 13 significant
-  digits *only* without the $T/(T-K)$ factor. This matches `ivreg2`'s `robust`
-  without `small`, where the help file gives $q_c = 1$; it does **not** match
-  `ivreg2, robust small`, where $q_c = N/(N-K)$.
+  the same ``S_T`` reproduces the package's standard error to 13 significant
+  digits *only* without the ``T/(T-K)`` factor. This matches `ivreg2`'s `robust`
+  without `small`, where the help file gives ``q_c = 1``; it does **not** match
+  `ivreg2, robust small`, where ``q_c = N/(N-K)``.
 
 **Scope note (added 2026-09-20).** Items 2 and the second consequence describe
 the **IV** path (`lpiv`, the Ramey--Zubairy case this section is about), where
-Regress.jl builds the moment matrix itself --- as $\hat x_t\hat u_t$, which for
-a fixed bandwidth gives the same covariance as $z_t\hat u_t$ --- and calls
+Regress.jl builds the moment matrix itself --- as ``\hat x_t\hat u_t``, which for
+a fixed bandwidth gives the same covariance as ``z_t\hat u_t`` --- and calls
 `aVar` on it directly. On **OLS** models (`lp`) the generic path is used
 instead: `setkernelweights!` is called on the *model matrix*, so the intercept
-gets weight $0$, and the $T/(T-K)$ factor **is** applied (OLS kernel HAC equals
+gets weight ``0``, and the ``T/(T-K)`` factor **is** applied (OLS kernel HAC equals
 Stata's `newey` to 15 digits). The two paths therefore select different
 bandwidths and use different finite-sample conventions for the same estimator;
-see REG-2 in `CLAUDE.md`. Stata applies weight $0$ to the constant and one
-$q_c$ convention on both.
+see REG-2 in `CLAUDE.md`. Stata applies weight ``0`` to the constant and one
+``q_c`` convention on both.
 
 **Update (2026-09-22).** Regress.jl 0.2.0 fixes the bandwidth half of this
 note: the IV path now passes the model-matrix kernel weights, so the intercept
-gets weight $0$ on `lp` and `lpiv` alike. A self-instrumented `lpiv` selects
+gets weight ``0`` on `lp` and `lpiv` alike. A self-instrumented `lpiv` selects
 the same automatic bandwidth as the matching `lp`, and their standard errors
-differ only by $\sqrt{T/(T-K)}$. Item 2 above therefore holds for both paths.
+differ only by ``\sqrt{T/(T-K)}``. Item 2 above therefore holds for both paths.
 The finite-sample difference remains (see §6.3 for `dofadjust = true`).
 CovarianceMatrices.jl 0.32 also removes `setkernelweights!` and the mutable
 `bw`/`kw` fields; the selected bandwidth is read from the result with
 `bandwidth(vcov(estimator, model))`. The pilot-length difference from Stata is
 unchanged.
+
+**Update (2026-10-26, Regress.jl 0.3 / CovarianceMatrices.jl 0.33).** The IV
+path now applies the ``T/(T-K)`` factor as well, so the second consequence above
+no longer holds: with the same bandwidth, the standard errors here are
+``\sqrt{T/(T-K)}`` times those of `ivreg2, robust` (`dofadjust = false` on a
+horizon model removes the factor). The bandwidth rule itself is unchanged.
 
 ### 8.2 What `ivreg2, bw(auto)` documents
 
@@ -1242,8 +1298,8 @@ From the `ivreg2` help file (Baum, Schaffer and Stillman):
   Newey and West's (1994) automatic bandwidth-selection procedure."
 - "For bartlett, parzen, and tukey-hanning and tukey-hamming kernels, the
   number of lags used to construct the kernel estimate equals the bandwidth
-  minus one" — i.e. the *same* parameterisation as above, lag $j$ weighted
-  $1 - j/\mathrm{bw}$ for $j \le \mathrm{bw}-1$. The kernel convention is
+  minus one" — i.e. the *same* parameterisation as above, lag ``j`` weighted
+  ``1 - j/\mathrm{bw}`` for ``j \le \mathrm{bw}-1``. The kernel convention is
   therefore not the source of any discrepancy.
 
 So the two agree on the target (Newey--West 1994), on the kernel, on the
@@ -1258,59 +1314,66 @@ regressions. "Implied bandwidth" is the fixed Bartlett bandwidth that
 reproduces the authors' published standard error at that horizon; it is
 reverse-engineered from their output, not read off a Stata log.
 
-| $h$ | $T$ | $S_T$ selected here | implied by published s.e. | s.e. here | published s.e. |
+| ``h`` | ``T`` | ``S_T`` selected here | implied by published s.e. | s.e. here | published s.e. |
 |---:|---:|---:|---:|---:|---:|
-| 0 | 504 | 15.6 | 19.5 | 0.1488 | 0.1551 |
-| 2 | 502 | 3.1 | 30.0 | 0.1056 | 0.1331 |
-| 4 | 500 | 8.3 | 28.5 | 0.1054 | 0.1324 |
-| 8 | 496 | 14.3 | 29.0 | 0.0889 | 0.1043 |
-| 12 | 492 | 15.9 | 30.5 | 0.0915 | 0.1017 |
-| 16 | 488 | 16.5 | 30.0 | 0.1069 | 0.1194 |
-| 20 | 484 | 16.7 | 29.5 | 0.1255 | 0.1386 |
+| 0 | 504 | 15.6 | 19.5 | 0.1503 | 0.1551 |
+| 2 | 502 | 3.6 | 30.0 | 0.1065 | 0.1331 |
+| 4 | 500 | 8.1 | 28.5 | 0.1063 | 0.1324 |
+| 8 | 496 | 14.3 | 29.0 | 0.0897 | 0.1043 |
+| 12 | 492 | 15.9 | 30.5 | 0.0924 | 0.1017 |
+| 16 | 488 | 16.5 | 30.0 | 0.1080 | 0.1194 |
+| 20 | 484 | 16.7 | 29.5 | 0.1268 | 0.1386 |
+
+The table is recomputed on LocalProjections 0.2 with Regress.jl 0.3 and
+CovarianceMatrices.jl 0.33.1. Two selected bandwidths moved slightly (``h = 2``:
+3.1 before, ``h = 4``: 8.3), and "s.e. here" now includes ``\sqrt{T/(T-K)}``
+(``K = 10``), about 1%. The implied bandwidths refer to `ivreg2`'s convention,
+without the factor, and are unchanged.
 
 The instructive pattern is not the level but the *shape*. The implied
-bandwidth is essentially flat at $\approx 29$--$30$ across horizons, while the
-data-driven value computed here swings between 3.1 and 16.7. At horizon $h$ the
-local-projection residual is MA($h$) by construction, so the two procedures
+bandwidth is essentially flat at ``\approx 29``--``30`` across horizons, while the
+data-driven value computed here swings between 3.6 and 16.7. At horizon ``h`` the
+local-projection residual is MA(``h``) by construction, so the two procedures
 respond very differently to a moving-average structure that is known a priori.
 This is not a constant-factor convention mismatch that could be absorbed into a
 scaling.
 
-**The mechanism (source-level check, 2026-09-20).** The flat $\approx 29$--$30$
+**The mechanism (source-level check, 2026-09-20).** The flat ``\approx 29``--``30``
 is what `ivreg2`'s selector returns when it sits on its own cap. Its Mata
 routine `s_abw` (`ivreg2.ado` 4.1.11; official `ivregress` agrees with it to
-$10^{-18}$) uses the same plug-in formula as §8.1 but a pilot truncation five
+``10^{-18}``) uses the same plug-in formula as §8.1 but a pilot truncation five
 times longer, and caps the selected lag at that pilot value:
 
-\[
+```math
 m^* = \left\lfloor 20\left(\tfrac{T}{100}\right)^{2/9}\right\rfloor,
 \qquad
 \text{lag} = \min\!\left(\lfloor \hat\gamma\, T^{1/3}\rfloor,\; m^*\right),
 \qquad
 \text{bw} = \text{lag} + 1 ,
-\]
+```
 
-against $n=\lfloor 4(T/100)^{2/9}\rfloor$ and no cap in `CovarianceMatrices`
+against ``n=\lfloor 4(T/100)^{2/9}\rfloor`` and no cap in `CovarianceMatrices`
 (and in R's `sandwich::bwNeweyWest`). For every sample size in the table,
-$T = 484,\dots,504$, this gives $m^* = 28$, i.e. a maximum bandwidth of **29**
---- the value the published standard errors imply at all horizons $h \ge 2$. A
-long pilot sum $\hat s_1 = 2\sum_{j\le m^*} j\,\hat\sigma_j$ puts weight $j$ on
+``T = 484,\dots,504``, this gives ``m^* = 28``, i.e. a maximum bandwidth of **29**
+--- the value the published standard errors imply at all horizons ``h \ge 2``. A
+long pilot sum ``\hat s_1 = 2\sum_{j\le m^*} j\,\hat\sigma_j`` puts weight ``j`` on
 noisy long-lag autocovariances, so the selected lag is large and hits the cap
-often: in a Monte Carlo on an AR(1) design with $T = 300$ ($m^* = 25$) the Stata
+often: in a Monte Carlo on an AR(1) design with ``T = 300`` (``m^* = 25``) the Stata
 rule selected a median of 23 lags and sat exactly on the cap in 48% of draws,
-while the $4(\cdot)$ rule selected a median bandwidth of 6.2. Only $h = 0$
+while the ``4(\cdot)`` rule selected a median bandwidth of 6.2. Only ``h = 0``
 (implied 19.5), where the LP residual has no built-in moving-average component,
 falls below the cap. The implied bandwidths are reverse-engineered, not read off
 a Stata log, so this is an explanation consistent with the source code and the
 numbers rather than a run of the authors' do-file; but it accounts for both the
 level and the flatness, and it means the two "Newey--West automatic" rules
 cannot be reconciled by any setting on the Julia side other than a fixed
-bandwidth (§8.4). `ivreg2` also gives the constant weight $0$ in the scalar
-series and builds it from the instrument moments $z_t\hat u_t$; see the scope
+bandwidth (§8.4). `ivreg2` also gives the constant weight ``0`` in the scalar
+series and builds it from the instrument moments ``z_t\hat u_t``; see the scope
 note in §8.1.
 
-Across both shocks and all 21 horizons the automatic rule gives standard errors
-**0.76 to 1.12 times** the published ones.
+Across both shocks, on the horizons of the Ramey--Zubairy tutorial's table, the
+automatic rule gives standard errors **0.77 to 1.14 times** the published ones
+(0.76 to 1.12 before the IV factor).
 
 ### 8.4 What to do about it
 
@@ -1318,18 +1381,19 @@ For work that must line up with `ivreg2, bw(auto)` output, do not use the
 automatic rule — pass a fixed bandwidth:
 
 ```julia
-res = lpiv(@formula(cumul(y) ~ (cumul(g) ~ bp) + lags(y, 4) + lags(g, 4)),
+res = lpiv(TSLS(), @formula(cumul(y) ~ (cumul(g) ~ bp) + lags(y, 4) + lags(g, 4)),
            rz; horizon = 20)
 
-summarize(res, vcov(Bartlett(30.0), res))     # fixed bandwidth
+summarize(res, Bartlett(30.0))     # fixed bandwidth
 ```
 
 On the Ramey--Zubairy regressions this narrows the ratio to published standard
-errors from 0.76--1.12 to **0.99--1.05** (Blanchard--Perotti) and
-**0.95--1.11** (military news).
+errors from 0.77--1.14 to **1.00--1.06** (Blanchard--Perotti) and
+**0.96--1.13** (military news); before the IV factor of Regress.jl 0.3 these were
+0.99--1.05 and 0.95--1.11.
 
 More generally, for local projections a fixed, horizon-aware bandwidth is the
-defensible choice: the MA($h$) truncation is known, so there is little to be
+defensible choice: the MA(``h``) truncation is known, so there is little to be
 gained from estimating it. The EWC estimator of §2 is the other principled
 route, and unlike either Newey--West variant it comes with critical values
 matched to its own fixed-smoothing limit (see EWC-1 in §6.4).
@@ -1337,6 +1401,6 @@ matched to its own fixed-smoothing limit (see EWC-1 in §6.4).
 A caveat on the table: the published standard errors also embed a small
 data-vintage difference (the Ramey--Zubairy output spreadsheets predate the
 final revision of `RZDAT.xlsx` by a week), so the implied bandwidths are
-accurate to roughly $\pm 1$, not to the digit. The qualitative conclusion — a
-flat $\approx 30$ against a swinging 3--17 — is far larger than that
+accurate to roughly ``\pm 1``, not to the digit. The qualitative conclusion — a
+flat ``\approx 30`` against a swinging 3--17 — is far larger than that
 uncertainty.

@@ -3,6 +3,59 @@
 # ============================================================================
 
 """
+    BiasCorrectedLP
+
+Herbst–Johannsen bias-corrected local projection (the "BCC" estimator of
+Herbst & Johannsen, 2024). Wraps an OLS [`LocalProjection`](@ref) together
+with the persistence adjustments ``\\hat c_j`` estimated from the
+horizon-zero control matrix. Construct with [`biascorrect`](@ref).
+
+`coefpath` returns the corrected impulse-response path
+``\\hat\\theta_h^{\\,c}``. `stderror`, `summarize`, `as_irf_result` and the plots
+center the confidence bands on the corrected path while using the standard errors
+of the *uncorrected* OLS coefficients, from the estimator stored in the wrapped
+projection: following the reference implementation (`lp_biascorr.m` in Montiel
+Olea, Plagborg-Møller, Qian & Wolf, 2025), neither the sampling uncertainty of
+``\\hat c_j`` nor the covariance across lower-horizon responses entering the
+recursion is propagated into the bands.
+
+A `BiasCorrectedLP` is an [`AbstractLocalProjection`](@ref): properties not stored
+on the wrapper (`horizon`, `response`, `shock`, `models`, ...) are forwarded to the
+wrapped `LocalProjection`, and `bc + vcov(estimator)` replaces the estimator while
+keeping the correction.
+"""
+struct BiasCorrectedLP{L <: LocalProjection} <: AbstractLocalProjection
+    lp::L
+    c::Vector{Float64}       # persistence adjustments ĉ_j, j = 1:horizon
+    T0::Int                  # horizon-zero estimation sample size
+    controls::Vector{String} # coefficient names spanning w_t
+end
+
+function Base.getproperty(bc::BiasCorrectedLP, name::Symbol)
+    name in fieldnames(BiasCorrectedLP) && return getfield(bc, name)
+    return getproperty(getfield(bc, :lp), name)
+end
+
+function Base.propertynames(bc::BiasCorrectedLP)
+    return (fieldnames(BiasCorrectedLP)..., propertynames(getfield(bc, :lp))...)
+end
+
+function Base.show(io::IO, bc::BiasCorrectedLP)
+    lp = bc.lp
+    return print(
+        io,
+        "BiasCorrectedLP(horizon=0:$(lp.horizon), response=$(lp.response), shock=$(lp.shock))"
+    )
+end
+
+function Base.show(io::IO, mime::MIME"text/plain", bc::BiasCorrectedLP)
+    println(io, "BiasCorrectedLP (Herbst–Johannsen)")
+    println(io, "  Controls:   ", isempty(bc.controls) ? "(none)" : join(bc.controls, ", "))
+    println(io, "  T₀:         $(bc.T0)")
+    return show(io, mime, bc.lp)
+end
+
+"""
     _persistence_adjustments(w, H) -> Vector{Float64}
 
 Persistence adjustments ``\\hat c_j = 1 + \\mathrm{tr}(\\hat\\Sigma_0^{-1}
@@ -16,15 +69,21 @@ function _persistence_adjustments(w::AbstractMatrix{<:Real}, H::Int)
     T, k = size(w)
     c = ones(H)
     k == 0 && return c
-    T > H + 1 || throw(ArgumentError(
-        "estimating the lag-$H control autocovariance needs more than " *
-        "H + 1 = $(H + 1) horizon-zero observations, got $T"))
+    T > H + 1 || throw(
+        ArgumentError(
+            "estimating the lag-$H control autocovariance needs more than " *
+                "H + 1 = $(H + 1) horizon-zero observations, got $T"
+        )
+    )
     wt = w .- mean(w; dims = 1)
     Sigma0 = Symmetric(wt' * wt / (T - 1))
     kappa = cond(Sigma0)
-    (isfinite(kappa) && kappa < 1e12) || throw(ArgumentError(
-        "the control covariance Σ̂₀ is (near-)singular (cond ≈ $(round(kappa, sigdigits = 3))); " *
-        "drop collinear controls before bias-correcting"))
+    (isfinite(kappa) && kappa < 1.0e12) || throw(
+        ArgumentError(
+            "the control covariance Σ̂₀ is (near-)singular (cond ≈ $(round(kappa, sigdigits = 3))); " *
+                "drop collinear controls before bias-correcting"
+        )
+    )
     F = factorize(Sigma0)
     for j in 1:H
         Sigmaj = view(wt, 1:(T - j), :)' * view(wt, (j + 1):T, :) / (T - j - 1)
@@ -58,69 +117,98 @@ The ``1/(T_0 - h)`` weights (and the lag-``j`` pairing in
 ``h`` future observations. This is verified structurally: the horizon-``h``
 design matrix must equal the horizon-zero design truncated by its last
 ``h`` rows, otherwise an error is thrown. One case is not detectable from
-the fitted object alone: an internal `NaN` gap in an RHS-only variable
+the fitted object alone: an internal `NaN`/`missing` gap in an RHS-only variable
 drops the same rows at every horizon, leaving the truncation pattern
-intact while the retained rows are no longer contiguous in time — the
+intact while the retained rows are no longer contiguous in time; the
 lag-``j`` autocovariance pairing is then misaligned at the gap. The
 correction therefore additionally assumes the horizon-zero estimation
 sample is a contiguous block of the original time axis.
 
-A projection estimated with `sample = :common` is rejected: its horizons share
-one sample instead of losing ``h`` observations each, which is not the setting
-the ``1/(T_0 - h)`` correction is derived for.
-
-Only defined for OLS local projections — the correction is derived for
-least-squares LP coefficients, not for IV estimators.
+The correction is derived for one time series with a response in levels (`leads`
+or `cumul`), the same regressors at every horizon, and horizon-specific samples. It
+throws for `sample = :fixed`, panels (`unit`), absorbed fixed effects (`fe()`),
+state-dependent projections, horizon-tracking regressors, long-difference
+responses (`ldiff`, `hbr`), and IV local projections.
 
 # Example
 ```julia
-lp_result = lp(@formula(leads(y) ~ x + lags(y, 4)), df; horizon = 20)
-bc = biascorrect(lp_result)
+r = lp(@formula(leads(y) ~ x + lags(y, 4)), df; horizon = 20)
+bc = biascorrect(r)
 coefpath(bc)                       # corrected θ̂ᶜ path
 summarize(bc, HC1(); level = 0.90) # bands centered on θ̂ᶜ, SEs of θ̂
 ```
 """
 function biascorrect(lp_result::LocalProjection)
-    lp_result.state === nothing || throw(ArgumentError(
-        "the Herbst–Johannsen correction is derived for a linear projection and " *
-        "does not apply to a state-dependent one"))
-    lp_result.sample === :common && throw(ArgumentError(
-        "the Herbst–Johannsen correction is derived for horizon-specific samples, " *
-        "where the horizon-h regression uses T₀ − h observations; the projection " *
-        "was estimated with sample = :common, re-estimate it with sample = :horizon"))
-    _rhs_tracks_horizon(lp_result.base_formula) && throw(ArgumentError(
-        "the Herbst–Johannsen correction assumes the same regressors at every " *
-        "horizon, but the formula has a horizon-tracking right-hand-side term " *
-        "(a bare `cumul(x)` or `leads(x)`), so the design changes with h"))
-    _lhs_kind(lp_result.base_formula) === :longdiff && throw(ArgumentError(
-        "the Herbst–Johannsen correction is derived for a response in levels, " *
-        "y_{t+h} or its cumulative sum; it does not cover the long-difference " *
-        "responses ldiff() and hbr()"))
+    lp_result.state === nothing || throw(
+        ArgumentError(
+            "the Herbst–Johannsen correction is derived for a linear projection and " *
+                "does not apply to a state-dependent one"
+        )
+    )
+    lp_result.sample === :fixed && throw(
+        ArgumentError(
+            "the Herbst–Johannsen correction is derived for horizon-specific samples, " *
+                "where the horizon-h regression uses T₀ − h observations; the projection " *
+                "was estimated with sample = :fixed, re-estimate it with sample = :varying"
+        )
+    )
+    lp_result.unit === nothing || throw(
+        ArgumentError(
+            "the Herbst–Johannsen correction is derived for a single time series; " *
+                "it does not apply to a panel local projection (`unit`)"
+        )
+    )
+    any(_is_fe, first(_split_rhs(lp_result.base_formula.rhs))) && throw(
+        ArgumentError(
+            "the Herbst–Johannsen correction does not apply with absorbed fixed " *
+                "effects `fe()`: each horizon demeans on its own rows, so the design " *
+                "changes with h"
+        )
+    )
+    _rhs_tracks_horizon(lp_result.base_formula) && throw(
+        ArgumentError(
+            "the Herbst–Johannsen correction assumes the same regressors at every " *
+                "horizon, but the formula has a horizon-tracking right-hand-side term " *
+                "(a bare `cumul(x)`, `leads(x)`, `ldiff(x)` or `hbr(x, y)`), so the " *
+                "design changes with h"
+        )
+    )
+    _lhs_kind(lp_result.base_formula) === :longdiff && throw(
+        ArgumentError(
+            "the Herbst–Johannsen correction is derived for a response in levels, " *
+                "y_{t+h} or its cumulative sum; it does not cover the long-difference " *
+                "responses ldiff() and hbr()"
+        )
+    )
     H = lp_result.horizon
-    m0 = lp_result.models[1]
+    m0 = horizonmodel(lp_result, 0)
     T0 = Int(nobs(m0))
     X0 = modelmatrix(m0)
     for h in 1:H
-        mh = lp_result.models[h + 1]
+        mh = horizonmodel(lp_result, h)
         Th = Int(nobs(mh))
-        (Th == T0 - h && modelmatrix(mh) == view(X0, 1:Th, :)) ||
-            throw(ArgumentError(
+        (Th == T0 - h && modelmatrix(mh) == view(X0, 1:Th, :)) || throw(
+            ArgumentError(
                 "the horizon-$h estimation sample is not the horizon-0 sample " *
-                "truncated by its last $h rows (horizon-specific missingness), " *
-                "so the Herbst–Johannsen 1/(T₀ − h) weights and lag-j " *
-                "autocovariance pairing do not apply"))
+                    "truncated by its last $h rows (horizon-specific missingness), " *
+                    "so the Herbst–Johannsen 1/(T₀ − h) weights and lag-j " *
+                    "autocovariance pairing do not apply"
+            )
+        )
     end
-    keep = [!(n == "(Intercept)" || n == String(lp_result.shock))
-            for n in lp_result.coef_names]
-    w = modelmatrix(m0)[:, keep]
+    keep = [!(n == "(Intercept)" || n == String(lp_result.shock)) for n in lp_result.coef_names]
+    w = X0[:, keep]
     c = _persistence_adjustments(w, H)
     return BiasCorrectedLP(lp_result, c, T0, lp_result.coef_names[keep])
 end
 
 function biascorrect(::LocalProjectionIV)
-    throw(ArgumentError(
-        "the Herbst–Johannsen bias correction is derived for OLS local " *
-        "projections and is not available for LocalProjectionIV"))
+    throw(
+        ArgumentError(
+            "the Herbst–Johannsen bias correction is derived for OLS local " *
+                "projections and is not available for LocalProjectionIV"
+        )
+    )
 end
 
 """
@@ -132,10 +220,13 @@ of the shock only; request other terms from the uncorrected result via
 `coefpath(bc.lp; term = ...)`.
 """
 function coefpath(bc::BiasCorrectedLP; term::Symbol = bc.lp.shock)
-    term === bc.lp.shock || throw(ArgumentError(
-        "the Herbst–Johannsen correction applies to the impulse response " *
-        "of the shock ($(bc.lp.shock)); use coefpath(bc.lp; term = :$term) " *
-        "for the uncorrected path of another term"))
+    term === bc.lp.shock || throw(
+        ArgumentError(
+            "the Herbst–Johannsen correction applies to the impulse response " *
+                "of the shock ($(bc.lp.shock)); use coefpath(bc.lp; term = :$term) " *
+                "for the uncorrected path of another term"
+        )
+    )
     theta = coefpath(bc.lp; term = term)
     corrected = copy(theta)
     for h in 1:bc.lp.horizon
@@ -146,18 +237,6 @@ function coefpath(bc::BiasCorrectedLP; term::Symbol = bc.lp.shock)
         corrected[h + 1] = theta[h + 1] + acc / (bc.T0 - h)
     end
     return corrected
-end
-
-"""
-    vcov(estimator, bc::BiasCorrectedLP; kwargs...)
-
-Covariance of the *uncorrected* per-horizon OLS coefficients (the
-reference convention pairs the corrected path with the ordinary LP
-standard errors; see [`BiasCorrectedLP`](@ref)).
-"""
-function vcov(estimator::CovarianceMatrices.AbstractAsymptoticVarianceEstimator,
-        bc::BiasCorrectedLP; kwargs...)
-    return vcov(estimator, bc.lp; kwargs...)
 end
 
 """

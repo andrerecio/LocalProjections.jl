@@ -11,6 +11,11 @@ A Julia package for estimating Local Projection Impulse Response Functions.
 - Robust inference via CovarianceMatrices.jl (HC, HAC, cluster-robust)
 - Plot recipes for IRF visualization
 - Tabular summaries with `summarize()`
+- Long differences `ldiff()` and Hall–Barro–Redlick units `hbr()`
+- Equal-weighted cosine (EWC) HAR inference with Student-t critical values
+- State-dependent projections (Ramey–Zubairy) with `statetest()`
+- Herbst–Johannsen bias correction (`biascorrect`) and VAR moving-block bootstrap bands (`varbootstrap`, `lagselect`)
+- Gorodnichenko–Lee forecast-error variance decompositions (`fevd`, `fevdbootstrap`)
 
 ## Installation
 
@@ -33,12 +38,12 @@ lp_result = lp(@formula(leads(y) ~ x), df; horizon=12)
 # Get impulse response
 irf = coefpath(lp_result)
 
-# Robust inference
-cov = vcov(HC1(), lp_result)
-se = stderror(cov; term=:x)
+# Standard errors (HC1 by default; HAC via `+ vcov(...)`)
+se = stderror(lp_result)
+lp_hac = lp_result + vcov(Bartlett{NeweyWest}())
 
 # Summary table
-summarize(lp_result, cov)
+summarize(lp_hac)
 ```
 
 ## Tutorials
@@ -46,4 +51,7 @@ summarize(lp_result, cov)
 - [Getting Started](tutorials/basic.md) - Basic local projections without transformations
 - [Transformations](tutorials/transformations.md) - Lags, leads, and cumulative responses
 - [Inference and Plotting](tutorials/inference.md) - Robust standard errors and visualization
+- [Plotting](tutorials/plotting.md) - Plots.jl and Makie figures
+- [Ramey–Zubairy Multipliers](tutorials/ramey_zubairy.md) - Replication of the cumulative fiscal multipliers: IV local projections, state dependence, EWC inference, bias correction and bootstrap bands
+- [Inference Procedures Guide](inference_procedures_guide.md) - The mathematics of EWC, the Herbst–Johannsen correction and the VAR moving-block bootstrap, mapped to the Montiel Olea–Plagborg-Møller–Qian–Wolf replication code
 - [FEVD (Gorodnichenko–Lee)](tutorials/fevd.md) - Forecast-error variance decompositions with local projections and their bias corrections

@@ -10,8 +10,8 @@ by hand.
 Usage:
 
 ```
-julia --project=benchmark benchmark/coverage_study.jl              # defaults
-julia --project=benchmark benchmark/coverage_study.jl 100 200      # nmc nboot
+julia +1.13 --project=benchmark -t 4 benchmark/coverage_study.jl          # defaults
+julia +1.13 --project=benchmark -t 4 benchmark/coverage_study.jl 100 200  # nmc nboot
 ```
 
 The DGP is a bivariate VAR(1) with the shock ordered first and `Σ = I`, so the
@@ -45,7 +45,6 @@ reproducible, the study is seeded with `StableRNG`):
 
 using LocalProjections
 using DataFrames
-using StatsModels    # @formula
 using StableRNGs
 using CovarianceMatrices
 using LinearAlgebra
@@ -79,7 +78,7 @@ True response of variable 2 to a unit shock in variable 1, horizons `0:H`.
 With `Σ = I` and the shock ordered first the unit-impact vector is `e₁`, so
 this is just `(A₁^h)[2,1]`.
 """
-population_irf(A1::AbstractMatrix, H::Int) = [(A1 ^ h)[2, 1] for h in 0:H]
+population_irf(A1::AbstractMatrix, H::Int) = [(A1^h)[2, 1] for h in 0:H]
 
 # One LP specification is used throughout; `@formula` cannot interpolate the lag
 # count, so it is fixed here rather than passed as a parameter.
@@ -102,9 +101,11 @@ That last quantity is not a defect: a percentile-`t` interval corrects for bias
 and can sit entirely to one side of θ̂. It is measured here to confirm it stays
 rare (≈0.3% of horizon-replications in these DGPs).
 """
-function coverage_study(A1::AbstractMatrix;
+function coverage_study(
+        A1::AbstractMatrix;
         T::Int = 240, H::Int = 8, nmc::Int = 300, nboot::Int = 500,
-        level::Float64 = 0.90, seed0::Int = 1000)
+        level::Float64 = 0.9, seed0::Int = 1000
+    )
     truth = population_irf(A1, H)
     methods = (:hall_t, :hall, :efron)
     hit = Dict(m => zeros(Int, H + 1) for m in methods)
@@ -119,16 +120,18 @@ function coverage_study(A1::AbstractMatrix;
         df = DataFrame(shock = Y[:, 1], y = Y[:, 2])
         try
             m = lp(LP_FORMULA, df; horizon = H)
-            b = varbootstrap(m, df; vars = [:shock, :y], nlags = LP_LAGS,
+            b = varbootstrap(
+                m, df; vars = [:shock, :y], nlags = LP_LAGS,
                 nboot = nboot, rng = StableRNG(seed0 + 500_000 + r),
-                threaded = true)
+                threaded = true
+            )
             for mth in methods
                 s = summarize(b; level = level, method = mth)
                 for h in 1:(H + 1)
                     (s.lower[h] <= truth[h] <= s.upper[h]) && (hit[mth][h] += 1)
                     width[mth][h] += s.upper[h] - s.lower[h]
                     if mth === :hall_t &&
-                       (b.theta[h] < s.lower[h] || b.theta[h] > s.upper[h])
+                            (b.theta[h] < s.lower[h] || b.theta[h] > s.upper[h])
                         outside[h] += 1
                     end
                 end
@@ -145,10 +148,12 @@ function coverage_study(A1::AbstractMatrix;
         end
     end
 
-    return (; truth, done, nmc, level,
+    return (;
+        truth, done, nmc, level,
         coverage = Dict(k => v ./ done for (k, v) in hit),
         meanwidth = Dict(k => v ./ done for (k, v) in width),
-        outside = outside ./ done)
+        outside = outside ./ done,
+    )
 end
 
 # ============================================================================
@@ -163,9 +168,11 @@ corrected LP) against the uncorrected "script 23" variant on the same simulated
 samples, reporting coverage, mean point-estimate bias, and how often the Pope
 stability safeguard attenuated or skipped the correction.
 """
-function correction_study(A1::AbstractMatrix;
+function correction_study(
+        A1::AbstractMatrix;
         T::Int = 240, H::Int = 8, nmc::Int = 300, nboot::Int = 500,
-        level::Float64 = 0.90, seed0::Int = 3000)
+        level::Float64 = 0.9, seed0::Int = 3000
+    )
     truth = population_irf(A1, H)
     cov_full = zeros(Int, H + 1)
     cov_plain = zeros(Int, H + 1)
@@ -181,11 +188,15 @@ function correction_study(A1::AbstractMatrix;
         try
             m = lp(LP_FORMULA, df; horizon = H)
             boot_rng() = StableRNG(seed0 + 500_000 + r)
-            bf = varbootstrap(m, df; vars = [:shock, :y], nlags = LP_LAGS,
-                nboot = nboot, rng = boot_rng(), threaded = true)
-            bp = varbootstrap(m, df; vars = [:shock, :y], nlags = LP_LAGS,
+            bf = varbootstrap(
+                m, df; vars = [:shock, :y], nlags = LP_LAGS,
+                nboot = nboot, rng = boot_rng(), threaded = true
+            )
+            bp = varbootstrap(
+                m, df; vars = [:shock, :y], nlags = LP_LAGS,
                 nboot = nboot, rng = boot_rng(), threaded = true,
-                biascorrect = false, popecorrect = false)
+                biascorrect = false, popecorrect = false
+            )
             sf = summarize(bf; level = level)
             sp = summarize(bp; level = level)
             sn = summarize(m, HC1(); level = level)
@@ -203,14 +214,16 @@ function correction_study(A1::AbstractMatrix;
         end
     end
 
-    return (; truth, done, nmc, level,
+    return (;
+        truth, done, nmc, level,
         cov_full = cov_full ./ done,
         cov_plain = cov_plain ./ done,
         cov_norm = cov_norm ./ done,
         bias_plain = bias_plain ./ done,
         bias_full = bias_full ./ done,
         pope_full_fraction = isempty(deltas) ? NaN : mean(deltas .== 1.0),
-        pope_mean_delta = isempty(deltas) ? NaN : mean(deltas))
+        pope_mean_delta = isempty(deltas) ? NaN : mean(deltas),
+    )
 end
 
 # ============================================================================
@@ -222,14 +235,16 @@ function print_row(label, v)
     for x in v
         @printf("%8.3f", x)
     end
-    println()
+    return println()
 end
 
 function report_coverage(name, res)
     H = length(res.truth) - 1
     println("\n", name)
-    println("  replications: ", res.done, "/", res.nmc,
-        "   nominal: ", res.level)
+    println(
+        "  replications: ", res.done, "/", res.nmc,
+        "   nominal: ", res.level
+    )
     @printf("  %-26s", "horizon")
     for h in 0:H
         @printf("%8d", h)
@@ -242,14 +257,16 @@ function report_coverage(name, res)
     print_row("coverage: normal (HC1)", res.coverage[:normal])
     print_row("width: Hall percentile-t", res.meanwidth[:hall_t])
     print_row("width: normal (HC1)", res.meanwidth[:normal])
-    print_row("theta-hat outside band", res.outside)
+    return print_row("theta-hat outside band", res.outside)
 end
 
 function report_corrections(name, res)
     H = length(res.truth) - 1
     println("\n", name)
-    println("  replications: ", res.done, "/", res.nmc,
-        "   nominal: ", res.level)
+    println(
+        "  replications: ", res.done, "/", res.nmc,
+        "   nominal: ", res.level
+    )
     @printf("  %-26s", "horizon")
     for h in 0:H
         @printf("%8d", h)
@@ -261,8 +278,10 @@ function report_corrections(name, res)
     print_row("cov: normal (HC1)", res.cov_norm)
     print_row("bias: uncorrected", res.bias_plain)
     print_row("bias: H-J corrected", res.bias_full)
-    @printf("  Pope applied in full: %.1f%% of samples (mean delta = %.3f)\n",
-        100 * res.pope_full_fraction, res.pope_mean_delta)
+    return @printf(
+        "  Pope applied in full: %.1f%% of samples (mean delta = %.3f)\n",
+        100 * res.pope_full_fraction, res.pope_mean_delta
+    )
 end
 
 # ============================================================================
@@ -270,15 +289,17 @@ end
 # ============================================================================
 
 const DGPS = [
-    ("moderate persistence  (rho_y = 0.70)", [0.5 0.0; 0.6 0.70]),
+    ("moderate persistence  (rho_y = 0.70)", [0.5 0.0; 0.6 0.7]),
     ("high persistence      (rho_y = 0.95)", [0.5 0.0; 0.6 0.95]),
-    ("near unit root        (rho_y = 0.99)", [0.5 0.0; 0.6 0.99])
+    ("near unit root        (rho_y = 0.99)", [0.5 0.0; 0.6 0.99]),
 ]
 
 function main(nmc::Int = 300, nboot::Int = 500)
     println("VAR moving-block bootstrap: Monte Carlo coverage study")
-    println("T = 240, horizons 0:8, ", nmc, " replications, ", nboot,
-        " bootstrap draws, threads = ", Threads.nthreads())
+    println(
+        "T = 240, horizons 0:8, ", nmc, " replications, ", nboot,
+        " bootstrap draws, threads = ", Threads.nthreads()
+    )
 
     for (i, (name, A1)) in enumerate(DGPS)
         res = coverage_study(A1; nmc = nmc, nboot = nboot, seed0 = 1000 * i)

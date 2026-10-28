@@ -1,5 +1,6 @@
 @testitem "fevd: R², LP-A and LP-B run and return well-formed results" tags = [
-    :fevd, :smoke] begin
+    :fevd, :smoke,
+] begin
     using LocalProjections
     using DataFrames, StableRNGs, StatsModels, Statistics, Test
 
@@ -51,9 +52,11 @@
 
     # ldiff(y) with lags of first differences, a separate impulse-response
     # regression and a trend
-    f = fevd(@formula(ldiff(y) ~ x + lags(x, 2) + lags(firstdiff(y), 2)), df;
+    f = fevd(
+        @formula(ldiff(y) ~ x + lags(x, 2) + lags(firstdiff(y), 2)), df;
         horizon = H, estimator = :lpb, trend = 1,
-        irf_formula = @formula(ldiff(y) ~ x + lags(x, 1) + lags(firstdiff(y), 1)))
+        irf_formula = @formula(ldiff(y) ~ x + lags(x, 1) + lags(firstdiff(y), 1))
+    )
     @test f.lhs === :ldiff && f.response === :y
     @test f.t0 == 4 && f.t0lp == 3
     @test all(isfinite, f.share) && all(isfinite, f.se_pw)
@@ -62,7 +65,7 @@
     # The LP-A/B estimates from an lp() result reuse its formula, horizon and shock
     m = lp(fm, df; horizon = H)
     @test fevd(m, df; estimator = :lpb).share ≈
-          fevd(fm, df; horizon = H, estimator = :lpb).share
+        fevd(fm, df; horizon = H, estimator = :lpb).share
     @test fevd(m, df; estimator = :lpb).irf ≈ coefpath(m)
 
     # Guards
@@ -81,7 +84,8 @@
 end
 
 @testitem "fevd: VAR helpers (_var_ma, _var_fevd, _gl_lagselect)" tags = [
-    :fevd, :smoke] begin
+    :fevd, :smoke,
+] begin
     using LocalProjections
     using LinearAlgebra, StableRNGs, Test
     const LPm = LocalProjections
@@ -96,10 +100,10 @@ end
     F = [A[:, :, 1] A[:, :, 2]; Matrix(1.0I, 3, 3) zeros(3, 3)]
     Θ = LPm._var_ma(A, H)
     for h in 0:H
-        @test Θ[:, :, h + 1] ≈ (F ^ h)[1:3, 1:3] rtol=1e-12
+        @test Θ[:, :, h + 1] ≈ (F^h)[1:3, 1:3] rtol = 1.0e-12
     end
     @test LPm._var_irf(A, [1.0, 0.5, 0.0], H) ≈
-          reduce(hcat, [Θ[:, :, h + 1] * [1.0, 0.5, 0.0] for h in 0:H]) rtol=1e-14
+        reduce(hcat, [Θ[:, :, h + 1] * [1.0, 0.5, 0.0] for h in 0:H]) rtol = 1.0e-14
 
     # FEVD by brute force from Ψ_h = Θ_h L, with and without cumulation
     L = cholesky(Symmetric(Ω)).L
@@ -107,22 +111,26 @@ end
         Ψ = [Θ[:, :, h + 1] * L for h in 0:H]
         cumulate && (Ψ = cumsum(Ψ))
         for r in 1:3
-            shares = [LPm._var_fevd(A, Ω, H; shock = j, response = r, cumulate)
-                      for j in 1:3]
-            @test sum(shares) ≈ ones(H + 1) rtol=1e-12
+            shares = [
+                LPm._var_fevd(A, Ω, H; shock = j, response = r, cumulate)
+                    for j in 1:3
+            ]
+            @test sum(shares) ≈ ones(H + 1) rtol = 1.0e-12
             for j in 1:3, h in 0:H
 
                 num = sum(Ψ[l + 1][r, j]^2 for l in 0:h)
                 den = sum(sum(abs2, Ψ[l + 1][r, :]) for l in 0:h)
-                @test shares[j][h + 1] ≈ num / den rtol=1e-12
+                @test shares[j][h + 1] ≈ num / den rtol = 1.0e-12
             end
             # invariant to the scale of Ω
             @test LPm._var_fevd(A, 3.7 .* Ω, H; shock = 2, response = r, cumulate) ≈
-                  shares[2] rtol=1e-12
+                shares[2] rtol = 1.0e-12
         end
     end
-    @test_throws ArgumentError LPm._var_fevd(A, [1.0 1.0 0.0; 1.0 1.0 0.0; 0.0 0.0 1.0],
-        H; shock = 1, response = 1)
+    @test_throws ArgumentError LPm._var_fevd(
+        A, [1.0 1.0 0.0; 1.0 1.0 0.0; 0.0 0.0 1.0],
+        H; shock = 1, response = 1
+    )
 
     # IC on the common sample: hand computation of HQIC / BIC / AIC
     rng = StableRNG(7)
@@ -133,14 +141,16 @@ end
     end
     cand = [1, 2, 3, 4]
     Tic = T - 4
-    for (crit, pen) in ((:hqic, k -> 2k * log(log(Tic)) / Tic),
-        (:bic, k -> k * log(Tic) / Tic), (:aic, k -> 2k / Tic))
+    for (crit, pen) in (
+            (:hqic, k -> 2k * log(log(Tic)) / Tic),
+            (:bic, k -> k * log(Tic) / Tic), (:aic, k -> 2k / Tic),
+        )
         sel = LPm._gl_lagselect(Y, cand; criterion = crit)
         for (i, p) in enumerate(cand)
             Yp = Y[(4 - p + 1):end, :]
             X = hcat([Yp[(p - l + 1):(end - l), :] for l in 1:p]..., ones(Tic))
             U = Yp[(p + 1):end, :] - X * (X \ Yp[(p + 1):end, :])
-            @test sel.values[i] ≈ logdet(U' * U / Tic) + pen(4p) rtol=1e-10
+            @test sel.values[i] ≈ logdet(U' * U / Tic) + pen(4p) rtol = 1.0e-10
         end
         @test sel.p == cand[argmin(sel.values)]
     end
@@ -149,7 +159,8 @@ end
 end
 
 @testitem "fevdbootstrap: VAR, block and simulation bias corrections" tags = [
-    :fevd, :smoke] begin
+    :fevd, :smoke,
+] begin
     using LocalProjections
     using DataFrames, Random, StableRNGs, StatsModels, Statistics, Test
 
@@ -170,8 +181,10 @@ end
     # --- VAR residual bootstrap -------------------------------------------
     for est in (:r2, :lpa, :lpb)
         f = fevd(fm, df; horizon = H, estimator = est)
-        b = fevdbootstrap(f, df; method = :var, nboot = nb, nlags = 1:4,
-            rng = StableRNG(1))
+        b = fevdbootstrap(
+            f, df; method = :var, nboot = nb, nlags = 1:4,
+            rng = StableRNG(1)
+        )
         @test b isa FEVDBootstrap
         @test b.method === :var && b.fevd === f
         @test b.vars == [:x, :z, :dy]               # shock, then RHS order
@@ -206,18 +219,24 @@ end
     # fixed lag order, explicit order, AIC; the pseudo-truth depends on the order
     b1 = fevdbootstrap(f, df; nboot = 5, nlags = 2, rng = StableRNG(2))
     @test b1.nlags == 2 && b1.ic === nothing
-    b2 = fevdbootstrap(f, df; nboot = 5, nlags = 2, vars = [:z, :dy, :x],
-        rng = StableRNG(2))
+    b2 = fevdbootstrap(
+        f, df; nboot = 5, nlags = 2, vars = [:z, :dy, :x],
+        rng = StableRNG(2)
+    )
     @test b2.vars == [:z, :dy, :x] && b2.pseudo_truth != b1.pseudo_truth
-    b3 = fevdbootstrap(f, df; nboot = 5, nlags = 1:3, criterion = :aic,
-        skipfirst = true, burnin = 0, rng = StableRNG(2))
+    b3 = fevdbootstrap(
+        f, df; nboot = 5, nlags = 1:3, criterion = :aic,
+        skipfirst = true, burnin = 0, rng = StableRNG(2)
+    )
     @test b3.ic.criterion === :aic && b3.skipfirst && b3.burnin == 0
     # the same seed gives the same draws
     @test fevdbootstrap(f, df; nboot = 5, nlags = 2, rng = StableRNG(2)).draws == b1.draws
 
     # ldiff(y): the VAR holds y in levels
-    fl = fevd(@formula(ldiff(y) ~ x + lags(x, 2) + lags(firstdiff(y), 2)), df;
-        horizon = H, estimator = :lpb)
+    fl = fevd(
+        @formula(ldiff(y) ~ x + lags(x, 2) + lags(firstdiff(y), 2)), df;
+        horizon = H, estimator = :lpb
+    )
     bl = fevdbootstrap(fl, df; nboot = 20, nlags = 2, rng = StableRNG(3))
     @test bl.vars == [:x, :y] && all(isfinite, bl.biascorrected)
 
@@ -228,10 +247,12 @@ end
     @test bb.biascorrected ≈ 2 .* f.share .- bb.mean_draws
     @test bb.se_pw == f.se_pw && bb.vars === nothing
     # with blocklength = T_H the only block at h = H is the sample itself
-    bd = fevdbootstrap(f; method = :block, nboot = 5, blocklength = f.nobs[end],
-        rng = StableRNG(4))
+    bd = fevdbootstrap(
+        f; method = :block, nboot = 5, blocklength = f.nobs[end],
+        rng = StableRNG(4)
+    )
     @test all(==(f.share[end]), bd.draws[:, end])
-    @test bd.biascorrected[end] ≈ f.share[end] atol=1e-14
+    @test bd.biascorrected[end] ≈ f.share[end] atol = 1.0e-14
 
     # --- asymptotic simulation ----------------------------------------------
     for est in (:r2, :lpa, :lpb)
@@ -258,22 +279,29 @@ end
             g[end - 1] = c * sum(abs2, fe.irf[1:(h + 1)])
             g[end] = -bs.biascorrected[h + 1] / (est === :lpa ? θ[end] : fe.mse[h + 1])
         end
-        @test bs.se_pw[h + 1] ≈ sqrt(g' * fe.avar_pw[h + 1] * g) rtol=1e-10
-        @test bs.se[h + 1] ≈ sqrt(g' * fe.avar[h + 1] * g) rtol=1e-10
-        @test fevdbootstrap(fe; method = :simulation, nboot = 50, prewhiten = false,
-            rng = StableRNG(5)).prewhiten == false
+        @test bs.se_pw[h + 1] ≈ sqrt(g' * fe.avar_pw[h + 1] * g) rtol = 1.0e-10
+        @test bs.se[h + 1] ≈ sqrt(g' * fe.avar[h + 1] * g) rtol = 1.0e-10
+        @test fevdbootstrap(
+            fe; method = :simulation, nboot = 50, prewhiten = false,
+            rng = StableRNG(5)
+        ).prewhiten == false
     end
-    bu = fevdbootstrap(f; method = :simulation, nboot = 500, bound = false,
-        rng = StableRNG(5))
+    bu = fevdbootstrap(
+        f; method = :simulation, nboot = 500, bound = false,
+        rng = StableRNG(5)
+    )
     @test bu.bound == false
 
     # --- threaded and serial runs are bit-identical --------------------------
     fb = fevd(fm, df; horizon = H, estimator = :lpb)
-    for (ff, kw) in ((fb, (; method = :var, nlags = 2)), (f, (; method = :block)),
-        (fb, (; method = :simulation)))
+    for (ff, kw) in (
+            (fb, (; method = :var, nlags = 2)), (f, (; method = :block)),
+            (fb, (; method = :simulation)),
+        )
         data = kw.method === :var ? df : nothing
         s1 = fevdbootstrap(
-            ff, data; nboot = 40, rng = StableRNG(9), threaded = false, kw...)
+            ff, data; nboot = 40, rng = StableRNG(9), threaded = false, kw...
+        )
         s2 = fevdbootstrap(ff, data; nboot = 40, rng = StableRNG(9), threaded = true, kw...)
         @test s1.draws == s2.draws
         @test s1.biascorrected == s2.biascorrected
@@ -296,12 +324,14 @@ end
     ft = fevd(fm, df; horizon = H, trend = 1)
     @test_throws ArgumentError fevdbootstrap(ft, df)
     @test fevdbootstrap(ft; method = :simulation, nboot = 20, rng = StableRNG(1)) isa
-          FEVDBootstrap
+        FEVDBootstrap
 end
 
 @testitem "fevd: summarize, plot recipes and as_irf_result" tags = [:fevd, :smoke] begin
     using LocalProjections
     using DataFrames, Distributions, Plots, StableRNGs, StatsModels, Statistics, Test
+    using MacroEconometricTools: LocalProjectionIRFResult
+    import CairoMakie
 
     # MATLAB `quantile` is Hyndman–Fan type 5: (i - 0.5)/n plotting positions
     v = [4.0, 1.0, 3.0, 2.0]
@@ -326,7 +356,7 @@ end
     z = quantile(Normal(), 0.95)
     s = summarize(f)
     @test s isa FEVDSummary
-    @test s.method === :asymptotic && s.band === :normal && s.level == 0.90
+    @test s.method === :asymptotic && s.band === :normal && s.level == 0.9
     @test !s.biascorrected && s.prewhiten === true
     @test s.horizon == 0:H && s.share == f.share && s.estimate == f.share
     @test s.se == f.se_pw
@@ -349,8 +379,10 @@ end
         d = sort(b.draws[:, h])
         n = length(d)
         # type 5 by hand: position n·p + 1/2 between order statistics
-        tq(p) = (a = n * p + 0.5; j = clamp(floor(Int, a), 1, n - 1);
-            d[j] + clamp(a - j, 0, 1) * (d[j + 1] - d[j]))
+        tq(p) = (
+            a = n * p + 0.5; j = clamp(floor(Int, a), 1, n - 1);
+            d[j] + clamp(a - j, 0, 1) * (d[j + 1] - d[j])
+        )
         shift = b.biascorrected[h] - b.mean_draws[h]
         @test sb.lower[h] ≈ tq(0.05) + shift
         @test sb.upper[h] ≈ tq(0.95) + shift
@@ -360,13 +392,13 @@ end
     @test su.estimate == f.share
     @test su.lower ≈ sb.lower .- (b.biascorrected .- f.share)
     @test su.upper ≈ sb.upper .- (b.biascorrected .- f.share)
-    sn = summarize(b; band = :normal, level = 0.80)
+    sn = summarize(b; band = :normal, level = 0.8)
     @test sn.se == b.se_pw && sn.prewhiten === true
-    @test sn.lower ≈ b.biascorrected .+ quantile(Normal(), 0.10) .* b.se_pw
-    @test sn.upper ≈ b.biascorrected .+ quantile(Normal(), 0.90) .* b.se_pw
+    @test sn.lower ≈ b.biascorrected .+ quantile(Normal(), 0.1) .* b.se_pw
+    @test sn.upper ≈ b.biascorrected .+ quantile(Normal(), 0.9) .* b.se_pw
     @test summarize(b; band = :normal, prewhiten = false).se == b.se
     @test summarize(b; band = :normal, biascorrected = false).lower ≈
-          f.share .- z .* b.se_pw
+        f.share .- z .* b.se_pw
     @test occursin("Bias-corr.", sprint(show, MIME"text/plain"(), sb))
     @test !occursin("Bias-corr.", sprint(show, MIME"text/plain"(), su))
     @test_throws ArgumentError summarize(b; band = :hall)
@@ -387,25 +419,28 @@ end
     # --- plot recipes -----------------------------------------------------------
     p = plot(f)
     @test p isa Plots.Plot && length(p.series_list) == 1
-    @test length(plot(f; levels = [0.68, 0.90], prewhiten = false).series_list) == 2
+    @test length(plot(f; levels = [0.68, 0.9], prewhiten = false).series_list) == 2
     pb = plot(b)                                   # bias-corrected + estimate
     @test length(pb.series_list) == 2
     lo, hi = Plots.ylims(pb)
     @test lo <= 0 && hi >= 1
     @test length(plot(b; biascorrected = false).series_list) == 1
-    @test plot(b; levels = [0.68, 0.90], band = :normal) isa Plots.Plot
+    @test plot(b; levels = [0.68, 0.9], band = :normal) isa Plots.Plot
     @test plot(bs) isa Plots.Plot
     @test_throws ArgumentError plot(f; levels = [1.5])
+    # Makie draws the same bands through as_irf_result
+    @test irfplot(f; levels = [0.68, 0.9]) isa CairoMakie.Figure
+    @test irfplot(b; band = :normal) isa CairoMakie.Figure
 
     # --- as_irf_result ------------------------------------------------------------
     r = as_irf_result(f)
     @test r isa LocalProjectionIRFResult
-    @test r.coverage == [0.68, 0.90]
+    @test r.coverage == [0.68, 0.9]
     @test vec(r.data) == f.share && vec(r.stderr) == f.se_pw
-    @test vec(r.upper[2]) ≈ summarize(f; level = 0.90).upper
+    @test vec(r.upper[2]) ≈ summarize(f; level = 0.9).upper
     @test r.metadata.fevd && r.metadata.quantity === :fevd_share
     @test r.metadata.estimator === :r2 && !r.metadata.bias_corrected
-    rb = as_irf_result(b; coverage = [0.90])
+    rb = as_irf_result(b; coverage = [0.9])
     @test vec(rb.data) == b.biascorrected && vec(rb.stderr) == b.se_boot
     @test vec(rb.lower[1]) == sb.lower && vec(rb.upper[1]) == sb.upper
     @test rb.metadata.bootstrap && rb.metadata.bootstrap_method === :var

@@ -13,17 +13,8 @@ using DataFrames
 using Random
 using StableRNGs
 
-# Optional: benchmark against Apple's Accelerate BLAS instead of OpenBLAS.
-# macOS only, so it is loaded on request rather than unconditionally:
-#     LP_ACCELERATE=1 julia --project=benchmark benchmark/run_asv.jl
-# Must be loaded before the packages whose linear algebra we are timing.
-if get(ENV, "LP_ACCELERATE", "0") == "1"
-    using AppleAccelerate
-end
-
 using LocalProjections
 using CovarianceMatrices
-using StatsModels    # @formula
 
 # ============================================================================
 # Data Generation
@@ -135,14 +126,14 @@ SUITE["lpiv"] = BenchmarkGroup()
 let rng = StableRNG(DEFAULT_SEED + 20)
     df = generate_lpiv_data(rng, 500)
 
-    SUITE["lpiv"]["h12_n500"] = @benchmarkable lpiv(@formula(leads(y) ~ (x ~ z1 + z2) + w), $df; horizon = 12)
+    SUITE["lpiv"]["h12_n500"] = @benchmarkable lpiv(TSLS(), @formula(leads(y) ~ (x ~ z1 + z2) + w), $df; horizon = 12)
 end
 
 let rng = StableRNG(DEFAULT_SEED + 21)
     df = generate_lpiv_data(rng, 1000)
 
-    SUITE["lpiv"]["h12_n1000"] = @benchmarkable lpiv(@formula(leads(y) ~ (x ~ z1 + z2) + w), $df; horizon = 12)
-    SUITE["lpiv"]["h24_n1000"] = @benchmarkable lpiv(@formula(leads(y) ~ (x ~ z1 + z2) + w), $df; horizon = 24)
+    SUITE["lpiv"]["h12_n1000"] = @benchmarkable lpiv(TSLS(), @formula(leads(y) ~ (x ~ z1 + z2) + w), $df; horizon = 12)
+    SUITE["lpiv"]["h24_n1000"] = @benchmarkable lpiv(TSLS(), @formula(leads(y) ~ (x ~ z1 + z2) + w), $df; horizon = 24)
 end
 
 # ----------------------------------------------------------------------------
@@ -155,14 +146,14 @@ let rng = StableRNG(DEFAULT_SEED + 30)
     df = generate_lp_data(rng, 500)
     lp_result = lp(@formula(leads(y) ~ x + lag(w)), df; horizon = 12)
 
-    SUITE["vcov"]["hc1_h12"] = @benchmarkable vcov(HC1(), $lp_result)
+    SUITE["vcov"]["hc1_h12"] = @benchmarkable $lp_result + vcov(HC1())
 end
 
 let rng = StableRNG(DEFAULT_SEED + 31)
     df = generate_lp_data(rng, 500)
     lp_result = lp(@formula(leads(y) ~ x + lag(w)), df; horizon = 24)
 
-    SUITE["vcov"]["hc1_h24"] = @benchmarkable vcov(HC1(), $lp_result)
+    SUITE["vcov"]["hc1_h24"] = @benchmarkable $lp_result + vcov(HC1())
 end
 
 # ----------------------------------------------------------------------------
@@ -201,7 +192,8 @@ if isdefined(LocalProjections, :lagselect) && isdefined(LocalProjections, :varbo
         df = generate_var_data(rng, 500)
 
         SUITE["lagselect"]["aic_pmax10"] = @benchmarkable lagselect(
-            $df, [:shock, :y]; maxlags = 10)
+            $df, [:shock, :y]; maxlags = 10
+        )
     end
 
     SUITE["bootstrap"] = BenchmarkGroup()
@@ -214,15 +206,20 @@ if isdefined(LocalProjections, :lagselect) && isdefined(LocalProjections, :varbo
         # so the suite stays fast under AirspeedVelocity.
         SUITE["bootstrap"]["nboot100_h20"] = @benchmarkable varbootstrap(
             $m, $df; vars = [:shock, :y], nlags = 4, nboot = 100,
-            rng = StableRNG(1))
+            rng = StableRNG(1)
+        )
 
         SUITE["bootstrap"]["nboot100_h20_nocorrections"] = @benchmarkable varbootstrap(
             $m, $df; vars = [:shock, :y], nlags = 4, nboot = 100,
-            rng = StableRNG(1), biascorrect = false, popecorrect = false)
+            rng = StableRNG(1), biascorrect = false, popecorrect = false
+        )
 
-        b = varbootstrap(m, df; vars = [:shock, :y], nlags = 4, nboot = 100,
-            rng = StableRNG(1))
+        b = varbootstrap(
+            m, df; vars = [:shock, :y], nlags = 4, nboot = 100,
+            rng = StableRNG(1)
+        )
         SUITE["bootstrap"]["summarize_hall_t"] = @benchmarkable summarize(
-            $b; level = 0.90, method = :hall_t)
+            $b; level = 0.9, method = :hall_t
+        )
     end
 end # isdefined guard

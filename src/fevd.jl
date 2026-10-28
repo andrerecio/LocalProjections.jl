@@ -5,8 +5,8 @@
 const _FEVD_ESTIMATORS = (:r2, :lpa, :lpb)
 
 function _fevd_label(estimator::Symbol)
-    estimator === :r2 ? "R²" :
-    estimator === :lpa ? "LP-A" : "LP-B"
+    return estimator === :r2 ? "R²" :
+        estimator === :lpa ? "LP-A" : "LP-B"
 end
 
 """
@@ -51,17 +51,35 @@ struct _GLDesign
 end
 
 const _FEVD_GRAMMAR = "fevd formulas have the form `cumul(v) ~ x + ... + lags(w, p) + " *
-                      "lags(firstdiff(z), p)`: plain variables enter at date t, `lags()` of a " *
-                      "variable or of its `firstdiff()` form the information set at t - 1"
+    "lags(firstdiff(z), p)`: plain variables enter at date t, `lags()` of a " *
+    "variable or of its `firstdiff()` form the information set at t - 1"
 
-function _gl_parse(formula::FormulaTerm, data::AbstractDataFrame,
-        shock::Union{Symbol, Nothing}, trend::Int, what::String)
+# `data` as a Tables.jl column table; every public entry point converts once.
+function _gl_table(data)
+    Tables.istable(data) || throw(
+        ArgumentError(
+            "data must be a Tables.jl table, e.g. a DataFrame or a NamedTuple of vectors " *
+                "(got $(typeof(data)))"
+        )
+    )
+    return Tables.columntable(data)
+end
+
+_gl_nrows(data::NamedTuple) = isempty(data) ? 0 : length(first(data))
+
+function _gl_parse(
+        formula::FormulaTerm, data::NamedTuple,
+        shock::Union{Symbol, Nothing}, trend::Int, what::String
+    )
     vars = unique(StatsModels.termvars(formula))
     for v in vars
-        hasproperty(data, v) ||
+        haskey(data, v) ||
             throw(ArgumentError("variable $v in `$what` is not a column of the data"))
-        eltype(data[!, v]) <: Union{Missing, Real} || throw(ArgumentError(
-            "column $v used in `$what` must be numeric (got eltype $(eltype(data[!, v])))"))
+        eltype(data[v]) <: Union{Missing, Real} || throw(
+            ArgumentError(
+                "column $v used in `$what` must be numeric (got eltype $(eltype(data[v])))"
+            )
+        )
     end
     hints = Dict{Symbol, Any}(v => StatsModels.ContinuousTerm for v in vars)
     sch = StatsModels.schema(formula, data, hints)
@@ -73,12 +91,18 @@ function _gl_parse(formula::FormulaTerm, data::AbstractDataFrame,
     elseif lhs_term isa LongDiffTerm && lhs_term.scale === nothing
         :ldiff, lhs_term.term
     else
-        throw(ArgumentError(
-            "the left-hand side of `$what` must be cumul(v) (v a first difference, " *
-            "the response is its level) or ldiff(y) (y in levels); got $(formula.lhs)"))
+        throw(
+            ArgumentError(
+                "the left-hand side of `$what` must be cumul(v) (v a first difference, " *
+                    "the response is its level) or ldiff(y) (y in levels); got $(formula.lhs)"
+            )
+        )
     end
-    inner isa StatsModels.ContinuousTerm || throw(ArgumentError(
-        "the left-hand side of `$what` must transform a plain variable; got $(formula.lhs)"))
+    inner isa StatsModels.ContinuousTerm || throw(
+        ArgumentError(
+            "the left-hand side of `$what` must transform a plain variable; got $(formula.lhs)"
+        )
+    )
 
     rhs = f.rhs isa StatsModels.MatrixTerm ? f.rhs.terms : (f.rhs,)
     intercept = false
@@ -93,44 +117,63 @@ function _gl_parse(formula::FormulaTerm, data::AbstractDataFrame,
         elseif t isa StatsModels.ContinuousTerm
             push!(cterms, t)
         elseif t isa LagTerm && t.nsteps >= 1 &&
-               (t.term isa StatsModels.ContinuousTerm ||
-                (t.term isa DiffTerm && t.term.term isa StatsModels.ContinuousTerm))
+                (
+                t.term isa StatsModels.ContinuousTerm ||
+                    (t.term isa DiffTerm && t.term.term isa StatsModels.ContinuousTerm)
+            )
             push!(info, t)
         else
             throw(ArgumentError("unsupported term $t in `$what`; " * _FEVD_GRAMMAR))
         end
     end
-    intercept || throw(ArgumentError(
-        "`$what` must include an intercept: the forecast-error regressions have a constant"))
+    intercept || throw(
+        ArgumentError(
+            "`$what` must include an intercept: the forecast-error regressions have a constant"
+        )
+    )
     csyms = Symbol[t.sym for t in cterms]
     allunique(csyms) ||
         throw(ArgumentError("`$what` lists a contemporaneous variable twice"))
-    isempty(csyms) && throw(ArgumentError(
-        "`$what` has no contemporaneous variable: the shock must enter as a plain " *
-        "right-hand-side variable (its value at date t)"))
+    isempty(csyms) && throw(
+        ArgumentError(
+            "`$what` has no contemporaneous variable: the shock must enter as a plain " *
+                "right-hand-side variable (its value at date t)"
+        )
+    )
     s = shock === nothing ? csyms[1] : shock
     k = findfirst(isequal(s), csyms)
-    k === nothing && throw(ArgumentError(
-        "the shock $s is not a contemporaneous (plain) variable of `$what`; " *
-        "contemporaneous variables: $(join(csyms, ", "))"))
+    k === nothing && throw(
+        ArgumentError(
+            "the shock $s is not a contemporaneous (plain) variable of `$what`; " *
+                "contemporaneous variables: $(join(csyms, ", "))"
+        )
+    )
     order = vcat(k, setdiff(eachindex(csyms), k))
-    return _GLSpec(lhs, inner.sym, lhs_term, csyms[order], cterms[order], info, trend,
-        Symbol.(vars))
+    return _GLSpec(
+        lhs, inner.sym, lhs_term, csyms[order], cterms[order], info, trend,
+        Symbol.(vars)
+    )
 end
 
 # The raw columns of `vars` as a column table of Float64 vectors. `missing` and
 # NaN are rejected: lags and leads are built on the original time axis and the
-# reference has no notion of a gap (this also sidesteps issue LP-1).
-function _gl_columns(data::AbstractDataFrame, vars::AbstractVector{Symbol})
+# reference has no notion of a gap.
+function _gl_columns(data::NamedTuple, vars::AbstractVector{Symbol})
     cols = map(vars) do v
-        col = data[!, v]
+        col = data[v]
         eltype(col) <: Union{Missing, Real} ||
             throw(ArgumentError("column $v must be numeric"))
-        any(ismissing, col) && throw(ArgumentError(
-            "column $v contains `missing`; fevd requires a gap-free sample"))
+        any(ismissing, col) && throw(
+            ArgumentError(
+                "column $v contains `missing`; fevd requires a gap-free sample"
+            )
+        )
         c = Vector{Float64}(col)
-        all(isfinite, c) || throw(ArgumentError(
-            "column $v contains NaN or Inf; fevd requires a gap-free sample"))
+        all(isfinite, c) || throw(
+            ArgumentError(
+                "column $v contains NaN or Inf; fevd requires a gap-free sample"
+            )
+        )
         c
     end
     return NamedTuple{Tuple(vars)}(Tuple(cols))
@@ -145,8 +188,10 @@ function _gl_regressors(spec::_GLSpec, d::NamedTuple, x::Vector{Float64}, T::Int
         j == 1 && continue
         C[:, j] = _float_column(t, d, "contemporaneous regressor")
     end
-    blocks = Matrix{Float64}[_as_float_matrix(StatsModels.modelcols(t, d))
-                             for t in spec.info]
+    blocks = Matrix{Float64}[
+        _float_columns(StatsModels.modelcols(t, d))
+            for t in spec.info
+    ]
     for k in 1:(spec.trend)
         push!(blocks, reshape(Float64.(1:T) .^ k, T, 1))
     end
@@ -159,8 +204,10 @@ end
 Build the matrices of a `fevd` specification from the column table `d`
 (see `_GLDesign`).
 """
-function _gl_design(spec::_GLSpec, irf_spec::Union{Nothing, _GLSpec}, d::NamedTuple,
-        H::Int)
+function _gl_design(
+        spec::_GLSpec, irf_spec::Union{Nothing, _GLSpec}, d::NamedTuple,
+        H::Int
+    )
     xraw = d[spec.contemporaneous[1]]
     T = length(xraw)
     x = xraw .- mean(xraw)
@@ -181,8 +228,11 @@ function _gl_start(R::Matrix{Float64}, dhy::Matrix{Float64}, what::String)
     t0 = findfirst(ok, 1:T)
     t0 === nothing && throw(ArgumentError("`$what` has no complete observation"))
     t0 = max(t0, 2)
-    all(ok, t0:T) || throw(ArgumentError(
-        "the regressors of `$what` are not complete on the contiguous rows $t0:$T"))
+    all(ok, t0:T) || throw(
+        ArgumentError(
+            "the regressors of `$what` are not complete on the contiguous rows $t0:$T"
+        )
+    )
     return t0
 end
 
@@ -311,9 +361,10 @@ every regressor exists.
 `fevd(lp_result, data; ...)` reuses the projection's formula
 (`lp_result.base_formula`), `horizon` and `shock`, so `horizon` and `shock` are
 not accepted as keywords. The projection must be linear (no `state`) and OLS
-(not `lpiv`), estimated with `sample = :horizon` (the estimators use the
-horizon-specific windows above), with a `cumul(v)` or `ldiff(y)` left-hand side
-and a right-hand side of the form above.
+(not `lpiv`), on a single series (no `unit` or `time`), estimated with
+`sample = :varying` (the estimators use the horizon-specific windows above), with a
+`cumul(v)` or `ldiff(y)` left-hand side and a right-hand side of the form above.
+`data` is any Tables.jl table, with its rows in time order.
 
 # Keywords
 - `horizon`: maximum horizon ``H``.
@@ -364,35 +415,47 @@ Gorodnichenko, Y. and B. Lee (2020), "Forecast Error Variance Decompositions
 with Local Projections", *Journal of Business & Economic Statistics* 38(4),
 921–933.
 """
-function fevd(formula::FormulaTerm, data::AbstractDataFrame;
+function fevd(
+        formula::FormulaTerm, data;
         horizon::Integer, estimator::Symbol = :r2,
         shock::Union{Symbol, Nothing} = nothing,
         irf_formula::Union{FormulaTerm, Nothing} = nothing,
-        dofadjust::Bool = true, trend::Integer = 0)
-    estimator in _FEVD_ESTIMATORS || throw(ArgumentError(
-        "`estimator` must be :r2, :lpa or :lpb (got :$estimator)"))
+        dofadjust::Bool = true, trend::Integer = 0
+    )
+    estimator in _FEVD_ESTIMATORS || throw(
+        ArgumentError(
+            "`estimator` must be :r2, :lpa or :lpb (got :$estimator)"
+        )
+    )
     horizon >= 0 || throw(ArgumentError("horizon must be non-negative"))
     0 <= trend <= 3 || throw(ArgumentError("`trend` must be 0, 1, 2 or 3 (got $trend)"))
     estimator === :r2 && irf_formula !== nothing &&
-        throw(ArgumentError(
+        throw(
+        ArgumentError(
             "`irf_formula` sets the impulse-response regression of LP-A/LP-B; the R² " *
-            "estimator has none"))
+                "estimator has none"
+        )
+    )
     H = Int(horizon)
     trend = Int(trend)
+    data = _gl_table(data)
 
     spec = _gl_parse(formula, data, shock, trend, "formula")
     irf_spec = irf_formula === nothing ? nothing :
-               _gl_parse(irf_formula, data, spec.contemporaneous[1], trend, "irf_formula")
+        _gl_parse(irf_formula, data, spec.contemporaneous[1], trend, "irf_formula")
     if irf_spec !== nothing
         (irf_spec.lhs === spec.lhs && irf_spec.response === spec.response) ||
-            throw(ArgumentError(
+            throw(
+            ArgumentError(
                 "`irf_formula` must have the same left-hand side as `formula` " *
-                "($(formula.lhs)); got $(irf_formula.lhs)"))
+                    "($(formula.lhs)); got $(irf_formula.lhs)"
+            )
+        )
     end
     variables = irf_spec === nothing ? spec.variables :
-                unique(vcat(spec.variables, irf_spec.variables))
+        unique(vcat(spec.variables, irf_spec.variables))
     d = _gl_columns(data, variables)
-    T = nrow(data)
+    T = _gl_nrows(data)
     design = _gl_design(spec, irf_spec, d, H)
     dhy, C, W, x = design.dhy, design.C, design.W, design.x
     xraw = d[spec.contemporaneous[1]]
@@ -403,13 +466,19 @@ function fevd(formula::FormulaTerm, data::AbstractDataFrame;
     t0lp = irf_spec === nothing ? t0 : _gl_start(design.q, dhy, "irf_formula")
     width = estimator === :r2 ? max(size(W, 2), H + 1) : size(C, 2) + size(W, 2)
     width_lp = design.q === nothing ? width : size(design.q, 2)
-    (T - H - t0 + 1 > width && T - H - t0lp + 1 > width_lp) || throw(ArgumentError(
-        "horizon $H leaves too few observations: the horizon-$H regressions use " *
-        "$(T - H - max(t0, t0lp) + 1) rows for $(max(width, width_lp)) parameters"))
+    (T - H - t0 + 1 > width && T - H - t0lp + 1 > width_lp) || throw(
+        ArgumentError(
+            "horizon $H leaves too few observations: the horizon-$H regressions use " *
+                "$(T - H - max(t0, t0lp) + 1) rows for $(max(width, width_lp)) parameters"
+        )
+    )
     for h in 0:H
         all(isfinite, view(dhy, t0lp:(T - h), h + 1)) &&
-        all(isfinite, view(dhy, t0:(T - h), h + 1)) || throw(ArgumentError(
-            "the response is not available on the contiguous rows $t0:$(T - h)"))
+            all(isfinite, view(dhy, t0:(T - h), h + 1)) || throw(
+            ArgumentError(
+                "the response is not available on the contiguous rows $t0:$(T - h)"
+            )
+        )
     end
 
     nobs = [T - h - t0 + 1 for h in 0:H]
@@ -437,7 +506,7 @@ function fevd(formula::FormulaTerm, data::AbstractDataFrame;
             theta[h + 1] = r.theta
             bandwidth[h + 1] = r.bandwidth
             r.feasible || push!(infeasible, h)
-            if sum(abs2, r.fe) <= 1e-20 * sum(abs2, view(dhy, rows, h + 1))
+            if sum(abs2, r.fe) <= 1.0e-20 * sum(abs2, view(dhy, rows, h + 1))
                 push!(exact, h)
                 m = length(r.theta)
                 avar_pw[h + 1] = fill(NaN, m, m)
@@ -451,8 +520,10 @@ function fevd(formula::FormulaTerm, data::AbstractDataFrame;
         end
         irf = irf_se = sigma2v = nothing
     else
-        r = _gl_lp(dhy, C, W, design.q, x, shock_var, t0, t0lp, H;
-            estimator = estimator, dofadjust = dofadjust)
+        r = _gl_lp(
+            dhy, C, W, design.q, x, shock_var, t0, t0lp, H;
+            estimator = estimator, dofadjust = dofadjust
+        )
         share .= r.share
         mse = r.mse
         irf = r.psi
@@ -466,8 +537,10 @@ function fevd(formula::FormulaTerm, data::AbstractDataFrame;
         for h in 0:H
             err = estimator === :lpb ? view(r.v, :, h + 1) : view(r.fe, :, h + 1)
             σ²h = estimator === :lpb ? r.sigma2v[h + 1] : r.mse[h + 1]
-            a = _gl_lp_avar(Q, r.resid_lp, err, x, shock_var, σ²h, r.beta_lp, Σq,
-                t0, t0lp, h)
+            a = _gl_lp_avar(
+                Q, r.resid_lp, err, x, shock_var, σ²h, r.beta_lp, Σq,
+                t0, t0lp, h
+            )
             theta[h + 1] = a.theta
             bandwidth[h + 1] = a.bandwidth
             a.feasible || push!(infeasible, h)
@@ -479,8 +552,10 @@ function fevd(formula::FormulaTerm, data::AbstractDataFrame;
             else
                 avar_pw[h + 1] = a.avar_pw
                 avar[h + 1] = a.avar
-                g = _gl_lp_gradient(estimator, view(r.psi, 1:(h + 1)), shock_var, σ²h,
-                    r.mse[h + 1], r.share[h + 1], Nq)
+                g = _gl_lp_gradient(
+                    estimator, view(r.psi, 1:(h + 1)), shock_var, σ²h,
+                    r.mse[h + 1], r.share[h + 1], Nq
+                )
                 se_pw[h + 1] = _gl_delta_se(g, a.avar_pw)
                 se[h + 1] = _gl_delta_se(g, a.avar)
             end
@@ -489,59 +564,90 @@ function fevd(formula::FormulaTerm, data::AbstractDataFrame;
 
     if !isempty(infeasible)
         remedy = estimator === :r2 ?
-                 "The R² moment vector has 2h + 3 elements whatever the regressors, so " *
-                 "only a shorter `horizon` restores prewhitening; `se` and `avar` (no " *
-                 "prewhitening) remain available." :
-                 "Use a more parsimonious `irf_formula` (Gorodnichenko and Lee use the " *
-                 "shock, one lag of it and of the response, and a constant)."
+            "The R² moment vector has 2h + 3 elements whatever the regressors, so " *
+            "only a shorter `horizon` restores prewhitening; `se` and `avar` (no " *
+            "prewhitening) remain available." :
+            "Use a more parsimonious `irf_formula` (Gorodnichenko and Lee use the " *
+            "shock, one lag of it and of the response, and a constant)."
         size_rule = estimator === :r2 || t0lp <= t0 ? "T_h - 1 elements" :
-                    "n - 1 elements, n = T - h - max(t0, t0lp) + 1 the rows shared by " *
-                    "the forecast-error and impulse-response regressions"
+            "n - 1 elements, n = T - h - max(t0, t0lp) + 1 the rows shared by " *
+            "the forecast-error and impulse-response regressions"
         @warn "fevd: at horizons $(infeasible) the moment vector has at least " *
-              size_rule * ", so it cannot be prewhitened; `se_pw` and `avar_pw` are " *
-              "NaN there. " * remedy
+            size_rule * ", so it cannot be prewhitened; `se_pw` and `avar_pw` are " *
+            "NaN there. " * remedy
     end
     isempty(exact) || @warn "fevd: the regression fits exactly at horizons $(exact) " *
-          "(e.g. the response is a contemporaneous regressor), so the asymptotic " *
-          "variance is degenerate; `se_pw`, `se`, `avar_pw` and `avar` are NaN there."
+        "(e.g. the response is a contemporaneous regressor), so the asymptotic " *
+        "variance is degenerate; `se_pw`, `se`, `avar_pw` and `avar` are NaN there."
 
-    return LPFEVD(estimator, H, spec.response, spec.contemporaneous[1], formula,
+    return LPFEVD(
+        estimator, H, spec.response, spec.contemporaneous[1], formula,
         irf_formula, spec.contemporaneous, T, t0, t0lp, nobs, window, bandwidth,
         dofadjust, trend, share, irf, irf_se, shock_mean, shock_var, mse, sigma2v,
         forecast_errors, se_pw, se, theta, avar_pw, avar, spec.lhs, variables, spec,
-        irf_spec, design)
+        irf_spec, design
+    )
 end
 
-function fevd(m::LocalProjection, data::AbstractDataFrame; estimator::Symbol = :r2,
+function fevd(
+        m::LocalProjection, data; estimator::Symbol = :r2,
         irf_formula::Union{FormulaTerm, Nothing} = nothing, dofadjust::Bool = true,
-        trend::Integer = 0)
-    m.state === nothing || throw(ArgumentError(
-        "fevd does not support state-dependent local projections"))
-    m.sample === :common && throw(ArgumentError(
-        "fevd estimates every horizon on its own window t₀..T−h; the projection " *
-        "was estimated with sample = :common, re-estimate it with sample = :horizon"))
-    _rhs_tracks_horizon(m.base_formula) && throw(ArgumentError(
-        "fevd needs a horizon-invariant information set; the projection has a " *
-        "horizon-tracking right-hand-side term"))
+        trend::Integer = 0
+    )
+    m.state === nothing || throw(
+        ArgumentError(
+            "fevd does not support state-dependent local projections"
+        )
+    )
+    m.sample === :fixed && throw(
+        ArgumentError(
+            "fevd estimates every horizon on its own window t₀..T−h; the projection " *
+                "was estimated with sample = :fixed, re-estimate it with sample = :varying"
+        )
+    )
+    (m.unit === nothing && m.time === nothing) || throw(
+        ArgumentError(
+            "fevd reads one time series from the rows of `data` in their order; estimate " *
+                "the projection without `unit` and `time`, with the rows in time order"
+        )
+    )
+    _rhs_tracks_horizon(m.base_formula) && throw(
+        ArgumentError(
+            "fevd needs a horizon-invariant information set; the projection has a " *
+                "horizon-tracking right-hand-side term"
+        )
+    )
     try
-        return fevd(m.base_formula, data; horizon = m.horizon, estimator = estimator,
+        return fevd(
+            m.base_formula, data; horizon = m.horizon, estimator = estimator,
             shock = m.shock, irf_formula = irf_formula, dofadjust = dofadjust,
-            trend = trend)
+            trend = trend
+        )
     catch e
         e isa ArgumentError || rethrow()
-        throw(ArgumentError("fevd(lp_result, data): `formula` is the projection's " *
-                            "formula $(m.base_formula); " * e.msg))
+        throw(
+            ArgumentError(
+                "fevd(lp_result, data): `formula` is the projection's " *
+                    "formula $(m.base_formula); " * e.msg
+            )
+        )
     end
 end
 
-function fevd(::LocalProjectionIV, ::AbstractDataFrame; kwargs...)
-    throw(ArgumentError("fevd estimates variance shares of an observed shock; " *
-                        "it does not support instrumental-variable projections"))
+function fevd(::LocalProjectionIV, data; kwargs...)
+    throw(
+        ArgumentError(
+            "fevd estimates variance shares of an observed shock; " *
+                "it does not support instrumental-variable projections"
+        )
+    )
 end
 
 function Base.show(io::IO, f::LPFEVD)
-    print(io, "LPFEVD(estimator=:", f.estimator, ", horizon=0:", f.horizon,
-        ", response=", f.response, ", shock=", f.shock, ")")
+    return print(
+        io, "LPFEVD(estimator=:", f.estimator, ", horizon=0:", f.horizon,
+        ", response=", f.response, ", shock=", f.shock, ")"
+    )
 end
 
 function Base.show(io::IO, ::MIME"text/plain", f::LPFEVD)
@@ -550,27 +656,35 @@ function Base.show(io::IO, ::MIME"text/plain", f::LPFEVD)
     println(io, "  Shock:      ", f.shock)
     println(io, "  Formula:    ", f.formula)
     f.irf_formula === nothing || println(io, "  IRF formula: ", f.irf_formula)
-    println(io, "  Sample:     T = ", f.T, ", t0 = ", f.t0,
+    println(
+        io, "  Sample:     T = ", f.T, ", t0 = ", f.t0,
         f.t0lp == f.t0 ? "" : ", t0 (IRF) = $(f.t0lp)",
-        ", T_h = T - h - t0 + 1")
+        ", T_h = T - h - t0 + 1"
+    )
     f.estimator === :r2 ||
-        println(io, "  Variances:  ", f.dofadjust ? "T_h - k_W" : "T_h",
-            " denominator")
+        println(
+        io, "  Variances:  ", f.dofadjust ? "T_h - k_W" : "T_h",
+        " denominator"
+    )
     hz = collect(0:(f.horizon))
     if f.irf === nothing
         data = (; h = hz, s = f.share, sp = f.se_pw, se = f.se, n = f.nobs)
         labels = ["Horizon", "Share", "s.e. (PW)", "s.e.", "T_h"]
     else
-        data = (; h = hz, s = f.share, sp = f.se_pw, se = f.se, irf = f.irf,
-            irf_se = f.irf_se, n = f.nobs)
+        data = (;
+            h = hz, s = f.share, sp = f.se_pw, se = f.se, irf = f.irf,
+            irf_se = f.irf_se, n = f.nobs,
+        )
         labels = ["Horizon", "Share", "s.e. (PW)", "s.e.", "IRF", "IRF s.e.", "T_h"]
     end
     nc = length(labels)
-    pretty_table(io, data;
+    pretty_table(
+        io, data;
         column_labels = labels,
         title = "Forecast-error variance share of $(f.shock)",
-        formatters = [fmt__round(4, collect(2:(nc - 1)))],
+        formatters = [(v, i, j) -> 2 <= j <= nc - 1 ? round(v; digits = 4) : v],
         alignment = fill(:r, nc),
-        table_format = TextTableFormat(borders = text_table_borders__unicode_rounded))
+        table_format = TextTableFormat(borders = text_table_borders__unicode_rounded)
+    )
     return nothing
 end

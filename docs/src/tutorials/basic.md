@@ -18,7 +18,7 @@ The sequence ``\{\beta_0, \beta_1, \ldots, \beta_H\}`` traces out the response o
 ```@example basic
 using LocalProjections
 using DataFrames
-using StatsModels: @formula, nobs
+using StatsModels: @formula
 using Random
 
 Random.seed!(42)
@@ -66,7 +66,6 @@ The `LocalProjection` object contains:
 - `response`: Response variable name
 - `shock`: Shock variable name
 - `coef_names`: Coefficient names for each horizon
-- `sample`: `:horizon` or `:common` (see [Estimation Sample](#Estimation-Sample))
 
 ```@example basic
 println("Response: ", lp_result.response)
@@ -89,28 +88,3 @@ nothing # hide
 !!! note
     The `shock` parameter must match the coefficient name, not the variable name.
     For `lag(x)`, the coefficient name is `"x_lag1"`.
-
-## Estimation Sample
-
-Each horizon is a separate regression, and the response ``y_{t+h}`` is not
-observed for the last ``h`` periods. By default (`sample = :horizon`) every
-horizon uses all the observations available to it, so the estimation sample
-shrinks by one observation per horizon. This uses all the data and is the more
-efficient choice.
-
-With `sample = :common` every horizon is estimated on the same observations:
-those complete at every horizon ``0, \dots, H``. Without internal gaps this is
-the sample of the maximum horizon, so horizon 0 loses ``H`` observations; an
-internal `NaN` in the response removes every row whose lead hits it at some
-horizon, so the common sample is then smaller than the horizon-``H`` one. The
-impulse response is not affected by a sample that changes along the path.
-
-```@example basic
-lp_byh = lp(@formula(leads(y) ~ shock + lag(y, 1)), df; horizon = 10)
-lp_com = lp(@formula(leads(y) ~ shock + lag(y, 1)), df; horizon = 10, sample = :common)
-(nobs.(lp_byh.models), nobs.(lp_com.models))
-```
-
-`lpiv` takes the same keyword, and the choice is stored in the result
-(`lp_com.sample`). `varbootstrap` re-estimates every draw with it, while
-`biascorrect` and `fevd` require `sample = :horizon`.

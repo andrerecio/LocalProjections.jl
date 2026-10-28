@@ -5,32 +5,46 @@
 """
     _var_data(data, vars) -> Matrix{Float64}
 
-Materialize the VAR data matrix `Y` (`T × n`) from `vars`, in the given order.
+Materialize the VAR data matrix `Y` (`T × n`) from the columns `vars` of the
+Tables.jl table `data`, in the given order; rows are taken in time order.
 
 `missing` and `NaN` are rejected: the moving-block bootstrap simulates a
-complete series and the VAR recursion has no notion of a gap. This is also the
-safe side of issue LP-1 (`lp` drops missing rows *before* lags are built, so an
-internal gap would silently collapse the time axis).
+complete series and the VAR recursion has no notion of a gap.
 """
-function _var_data(data::AbstractDataFrame, vars::AbstractVector{Symbol})
+function _var_data(data, vars::AbstractVector{Symbol})
     isempty(vars) && throw(ArgumentError("`vars` must name at least one variable"))
     length(unique(vars)) == length(vars) ||
         throw(ArgumentError("`vars` contains duplicate names"))
-    T = nrow(data)
+    Tables.istable(data) || throw(
+        ArgumentError(
+            "data must be a Tables.jl table, e.g. a DataFrame or a NamedTuple of vectors " *
+                "(got $(typeof(data)))"
+        )
+    )
+    tbl = Tables.columntable(data)
+    T = isempty(tbl) ? 0 : length(first(tbl))
     Y = Matrix{Float64}(undef, T, length(vars))
     for (j, v) in enumerate(vars)
-        hasproperty(data, v) ||
+        haskey(tbl, v) ||
             throw(ArgumentError("variable $v named in `vars` is not a column of the data"))
-        col = data[!, v]
+        col = tbl[v]
         any(ismissing, col) &&
-            throw(ArgumentError("column $v contains `missing`; the VAR bootstrap " *
-                                "requires a gap-free sample"))
+            throw(
+            ArgumentError(
+                "column $v contains `missing`; the VAR bootstrap " *
+                    "requires a gap-free sample"
+            )
+        )
         @inbounds for t in 1:T
             Y[t, j] = Float64(col[t])
         end
         any(isnan, view(Y, :, j)) &&
-            throw(ArgumentError("column $v contains `NaN`; the VAR bootstrap " *
-                                "requires a gap-free sample"))
+            throw(
+            ArgumentError(
+                "column $v contains `NaN`; the VAR bootstrap " *
+                    "requires a gap-free sample"
+            )
+        )
     end
     return Y
 end
@@ -58,9 +72,12 @@ function _var_ols(Y::AbstractMatrix{Float64}, p::Int)
     T, n = size(Y)
     Tu = T - p
     k = n * p + 1
-    Tu > k || throw(ArgumentError(
-        "a VAR($p) on $n variables needs more than $k usable observations, " *
-        "but T - p = $Tu are available (T = $T)"))
+    Tu > k || throw(
+        ArgumentError(
+            "a VAR($p) on $n variables needs more than $k usable observations, " *
+                "but T - p = $Tu are available (T = $T)"
+        )
+    )
     X = Matrix{Float64}(undef, Tu, k)
     @inbounds for l in 1:p, j in 1:n, t in 1:Tu
         X[t, (l - 1) * n + j] = Y[p + t - l, j]
@@ -74,8 +91,10 @@ function _var_ols(Y::AbstractMatrix{Float64}, p::Int)
     @inbounds for l in 1:p
         A[:, :, l] = transpose(B[((l - 1) * n + 1):(l * n), :])
     end
-    return (; c = Vector{Float64}(B[end, :]), A = A, U = Matrix{Float64}(U),
-        Σu = Matrix{Float64}(Σu), T = T, Tu = Tu)
+    return (;
+        c = Vector{Float64}(B[end, :]), A = A, U = Matrix{Float64}(U),
+        Σu = Matrix{Float64}(Σu), T = T, Tu = Tu,
+    )
 end
 
 """
@@ -85,7 +104,9 @@ Result of [`lagselect`](@ref): the AIC and BIC paths over `p = 1:maxlags` for a
 reduced-form VAR, and the selected lag order.
 
 Fields: `vars`, `maxlags`, `criterion`, `lags`, `aic`, `bic`, `selected`,
-`nobs`. Use [`nlags`](@ref) to get the selected order as an `Int`.
+`nobs`. Use [`nlags`](@ref) to get the selected order as an `Int`. A
+`VARLagSelection` is a Tables.jl table with columns `lags`, `aic`, `bic`, so
+`DataFrame(sel)` works.
 """
 struct VARLagSelection
     vars::Vector{Symbol}
@@ -143,8 +164,10 @@ nlags(sel)     # selected p, to be used in the LP formula and in `varbootstrap`
 
 See also [`nlags`](@ref), [`varbootstrap`](@ref).
 """
-function lagselect(data::AbstractDataFrame, vars::AbstractVector{Symbol};
-        maxlags::Integer = 10, criterion::Symbol = :aic)
+function lagselect(
+        data, vars::AbstractVector{Symbol};
+        maxlags::Integer = 10, criterion::Symbol = :aic
+    )
     criterion in (:aic, :bic) ||
         throw(ArgumentError("`criterion` must be :aic or :bic (got :$criterion)"))
     maxlags >= 1 || throw(ArgumentError("`maxlags` must be at least 1 (got $maxlags)"))
@@ -152,8 +175,11 @@ function lagselect(data::AbstractDataFrame, vars::AbstractVector{Symbol};
     T, n = size(Y)
     pmax = Int(maxlags)
     denom = T - pmax
-    denom > 0 || throw(ArgumentError(
-        "`maxlags` = $pmax is not smaller than the sample size T = $T"))
+    denom > 0 || throw(
+        ArgumentError(
+            "`maxlags` = $pmax is not smaller than the sample size T = $T"
+        )
+    )
     aics = Vector{Float64}(undef, pmax)
     bics = Vector{Float64}(undef, pmax)
     for p in 1:pmax
@@ -164,20 +190,18 @@ function lagselect(data::AbstractDataFrame, vars::AbstractVector{Symbol};
         bics[p] = ld + k * log(denom) / denom
     end
     sel = argmin(criterion === :aic ? aics : bics)
-    return VARLagSelection(collect(vars), pmax, criterion, collect(1:pmax),
-        aics, bics, sel, T)
+    return VARLagSelection(
+        collect(vars), pmax, criterion, collect(1:pmax),
+        aics, bics, sel, T
+    )
 end
 
-function lagselect(data, vars::AbstractVector{Symbol}; kwargs...)
-    lagselect(DataFrame(data), vars; kwargs...)
-end
-
-function DataFrames.DataFrame(s::VARLagSelection)
-    DataFrame(lags = s.lags, aic = s.aic, bic = s.bic)
-end
+Tables.istable(::Type{VARLagSelection}) = true
+Tables.columnaccess(::Type{VARLagSelection}) = true
+Tables.columns(s::VARLagSelection) = (lags = s.lags, aic = s.aic, bic = s.bic)
 
 function Base.show(io::IO, s::VARLagSelection)
-    print(io, "VARLagSelection(criterion=:", s.criterion, ", selected=", s.selected, ")")
+    return print(io, "VARLagSelection(criterion=:", s.criterion, ", selected=", s.selected, ")")
 end
 
 function Base.show(io::IO, ::MIME"text/plain", s::VARLagSelection)
@@ -189,17 +213,20 @@ function Base.show(io::IO, ::MIME"text/plain", s::VARLagSelection)
         crayon"bold"
     )
     title = "VAR lag-order selection (ic_var): " *
-            join(string.(s.vars), ", ") *
-            "  |  T = $(s.nobs), p = 1:$(s.maxlags)"
+        join(string.(s.vars), ", ") *
+        "  |  T = $(s.nobs), p = 1:$(s.maxlags)"
     ioc = IOContext(io, :color => true)
-    pretty_table(ioc, data;
+    pretty_table(
+        ioc, data;
         column_labels = labels,
         title = title,
         highlighters = [hl],
-        formatters = [fmt__round(4, [2, 3])],
+        formatters = [(v, i, j) -> j > 1 ? round(v; digits = 4) : v],
         alignment = [:r, :r, :r],
         table_format = TextTableFormat(
-            borders = text_table_borders__unicode_rounded))
+            borders = text_table_borders__unicode_rounded
+        )
+    )
     println(io, "Selected by :", s.criterion, ": p = ", s.selected)
     return nothing
 end
@@ -242,11 +269,13 @@ therefore does not guarantee a full correction — inspect the returned `δ`.
 Validated against Pope's closed form for the AR(1) case, where `b` must equal
 ``1 + 3\\rho`` exactly.
 """
-function _pope_biascorrect(A::AbstractMatrix{Float64}, Σu::AbstractMatrix{Float64},
-        T::Real)
+function _pope_biascorrect(
+        A::AbstractMatrix{Float64}, Σu::AbstractMatrix{Float64},
+        T::Real
+    )
     n, np = size(A)
     Acomp = np == n ? Matrix{Float64}(A) :
-            [Matrix{Float64}(A); Matrix{Float64}(I, np - n, np - n) zeros(np - n, n)]
+        [Matrix{Float64}(A); Matrix{Float64}(I, np - n, np - n) zeros(np - n, n)]
     maximum(abs, eigvals(Acomp)) > 1 && return (Matrix{Float64}(A), 0.0)
     G = zeros(Float64, np, np)
     G[1:n, 1:n] = Σu
@@ -355,8 +384,10 @@ remaining `size(Ustar, 1)` rows follow
 ``Y_t^* = c + \\sum_{l=1}^{p} A_l Y_{t-l}^* + u_t^*``, so the returned matrix
 has `p + size(Ustar, 1)` rows.
 """
-function _var_simulate(c::AbstractVector{Float64}, A::Array{Float64, 3},
-        Ustar::AbstractMatrix{Float64}, Yinit::AbstractMatrix{Float64})
+function _var_simulate(
+        c::AbstractVector{Float64}, A::Array{Float64, 3},
+        Ustar::AbstractMatrix{Float64}, Yinit::AbstractMatrix{Float64}
+    )
     n, _, p = size(A)
     Tu = size(Ustar, 1)
     T = size(Yinit, 1) + Tu
@@ -391,12 +422,17 @@ all shocks (`var_chol.m:67`): the share then refers to ``y_{t+h} - y_{t-1}``
 when the VAR holds the first difference of ``y``. The share is invariant to a
 scalar rescaling of ``\\Omega`` but depends on the Cholesky order.
 """
-function _var_fevd(A::Array{Float64, 3}, Ω::AbstractMatrix{Float64}, H::Int;
-        shock::Int, response::Int, cumulate::Bool = false)
+function _var_fevd(
+        A::Array{Float64, 3}, Ω::AbstractMatrix{Float64}, H::Int;
+        shock::Int, response::Int, cumulate::Bool = false
+    )
     C = cholesky(Symmetric(Matrix{Float64}(Ω)); check = false)
-    issuccess(C) || throw(ArgumentError(
-        "the VAR residual covariance is not positive definite: the VAR variables " *
-        "are linearly dependent (e.g. a level together with its first difference)"))
+    issuccess(C) || throw(
+        ArgumentError(
+            "the VAR residual covariance is not positive definite: the VAR variables " *
+                "are linearly dependent (e.g. a level together with its first difference)"
+        )
+    )
     L = C.L
     Θ = _var_ma(A, H)
     n = size(A, 1)
@@ -420,10 +456,13 @@ end
 function _check_var_rank(Ω::AbstractMatrix{Float64}, varlist = nothing)
     d = [Ω[i, i] for i in axes(Ω, 1)]
     singular = !all(>(0), d) ||
-               eigmin(Symmetric(Ω ./ sqrt.(d .* transpose(d)))) <= sqrt(eps()) * size(Ω, 1)
-    singular && throw(ArgumentError(
-        "the VAR residual covariance is singular: the VAR variables" *
-        (varlist === nothing ? "" : " $(varlist)") * " are linearly dependent (e.g. " *
-        "a level together with its first difference)"))
+        eigmin(Symmetric(Ω ./ sqrt.(d .* transpose(d)))) <= sqrt(eps()) * size(Ω, 1)
+    singular && throw(
+        ArgumentError(
+            "the VAR residual covariance is singular: the VAR variables" *
+                (varlist === nothing ? "" : " $(varlist)") * " are linearly dependent (e.g. " *
+                "a level together with its first difference)"
+        )
+    )
     return nothing
 end

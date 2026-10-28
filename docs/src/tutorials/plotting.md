@@ -1,10 +1,10 @@
 # Plotting Impulse Response Functions
 
-LocalProjections.jl supports two plotting backends: **Plots.jl** (via RecipesBase) and **Makie.jl** (via a package extension).
+LocalProjections.jl supports two plotting backends: **Plots.jl** and **Makie.jl**. Both draw the `LocalProjectionIRFResult` that [`as_irf_result`](@ref) returns, using the plotting methods of MacroEconometricTools.jl, so plots show the same estimates and bands as `summarize` and `as_irf_result`.
 
 ## Setup
 
-All examples below assume you have estimated a local projection and have a variance estimator ready:
+All examples below assume you have estimated a local projection. Plots use the covariance estimator stored in the result (HC1 unless changed with `lp_result + vcov(estimator)`); passing an estimator as the second argument overrides it.
 
 ```julia
 using LocalProjections, DataFrames, StatsModels, CovarianceMatrices
@@ -15,21 +15,16 @@ lp_result = lp(@formula(leads(y) ~ x), df; horizon = 12)
 
 ## Plots.jl
 
-Plots.jl integration works out of the box via RecipesBase recipes.
+`plot(lp_result)` works as soon as Plots.jl is loaded.
 
 ### Basic Plot
 
 ```julia
 using Plots
 
-plot(lp_result, HC1())
-```
-
-You can pass a pre-computed covariance object instead of an estimator:
-
-```julia
-cov_result = vcov(HC1(), lp_result)
-plot(lp_result, cov_result)
+plot(lp_result)                                 # stored estimator
+plot(lp_result + vcov(Bartlett{NeweyWest}()))   # HAC
+plot(lp_result, HC3())                          # override
 ```
 
 ### Customization
@@ -58,32 +53,27 @@ plot(p1, p2, p3, layout = (1, 3), size = (900, 300))
 
 ## Makie.jl
 
-The Makie extension loads automatically when any Makie backend (CairoMakie, GLMakie, WGLMakie) is available. It provides three functions: `irfplot`, `irfplot!`, and `irfplot_axis`.
+`irfplot` and `irfplot!` have methods for local projections once a Makie backend (CairoMakie, GLMakie, WGLMakie) is loaded.
 
 ### Basic Plot
+
+`irfplot` returns a `Figure`:
 
 ```julia
 using CairoMakie
 
-irfplot(lp_result, HC1())
+irfplot(lp_result)          # stored estimator
+irfplot(lp_result, HC3())   # override
 ```
 
 ### Adding to an Existing Axis
 
-```julia
-fig = Figure()
-ax = Axis(fig[1, 1]; xlabel = "Horizon", ylabel = "Response")
-irfplot!(ax, lp_result, HC1())
-fig
-```
-
-### Complete Panel with `irfplot_axis`
-
-`irfplot_axis` creates an `Axis` with labels and returns `(subfig, axis, plot)`:
+`irfplot!` draws one panel onto an `Axis` and returns the axis:
 
 ```julia
 fig = Figure()
-irfplot_axis(fig[1, 1], lp_result, HC1(); title = "Shock → y")
+ax = Axis(fig[1, 1]; xlabel = "Horizon", ylabel = "Response", title = "Shock → y")
+irfplot!(ax, lp_result)
 fig
 ```
 
@@ -91,30 +81,32 @@ fig
 
 ```julia
 fig = Figure(size = (900, 300))
-irfplot_axis(fig[1, 1], lp_result, HC1(); title = "HC1")
-irfplot_axis(fig[1, 2], lp_result, HC3(); title = "HC3")
-irfplot_axis(fig[1, 3], lp_result, Bartlett{NeweyWest}(); title = "Newey-West")
+for (j, (name, est)) in enumerate(["HC1" => HC1(), "HC3" => HC3(), "Newey-West" => Bartlett{NeweyWest}()])
+    ax = Axis(fig[1, j]; title = name, xlabel = "Horizon")
+    irfplot!(ax, lp_result, est)
+end
 fig
 ```
 
 ### Customization
 
-The Makie recipe supports these attributes:
+Keywords other than `term` and `levels` are passed to MacroEconometricTools' `irfplot`/`irfplot!`:
 
-| Attribute | Default | Description |
-|-----------|---------|-------------|
-| `term` | shock variable | Which coefficient to plot |
-| `levels` | `[0.95]` | Confidence levels for bands |
-| `bandcolor` | `:blue` | Color of confidence bands |
-| `bandalpha` | `0.25` | Base opacity of bands |
+| Keyword | Default | Description |
+|---------|---------|-------------|
+| `bandcolor` | `:steelblue` | Color of confidence bands |
+| `bandalpha` | `0.2` | Opacity of the widest band (narrower bands are darker) |
 | `linecolor` | `:black` | Color of the point estimate line |
 | `linewidth` | `2.0` | Width of the point estimate line |
 | `drawzero` | `true` | Whether to draw a dashed zero line |
-| `zerolinecolor` | `:gray70` | Color of the zero line |
+| `zerolinecolor` | `:gray60` | Color of the zero line |
+| `zerolinestyle` | `:dash` | Line style of the zero line |
 | `xtickstep` | `4` | X-axis tick spacing (0 to disable) |
 
+`irfplot` also accepts layout keywords such as `title` and `size`; see `?irfplot`.
+
 ```julia
-irfplot(lp_result, HC1();
+irfplot(lp_result;
     levels = [0.68, 0.90, 0.95],
     bandcolor = :steelblue,
     bandalpha = 0.3,
@@ -129,4 +121,4 @@ These options are common to both backends:
 - **`term`**: Which coefficient's impulse response to plot. Defaults to the shock variable specified in `lp()` / `lpiv()`.
 - **`levels`**: A vector of confidence levels. Multiple levels produce nested bands with decreasing opacity.
 
-To scale IRFs (e.g., to percentage points), convert to `LocalProjectionIRFResult` via `as_irf_result()` and use `rescale` from MacroEconometricTools.jl before plotting.
+To scale IRFs (e.g., to percentage points), convert with `as_irf_result()`, apply `rescale` from MacroEconometricTools.jl, and plot the rescaled object with `irfplot` or `plot`.

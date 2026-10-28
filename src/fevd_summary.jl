@@ -3,8 +3,9 @@
 
 Pointwise confidence band for a Gorodnichenko–Lee forecast-error variance
 share, built by [`summarize`](@ref) from an [`LPFEVD`](@ref) or a
-[`FEVDBootstrap`](@ref). Displays with PrettyTables; `DataFrame(s)` gives the
-columns `horizon, share, estimate, se, lower, upper`.
+[`FEVDBootstrap`](@ref). Displays with PrettyTables. An `FEVDSummary` is a
+Tables.jl table with columns `horizon, share, estimate, se, lower, upper`, so
+`DataFrame(s)` works.
 
 # Fields
 - `response`, `shock`, `estimator` (`:r2`, `:lpa`, `:lpb`);
@@ -37,48 +38,63 @@ struct FEVDSummary
     upper::Vector{Float64}
 end
 
-function DataFrames.DataFrame(s::FEVDSummary)
-    DataFrame(horizon = s.horizon, share = s.share, estimate = s.estimate, se = s.se,
-        lower = s.lower, upper = s.upper)
+Tables.istable(::Type{FEVDSummary}) = true
+Tables.columnaccess(::Type{FEVDSummary}) = true
+function Tables.columns(s::FEVDSummary)
+    return (
+        horizon = s.horizon, share = s.share, estimate = s.estimate, se = s.se,
+        lower = s.lower, upper = s.upper,
+    )
 end
 
 function Base.show(io::IO, s::FEVDSummary)
-    print(io, "FEVDSummary(estimator=:", s.estimator, ", method=:", s.method,
-        ", band=:", s.band, ", level=", s.level, ")")
+    return print(
+        io, "FEVDSummary(estimator=:", s.estimator, ", method=:", s.method,
+        ", band=:", s.band, ", level=", s.level, ")"
+    )
 end
 
 function Base.show(io::IO, ::MIME"text/plain", s::FEVDSummary)
     what = s.method === :asymptotic ? "delta method" : _FEVD_METHOD_LABELS[s.method]
     println(
-        io, "FEVDSummary (Gorodnichenko–Lee ", _fevd_label(s.estimator), ", ", what, ")")
+        io, "FEVDSummary (Gorodnichenko–Lee ", _fevd_label(s.estimator), ", ", what, ")"
+    )
     println(io, "  Response:   ", s.response)
     println(io, "  Shock:      ", s.shock)
     se_label = s.band === :shift ? "s.e. (draws)" :
-               s.prewhiten ? "s.e. (PW)" : "s.e."
-    print(io, "  Band:       ",
+        s.prewhiten ? "s.e. (PW)" : "s.e."
+    print(
+        io, "  Band:       ",
         s.band === :shift ? "bootstrap quantiles shifted to the centre" :
-        "normal, centre ± z·$(se_label)",
+            "normal, centre ± z·$(se_label)",
         s.method === :asymptotic ? "" :
-        s.biascorrected ? ", bias-corrected" : ", uncorrected")
+            s.biascorrected ? ", bias-corrected" : ", uncorrected"
+    )
     pct = round(s.level * 100; digits = 1)
     pct_s = isinteger(pct) ? string(Int(pct)) : string(pct)
     if s.biascorrected
-        data = (; h = s.horizon, s = s.share, bc = s.estimate, se = s.se, lo = s.lower,
-            hi = s.upper)
-        labels = ["Horizon", "Share", "Bias-corr.", se_label, "Lower $pct_s%",
-            "Upper $pct_s%"]
+        data = (;
+            h = s.horizon, s = s.share, bc = s.estimate, se = s.se, lo = s.lower,
+            hi = s.upper,
+        )
+        labels = [
+            "Horizon", "Share", "Bias-corr.", se_label, "Lower $pct_s%",
+            "Upper $pct_s%",
+        ]
     else
         data = (; h = s.horizon, s = s.share, se = s.se, lo = s.lower, hi = s.upper)
         labels = ["Horizon", "Share", se_label, "Lower $pct_s%", "Upper $pct_s%"]
     end
     println(io)
     nc = length(labels)
-    pretty_table(io, data;
+    pretty_table(
+        io, data;
         column_labels = labels,
         title = "Forecast-error variance share of $(s.shock)",
-        formatters = [fmt__round(4, collect(2:nc))],
+        formatters = [(v, i, j) -> j >= 2 ? round(v; digits = 4) : v],
         alignment = fill(:r, nc),
-        table_format = TextTableFormat(borders = text_table_borders__unicode_rounded))
+        table_format = TextTableFormat(borders = text_table_borders__unicode_rounded)
+    )
     return nothing
 end
 
@@ -97,13 +113,16 @@ Deterministic; the band is not clamped to ``[0, 1]`` and is `NaN` at horizons
 whose standard error is `NaN`. Bias-corrected bands come from
 [`fevdbootstrap`](@ref).
 """
-function summarize(f::LPFEVD; level::Real = 0.90, prewhiten::Bool = true)
-    level_f = _check_level(level)
+function summarize(f::LPFEVD; level::Real = 0.9, prewhiten::Bool = true)
+    _check_levels((level,))
+    level_f = Float64(level)
     se = copy(prewhiten ? f.se_pw : f.se)
     z = quantile(Normal(), 0.5 + level_f / 2)
-    return FEVDSummary(f.response, f.shock, f.estimator, :asymptotic, :normal, level_f,
+    return FEVDSummary(
+        f.response, f.shock, f.estimator, :asymptotic, :normal, level_f,
         false, prewhiten, collect(0:(f.horizon)), copy(f.share), copy(f.share), se,
-        f.share .- z .* se, f.share .+ z .* se)
+        f.share .- z .* se, f.share .+ z .* se
+    )
 end
 
 """
@@ -134,11 +153,17 @@ bias-correction procedure of [`fevdbootstrap`](@ref) and of `b.method`. Bands
 are pointwise and never clamped to ``[0, 1]``; they are `NaN` at horizons
 without draws (`:simulation` horizons whose covariance is `NaN`).
 """
-function summarize(b::FEVDBootstrap; level::Real = 0.90, band::Symbol = :shift,
-        biascorrected::Bool = true, prewhiten::Bool = true)
-    band in (:shift, :normal) || throw(ArgumentError(
-        "`band` must be :shift or :normal (got :$band)"))
-    level_f = _check_level(level)
+function summarize(
+        b::FEVDBootstrap; level::Real = 0.9, band::Symbol = :shift,
+        biascorrected::Bool = true, prewhiten::Bool = true
+    )
+    band in (:shift, :normal) || throw(
+        ArgumentError(
+            "`band` must be :shift or :normal (got :$band)"
+        )
+    )
+    _check_levels((level,))
+    level_f = Float64(level)
     α = 1 - level_f
     f = b.fevd
     H = f.horizon
@@ -162,6 +187,8 @@ function summarize(b::FEVDBootstrap; level::Real = 0.90, band::Symbol = :shift,
         upper .= centre .+ z .* se
         pw = prewhiten
     end
-    return FEVDSummary(f.response, f.shock, f.estimator, b.method, band, level_f,
-        biascorrected, pw, collect(0:H), copy(f.share), centre, se, lower, upper)
+    return FEVDSummary(
+        f.response, f.shock, f.estimator, b.method, band, level_f,
+        biascorrected, pw, collect(0:H), copy(f.share), centre, se, lower, upper
+    )
 end

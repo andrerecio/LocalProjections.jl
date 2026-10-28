@@ -5,7 +5,7 @@ makedocs(
     sitename = "LocalProjections.jl",
     modules = [LocalProjections],
     checkdocs = :exports,  # Only check exported functions
-    pagesonly = true,      # skip stray .md files under docs/src (third-party reference suite)
+    pagesonly = true,      # skip .md files under docs/src that are not in `pages`
     format = Documenter.HTML(
         prettyurls = get(ENV, "CI", nothing) == "true"
     ),
@@ -15,11 +15,12 @@ makedocs(
             "Getting Started" => "tutorials/basic.md",
             "Transformations" => "tutorials/transformations.md",
             "Inference and Plotting" => "tutorials/inference.md",
+            "Plotting" => "tutorials/plotting.md",
             "Ramey-Zubairy Multipliers" => "tutorials/ramey_zubairy.md",
-            "FEVD (Gorodnichenko-Lee)" => "tutorials/fevd.md"
+            "FEVD (Gorodnichenko-Lee)" => "tutorials/fevd.md",
         ],
         "Inference Procedures Guide" => "inference_procedures_guide.md",
-        "API Reference" => "api.md"
+        "API Reference" => "api.md",
     ]
 )
 

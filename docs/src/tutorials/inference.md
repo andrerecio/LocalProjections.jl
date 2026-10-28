@@ -7,7 +7,7 @@ This tutorial covers robust variance estimation and IRF visualization.
 ```@example infer
 using LocalProjections, DataFrames, Random
 using StatsModels: @formula
-using CovarianceMatrices: HC1, HC3, Bartlett, Parzen, NeweyWest
+using CovarianceMatrices: HC1, HC3, Bartlett, Parzen, NeweyWest, EWC
 Random.seed!(456)
 
 n = 200
@@ -22,19 +22,25 @@ nothing # hide
 
 ## Robust Standard Errors
 
-LocalProjections.jl integrates with CovarianceMatrices.jl for robust inference.
+LocalProjections.jl integrates with CovarianceMatrices.jl for robust inference. Each
+result stores a covariance estimator (HC1 by default, `CR1(unit)` for panels fitted with
+`unit`); `lp_result + vcov(estimator)` returns a copy that uses `estimator` at every
+horizon. `stderror`, `summarize`, the plots and `as_irf_result` all use the stored
+estimator. Cluster estimators name their clusters by column, e.g. `vcov(CR1(:id))`, and
+each horizon is clustered on the rows it uses. Driscoll-Kraay standard errors for panels
+name the time and unit columns the same way:
+`vcov(DriscollKraay(Bartlett(4); tis = :t, iis = :id))`.
 
 ### Heteroskedasticity-Robust (HC)
 
 ```@example infer
 # HC1 (default)
-cov_hc1 = vcov(HC1(), lp_result)
-se_hc1 = stderror(cov_hc1; term=:x)
+se_hc1 = stderror(lp_result; term=:x)
 println("HC1 standard errors: ", round.(se_hc1, digits=4))
 
 # HC3 (more conservative)
-cov_hc3 = vcov(HC3(), lp_result)
-se_hc3 = stderror(cov_hc3; term=:x)
+lp_hc3 = lp_result + vcov(HC3())
+se_hc3 = stderror(lp_hc3; term=:x)
 println("HC3 standard errors: ", round.(se_hc3, digits=4))
 ```
 
@@ -44,13 +50,12 @@ For time series with autocorrelated errors:
 
 ```@example infer
 # Bartlett kernel with Newey-West bandwidth
-cov_nw = vcov(Bartlett{NeweyWest}(), lp_result)
-se_nw = stderror(cov_nw; term=:x)
+lp_nw = lp_result + vcov(Bartlett{NeweyWest}())
+se_nw = stderror(lp_nw; term=:x)
 println("Newey-West SEs: ", round.(se_nw, digits=4))
 
 # Parzen kernel
-cov_parzen = vcov(Parzen{NeweyWest}(), lp_result)
-se_parzen = stderror(cov_parzen; term=:x)
+se_parzen = stderror(lp_result + vcov(Parzen{NeweyWest}()); term=:x)
 println("Parzen SEs: ", round.(se_parzen, digits=4))
 ```
 
@@ -58,9 +63,22 @@ println("Parzen SEs: ", round.(se_parzen, digits=4))
 
 ```@example infer
 # Fixed bandwidth of 5
-cov_fixed = vcov(Bartlett(5), lp_result)
-se_fixed = stderror(cov_fixed; term=:x)
+se_fixed = stderror(lp_result + vcov(Bartlett(5)); term=:x)
 println("Fixed bandwidth SEs: ", round.(se_fixed, digits=4))
+```
+
+### Equal-Weighted Cosine (EWC)
+
+The EWC estimator of Lazarus, Lewis, Stock and Watson (2018) averages `B` cosine-weighted
+periodogram terms. `ewc_bandwidth` gives their rule ``B = \lfloor 0.41\,T_0^{2/3} \rfloor``
+from the horizon-0 sample, to be held fixed across horizons. Bands on an EWC covariance
+use Student-``t_B`` critical values instead of normal ones (fixed-smoothing asymptotics),
+so they are wider than a normal band with the same standard errors.
+
+```@example infer
+B = ewc_bandwidth(lp_result)
+lp_ewc = lp_result + vcov(EWC(B))
+summarize(lp_ewc; term=:x, level=0.90)
 ```
 
 ## Summary Tables with `summarize()`
@@ -68,13 +86,13 @@ println("Fixed bandwidth SEs: ", round.(se_fixed, digits=4))
 Get an `IRFSummary` table with coefficients, standard errors, and confidence intervals:
 
 ```@example infer
-summary_irf = summarize(lp_result, cov_hc1)
+summary_irf = summarize(lp_nw)
 println(summary_irf)
 ```
 
-### Convenience syntax
+### Overriding the estimator
 
-Pass the estimator directly instead of computing vcov separately:
+Passing an estimator is the same as `summarize(lp_result + vcov(estimator))`:
 
 ```@example infer
 summary_irf = summarize(lp_result, HC1())
@@ -142,5 +160,6 @@ plot(p1, p2, p3, layout=(1,3), size=(900, 300))
 | `Bartlett(bw)` | HAC with fixed bandwidth |
 | `Parzen{NeweyWest}()` | HAC with Parzen kernel |
 | `QuadraticSpectral{Andrews}()` | HAC with QS kernel |
+| `EWC(B)` | Equal-weighted cosine, Student-``t_B`` bands (`B = ewc_bandwidth(lp_result)`) |
 
 See [CovarianceMatrices.jl documentation](https://gragusa.github.io/CovarianceMatrices.jl/stable/) for more options.

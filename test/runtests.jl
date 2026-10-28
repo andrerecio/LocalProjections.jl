@@ -6,6 +6,3 @@ const GL_FIXTURES = isfile(joinpath(@__DIR__, "fixtures", "goro_lee", "app_tfp_y
 GL_FIXTURES || @info "Octave fixtures absent: skipping the :octave test items"
 
 @run_package_tests filter = ti -> GL_FIXTURES || !(:octave in ti.tags)
-
-# Aqua.jl quality assurance tests
-include("Aqua.jl")

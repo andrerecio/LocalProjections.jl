@@ -2,6 +2,7 @@ using TestItems
 
 @testitem "cumul transformation" tags = [:cumul, :core] begin
     using LocalProjections
+    using LocalProjections: CumulTerm
     using DataFrames, StatsModels, Regress, StatsBase, Test
 
     # Create simple synthetic data
@@ -18,7 +19,7 @@ using TestItems
 
     for h in 0:horizon
         # Get coefficient from lp result
-        lp_coef = coef(lp_result.models[h + 1])[2]  # x coefficient (index 2, after intercept)
+        lp_coef = coef(horizonmodel(lp_result, h))[2]  # x coefficient (index 2, after intercept)
 
         # Manually compute cumulative y at horizon h using StatsModels
         cumul_term_h = CumulTerm{typeof(Term(:y))}(Term(:y), h)
@@ -35,12 +36,13 @@ using TestItems
         manual_coef = (X_manual \ y_manual)[2]  # x coefficient
 
         # Compare coefficients
-        @test lp_coef ≈ manual_coef atol = 1e-10
+        @test lp_coef ≈ manual_coef atol = 1.0e-10
     end
 end
 
 @testitem "leads transformation" tags = [:leads, :core] begin
     using LocalProjections
+    using LocalProjections: LeadTerm
     using DataFrames, StatsModels, Regress, StatsBase, Test
     using ShiftedArrays: lead
 
@@ -57,7 +59,7 @@ end
 
     for h in 0:horizon
         # Get coefficient from lp result
-        lp_coef = coef(lp_result.models[h + 1])[2]  # x coefficient
+        lp_coef = coef(horizonmodel(lp_result, h))[2]  # x coefficient
 
         # Manually compute lead of y at horizon h using StatsModels
         leads_term_h = LeadTerm{typeof(Term(:y))}(Term(:y), h)
@@ -72,7 +74,7 @@ end
         manual_coef = (X_manual \ y_manual)[2]  # x coefficient
 
         # Compare coefficients
-        @test lp_coef ≈ manual_coef atol = 1e-10
+        @test lp_coef ≈ manual_coef atol = 1.0e-10
     end
 
     # Verify NaN handling (not missing)
@@ -83,6 +85,7 @@ end
 
 @testitem "anchor function syntax" tags = [:anchor, :core] begin
     using LocalProjections
+    using LocalProjections: LeadTerm, AnchorTerm
     using DataFrames, StatsModels, Regress, StatsBase, Test
 
     # Create simple synthetic data with both y and z
@@ -98,7 +101,7 @@ end
 
     for h in 0:horizon
         # Get coefficient from lp result
-        lp_coef = coef(lp_result.models[h + 1])[2]  # x coefficient
+        lp_coef = coef(horizonmodel(lp_result, h))[2]  # x coefficient
 
         # Manually compute anchored response using StatsModels
         inner_leads = LeadTerm{typeof(Term(:y))}(Term(:y), h)
@@ -114,12 +117,13 @@ end
         manual_coef = (X_manual \ y_manual)[2]  # x coefficient
 
         # Compare coefficients
-        @test lp_coef ≈ manual_coef atol = 1e-10
+        @test lp_coef ≈ manual_coef atol = 1.0e-10
     end
 end
 
 @testitem "anchor pipe syntax" tags = [:anchor, :core] begin
     using LocalProjections
+    using LocalProjections: LeadTerm, AnchorTerm
     using DataFrames, StatsModels, Regress, StatsBase, Test
 
     # Create simple synthetic data
@@ -135,17 +139,17 @@ end
 
     # Compare results from both syntaxes
     for h in 0:horizon
-        pipe_coef = coef(lp_pipe.models[h + 1])[2]
-        func_coef = coef(lp_func.models[h + 1])[2]
+        pipe_coef = coef(horizonmodel(lp_pipe, h))[2]
+        func_coef = coef(horizonmodel(lp_func, h))[2]
 
-        @test pipe_coef ≈ func_coef atol = 1e-10
+        @test pipe_coef ≈ func_coef atol = 1.0e-10
     end
 
     # Also verify against manual computation
     df_filtered = dropmissing(df, [:y, :z, :x], disallowmissing = true)
 
     for h in 0:horizon
-        lp_coef = coef(lp_pipe.models[h + 1])[2]
+        lp_coef = coef(horizonmodel(lp_pipe, h))[2]
 
         # Manual computation using StatsModels
         inner_leads = LeadTerm{typeof(Term(:y))}(Term(:y), h)
@@ -160,12 +164,13 @@ end
         @test y_manual == y_manual_manual  # Verify manual matches StatsModels output
         manual_coef = (X_manual \ y_manual)[2]
 
-        @test lp_coef ≈ manual_coef atol = 1e-10
+        @test lp_coef ≈ manual_coef atol = 1.0e-10
     end
 end
 
 @testitem "modelcols anchor matches manual lead computation" tags = [:anchor, :verification] begin
     using LocalProjections
+    using LocalProjections: LeadTerm, AnchorTerm
     using DataFrames, StatsModels, Test
 
     # Create test data
@@ -189,7 +194,7 @@ end
             elseif isnan(y_modelcols[i]) || isnan(y_manual[i])
                 @test false  # One NaN, other not - FAIL
             else
-                @test y_modelcols[i] ≈ y_manual[i] atol = 1e-10
+                @test y_modelcols[i] ≈ y_manual[i] atol = 1.0e-10
             end
         end
     end
@@ -197,6 +202,7 @@ end
 
 @testitem "cumulative anchor (nested)" tags = [:nested, :anchor, :cumul] begin
     using LocalProjections
+    using LocalProjections: CumulTerm, AnchorTerm
     using DataFrames, StatsModels, Regress, StatsBase, Test
 
     # Create simple synthetic data
@@ -212,7 +218,7 @@ end
 
     for h in 0:horizon
         # Get coefficient from lp result
-        lp_coef = coef(lp_result.models[h + 1])[2]
+        lp_coef = coef(horizonmodel(lp_result, h))[2]
 
         # Manual computation using StatsModels: first cumul, then anchor
         inner_cumul = CumulTerm{typeof(Term(:y))}(Term(:y), h)
@@ -228,7 +234,7 @@ end
         manual_coef = (X_manual \ y_manual)[2]
 
         # Compare coefficients
-        @test lp_coef ≈ manual_coef atol = 1e-10
+        @test lp_coef ≈ manual_coef atol = 1.0e-10
     end
 end
 
@@ -250,19 +256,21 @@ end
     df_filtered1 = dropmissing(df, [:y, :x], disallowmissing = true)
 
     for h in 0:horizon
-        lp_coef = coef(lp_cumul_log.models[h + 1])[2]
+        lp_coef = coef(horizonmodel(lp_cumul_log, h))[2]
 
         # Manual computation: cumulative sum of log(y) from t to t+h
         log_y = log.(df_filtered1.y)
-        y_h = [t + h <= length(log_y) ? sum(log_y[t:(t + h)]) : NaN
-               for t in 1:length(log_y)]
+        y_h = [
+            t + h <= length(log_y) ? sum(log_y[t:(t + h)]) : NaN
+                for t in 1:length(log_y)
+        ]
         complete_obs = .!isnan.(y_h)
 
         X_manual = hcat(ones(sum(complete_obs)), df_filtered1.x[complete_obs])
         y_manual = y_h[complete_obs]
         manual_coef = (X_manual \ y_manual)[2]
 
-        @test lp_coef ≈ manual_coef atol = 1e-10
+        @test lp_coef ≈ manual_coef atol = 1.0e-10
     end
 
     # Test leads(log(y))
@@ -270,7 +278,7 @@ end
     df_filtered2 = dropmissing(df, [:y, :x], disallowmissing = true)
 
     for h in 0:horizon
-        lp_coef = coef(lp_lead_log.models[h + 1])[2]
+        lp_coef = coef(horizonmodel(lp_lead_log, h))[2]
 
         # Manual computation: lead of log(y) by h
         log_y = log.(df_filtered2.y)
@@ -281,7 +289,7 @@ end
         y_manual = y_h[complete_obs]
         manual_coef = (X_manual \ y_manual)[2]
 
-        @test lp_coef ≈ manual_coef atol = 1e-10
+        @test lp_coef ≈ manual_coef atol = 1.0e-10
     end
 
     # Test anchor(log(y), z)
@@ -289,13 +297,15 @@ end
     df_filtered3 = dropmissing(df, [:y, :z, :x], disallowmissing = true)
 
     for h in 0:horizon
-        lp_coef = coef(lp_anchor_log.models[h + 1])[2]
+        lp_coef = coef(horizonmodel(lp_anchor_log, h))[2]
 
         # Manual computation: lead of log(y) by h, minus z at t
         log_y = log.(df_filtered3.y)
-        y_h = [t + h <= length(log_y) ? log_y[t + h] - df_filtered3.z[t] : NaN
-               for
-               t in 1:length(log_y)]
+        y_h = [
+            t + h <= length(log_y) ? log_y[t + h] - df_filtered3.z[t] : NaN
+                for
+                t in 1:length(log_y)
+        ]
         complete_obs = .!isnan.(y_h)
 
         X_manual = hcat(ones(sum(complete_obs)), df_filtered3.x[complete_obs])
@@ -303,7 +313,7 @@ end
         manual_coef = (X_manual \ y_manual)[2]
 
         # Use relative tolerance for large values
-        @test lp_coef ≈ manual_coef rtol = 1e-10
+        @test lp_coef ≈ manual_coef rtol = 1.0e-10
     end
 end
 
@@ -315,10 +325,9 @@ end
     n = 100
     df = DataFrame(x = randn(n), y = randn(n))
     lp_result = lp(@formula(leads(y) ~ x), df; horizon = 5)
-    cov = LocalProjections.vcov(HC1(), lp_result)
 
     # Test basic summarize returns IRFSummary
-    summary_obj = summarize(lp_result, cov)
+    summary_obj = summarize(lp_result)
     @test summary_obj isa IRFSummary
     @test length(summary_obj.horizon) == 6  # horizons 0-5
     @test summary_obj.horizon == collect(0:5)
@@ -329,16 +338,19 @@ end
     summary_df = DataFrame(summary_obj)
     @test summary_df isa DataFrame
     @test nrow(summary_df) == 6
-    @test names(summary_df) == ["horizon", "coef", "se", "lower", "upper"]
+    @test names(summary_df) ==
+        ["response", "term", "horizon", "coef", "se", "lower", "upper", "level", "scale"]
 
     # Test with scale
-    summary_scaled = summarize(lp_result, cov; scale = 100)
+    summary_scaled = summarize(lp_result; scale = 100)
     @test summary_scaled.coef ≈ summary_obj.coef .* 100
     @test summary_scaled.scale == 100.0
 
-    # Test with estimator directly
+    # Default standard errors are the stored HC1 ones; an explicit HC1 matches
+    @test summary_obj.se == stderror(lp_result)
     summary_direct = summarize(lp_result, HC1())
-    @test summary_direct.coef ≈ summary_obj.coef atol = 1e-10
+    @test summary_direct.coef ≈ summary_obj.coef atol = 1.0e-10
+    @test summary_direct.se ≈ summary_obj.se
 
     # Test confidence bounds are sensible (lower < coef < upper when se > 0)
     for i in 1:length(summary_obj.horizon)
@@ -348,20 +360,65 @@ end
     end
 
     # Test different confidence level
-    summary_90 = summarize(lp_result, cov; level = 0.90)
-    @test summary_90.level == 0.90
+    summary_90 = summarize(lp_result; level = 0.9)
+    @test summary_90.level == 0.9
     # 90% CI should be narrower than 95% CI
     @test all(
         summary_90.upper .- summary_90.lower .< summary_obj.upper .- summary_obj.lower,
     )
 end
 
+@testitem "IRFSummary table, display and level validation" tags = [:summarize, :api] begin
+    using LocalProjections
+    using DataFrames, StatsModels, Tables, Test
+    using MacroEconometricTools: point_estimate, lowerbounds, upperbounds
+
+    x = sin.(0.3 .* (1:80))
+    df = DataFrame(x = x, y = 0.5 .* x .+ cos.(1:80))
+    r = lp(@formula(leads(y) ~ x), df; horizon = 4)
+    s = summarize(r; level = 0.9)
+
+    # Tables.jl interface carries every field, one row per horizon
+    @test Tables.istable(s)
+    ct = Tables.columntable(s)
+    @test ct.horizon == 0:4
+    @test all(==(:y), ct.response) && all(==(:x), ct.term)
+    @test all(==(0.9), ct.level) && all(==(1.0), ct.scale)
+    @test ct.coef == s.coef && ct.lower == s.lower
+
+    # Same numbers as the MET IRF object at that coverage
+    irf = as_irf_result(r; coverage = [0.9])
+    @test s.coef == vec(Array(point_estimate(irf)))
+    @test s.lower == vec(Array(only(lowerbounds(irf))))
+    @test s.upper == vec(Array(only(upperbounds(irf))))
+
+    # A negative scale flips the response and keeps lower <= upper
+    sneg = summarize(r; level = 0.9, scale = -2)
+    @test sneg.coef ≈ -2 .* s.coef
+    @test sneg.se ≈ 2 .* s.se
+    @test sneg.lower ≈ -2 .* s.upper
+    @test sneg.upper ≈ -2 .* s.lower
+
+    # Display: no ANSI codes unless the caller asks for color; compact form has no newline
+    plain = sprint(show, MIME("text/plain"), s)
+    @test !occursin('\e', plain)
+    @test occursin("Impulse response of y to x", plain)
+    @test occursin("Lower 90%", plain)
+    @test !occursin("0.0 │", plain)  # horizons print as integers
+    @test sprint(show, s) == "IRFSummary(response=y, term=x, level=0.9, scale=1.0)"
+
+    # One validation of confidence levels for every entry point
+    msg = "confidence levels must lie strictly between 0 and 1; got 95"
+    @test_throws msg summarize(r; level = 95)
+    @test_throws msg as_irf_result(r; coverage = [0.9, 95])
+    @test_throws "at least one confidence level is required" as_irf_result(r; coverage = Float64[])
+end
+
 @testitem "plus vcov operator" tags = [:vcov, :api] begin
     using LocalProjections
-    using LocalProjections: VcovSpec
+    using Regress: VcovSpec
     using DataFrames, StatsModels, Test
     using CovarianceMatrices: HC1, Bartlett, NeweyWest
-    using Regress: vcov
 
     n = 100
     df = DataFrame(x = randn(n), y = randn(n))
@@ -384,7 +441,7 @@ end
     @test lp_robust.coef_names == lp_result.coef_names
 
     # Number of models should be the same
-    @test length(lp_robust.models) == length(lp_result.models)
+    @test length(nobs(lp_robust)) == length(nobs(lp_result))
 
     # Test chaining: (lp + vcov(A)) + vcov(B)
     lp_chained = (lp_result + vcov(HC1())) + vcov(Bartlett{NeweyWest}())
@@ -392,9 +449,46 @@ end
     @test coefpath(lp_chained) == coefpath(lp_result)
 end
 
+@testitem "stored vcov estimator drives inference" tags = [:vcov, :api] begin
+    using LocalProjections
+    using DataFrames, StatsModels, StableRNGs, Test
+    using CovarianceMatrices: HC1, Bartlett, NeweyWest
+    import Regress
+
+    rng = StableRNG(4242)
+    n = 200
+    df = DataFrame(x = randn(rng, n), w = randn(rng, n), y = randn(rng, n))
+    r = lp(@formula(leads(y) ~ x + w), df; horizon = 4)
+    hac = Bartlett{NeweyWest}()
+    r_hac = r + vcov(hac)
+
+    # The generics are shared with Regress, so loading both is unambiguous
+    @test vcov === Regress.vcov
+    @test stderror === Regress.stderror
+
+    # stderror(lp; term) collects each horizon model's stored standard errors
+    k = findfirst(==("w"), coefnames(r))
+    @test stderror(r) == [stderror(horizonmodel(r, h))[2] for h in 0:4]
+    @test stderror(r_hac; term = :w) == [stderror(horizonmodel(r_hac, h))[k] for h in 0:4]
+    @test stderror(r_hac) != stderror(r)
+    @test_throws "term z not present in model" stderror(r; term = :z)
+
+    # Downstream functions default to the stored estimator
+    @test summarize(r_hac).se == stderror(r_hac)
+    @test summarize(r_hac).se ≈ summarize(r, hac).se
+    @test summarize(r_hac, HC1()).se ≈ summarize(r).se
+
+    # `show` reports the stored estimator; `repr` module-qualifies the names unless
+    # CovarianceMatrices is loaded in `Main`
+    @test occursin(r"Vcov: +(CovarianceMatrices\.)?HR1\(\)", sprint(show, MIME"text/plain"(), r))
+    @test occursin(
+        r"Bartlett\{(CovarianceMatrices\.)?NeweyWest\}\(\)", sprint(show, MIME"text/plain"(), r_hac)
+    )
+end
+
 @testitem "lpiv basic functionality" tags = [:lpiv, :iv, :core] begin
     using LocalProjections
-    using LocalProjections: FirstStageIV
+    using Regress: FirstStageIV
     using DataFrames, StatsModels, Test
     using Random
     using CovarianceMatrices: HC1
@@ -413,7 +507,7 @@ end
 
     # Fit IV local projection
     horizon = 3
-    result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon = horizon)
+    result = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z)), df; horizon = horizon)
 
     # Check struct type
     @test result isa LocalProjectionIV
@@ -422,11 +516,14 @@ end
     @test result.shock == :x
 
     # Check that we have the right number of models
-    @test length(result.models) == horizon + 1
+    @test length(nobs(result)) == horizon + 1
 
     # Check endogenous and instrument names
     @test :x in Symbol.(result.endogenous_names) || "x" in result.endogenous_names
     @test :z in Symbol.(result.instrument_names) || "z" in result.instrument_names
+
+    # The stored estimator is the covariance estimator, not the IV estimator
+    @test occursin(r"Vcov: +(CovarianceMatrices\.)?HR1\(\)", sprint(show, MIME"text/plain"(), result))
 
     # Extract IRF - coefficient should be close to 2.0 for horizon 0
     irf = coefpath(result; term = :x)
@@ -444,10 +541,8 @@ end
     all_fs = first_stage(result)
     @test length(all_fs) == horizon + 1
 
-    # Test vcov
-    cov = LocalProjections.vcov(HC1(), result)
-    @test cov isa LocalProjectionCovariance
-    se = stderror(cov; term = :x)
+    # Standard errors across horizons
+    se = stderror(result; term = :x)
     @test length(se) == horizon + 1
     @test all(se .> 0)  # Standard errors should be positive
 end
@@ -472,7 +567,7 @@ end
 
     # Fit IV LP with control
     horizon = 2
-    result = lpiv(@formula(leads(y) ~ (x ~ z) + w), df; horizon = horizon)
+    result = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z) + w), df; horizon = horizon)
 
     @test result isa LocalProjectionIV
 
@@ -489,52 +584,11 @@ end
     @test length(irf_w) == horizon + 1
 end
 
-@testitem "lp/lpiv HAC conventions and dofadjust forwarding" tags = [
-    :lpiv, :vcov, :api] begin
-    using LocalProjections
-    using DataFrames, StatsModels, StatsBase, Test
-    using CovarianceMatrices: HR1, Bartlett, NeweyWest, EWC
-    using StableRNGs
-
-    # Self-instrumented lpiv: TSLS ≡ OLS, so every covariance must agree with lp
-    # up to the finite-sample convention (REG-2).
-    rng = StableRNG(11)
-    T = 250
-    x = zeros(T)
-    y = zeros(T)
-    for t in 2:T
-        x[t] = 0.5x[t - 1] + randn(rng)
-        y[t] = 0.6y[t - 1] + 0.8x[t] + randn(rng)
-    end
-    df = DataFrame(y = y, x = x, xz = copy(x))
-    L = lp(@formula(leads(y) ~ x + lags(y, 2)), df; horizon = 4)
-    V = lpiv(@formula(leads(y) ~ (x ~ xz) + lags(y, 2)), df; horizon = 4)
-    @test coefpath(L; term = :x) ≈ coefpath(V; term = :x) atol = 1e-12
-    sqrt_nk = [sqrt(nobs(m) / (nobs(m) - length(coef(m)))) for m in L.models]
-
-    ratio(est; kw...) = stderror(vcov(est, L); term = :x) ./
-                        stderror(vcov(est, V; kw...); term = :x)
-    # Default: IV kernel HAC and EWC omit n/(n-k); HR1 applies it on both paths.
-    @test ratio(HR1()) ≈ ones(5) rtol = 1e-12
-    @test ratio(Bartlett(6)) ≈ sqrt_nk rtol = 1e-12
-    @test ratio(EWC(20)) ≈ sqrt_nk rtol = 1e-12
-    # The automatic bandwidth excludes the intercept on both paths (REG-2b fixed
-    # upstream in Regress 0.2), so only the d.o.f. factor separates them.
-    @test ratio(Bartlett{NeweyWest}()) ≈ sqrt_nk rtol = 1e-12
-    # `dofadjust = true` is forwarded to each horizon and puts IV kernel HAC on
-    # the lp convention; EWC stays unscaled (LLSW / harreg convention).
-    @test ratio(Bartlett(6); dofadjust = true) ≈ ones(5) rtol = 1e-12
-    @test ratio(Bartlett{NeweyWest}(); dofadjust = true) ≈ ones(5) rtol = 1e-12
-    @test ratio(EWC(20); dofadjust = true) ≈ sqrt_nk rtol = 1e-12
-    @test ratio(HR1(); dofadjust = true) ≈ ones(5) rtol = 1e-12
-end
-
 @testitem "lpiv plus vcov operator" tags = [:lpiv, :vcov, :api] begin
     using LocalProjections
-    using LocalProjections: VcovSpec
+    using Regress: VcovSpec
     using DataFrames, StatsModels, Test
     using CovarianceMatrices: HC1, Bartlett, NeweyWest
-    using Regress: vcov
     using Random
     using LinearAlgebra
 
@@ -548,7 +602,7 @@ end
 
     df = DataFrame(y = y, x = x, z = z)
 
-    result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon = 3)
+    result = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z)), df; horizon = 3)
 
     # Test + vcov() syntax
     result_hac = result + vcov(Bartlett{NeweyWest}())
@@ -590,7 +644,7 @@ end
 
     # Cumulative IV local projection
     horizon = 2
-    result = lpiv(@formula(cumul(y) ~ (x ~ z)), df; horizon = horizon)
+    result = lpiv(TSLS(), @formula(cumul(y) ~ (x ~ z)), df; horizon = horizon)
 
     @test result isa LocalProjectionIV
     @test result.response == :y
@@ -622,11 +676,10 @@ end
 
     df = DataFrame(y = y, x = x, z = z)
 
-    result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon = 3)
-    cov = LocalProjections.vcov(HC1(), result)
+    result = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z)), df; horizon = 3)
 
     # Test summarize
-    summary_obj = summarize(result, cov)
+    summary_obj = summarize(result)
     @test summary_obj isa IRFSummary
     @test length(summary_obj.horizon) == 4  # 0-3
     @test summary_obj.term == :x
@@ -637,12 +690,13 @@ end
     @test nrow(summary_df) == 4
 
     # Test with scale
-    summary_scaled = summarize(result, cov; scale = 100)
+    summary_scaled = summarize(result; scale = 100)
     @test summary_scaled.coef ≈ summary_obj.coef .* 100
 
     # Test with estimator directly
     summary_direct = summarize(result, HC1())
-    @test summary_direct.coef ≈ summary_obj.coef atol = 1e-10
+    @test summary_direct.coef ≈ summary_obj.coef atol = 1.0e-10
+    @test summary_direct.se ≈ summary_obj.se
 end
 
 @testitem "lpiv comparison with manual 2SLS" tags = [:lpiv, :iv, :verification] begin
@@ -663,7 +717,7 @@ end
     df = DataFrame(y = y, x = x, z = z)
 
     # lpiv result for horizon 0
-    result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon = 0)
+    result = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z)), df; horizon = 0)
     lpiv_coef = coefpath(result; term = :x)[1]
 
     # Manual 2SLS for comparison
@@ -680,11 +734,129 @@ end
     beta_2sls = (X_hat' * X_hat) \ (X_hat' * y_manual)
 
     # Compare coefficients (second element is x coefficient)
-    @test lpiv_coef ≈ beta_2sls[2] atol = 1e-8
+    @test lpiv_coef ≈ beta_2sls[2] atol = 1.0e-8
+end
+
+@testitem "Intercept flag matches Regress formula fits" tags = [:core, :lpiv, :verification] begin
+    using LocalProjections
+    using DataFrames, StatsModels, Test
+    using StatsAPI: adjr2, r2, rss
+    using StableRNGs
+    import Regress
+
+    rng = StableRNG(7)
+    n, h = 300, 2
+    z = randn(rng, n)
+    x = 0.6 .* z .+ randn(rng, n)
+    w = randn(rng, n)
+    y = 3.0 .+ 0.5 .* x .+ 0.2 .* w .+ randn(rng, n)
+    df = DataFrame(; y, x, z, w)
+    # Row t of `fit` holds y[t + h], as `leads(y)` does at horizon h.
+    fit = DataFrame(; yh = [y[(1 + h):end]; fill(missing, h)], x, z, w)
+
+    r = lp(@formula(leads(y) ~ x + w), df; horizon = h)
+    ref = Regress.ols(fit, @formula(yh ~ x + w))
+    @test r2(horizonmodel(r, h)) ≈ r2(ref)
+    @test adjr2(horizonmodel(r, h)) ≈ adjr2(ref)
+
+    # Without an intercept, R² is uncentered, as in the formula fit.
+    r0 = lp(@formula(leads(y) ~ 0 + x + w), df; horizon = h)
+    ref0 = Regress.ols(fit, @formula(yh ~ 0 + x + w))
+    @test r2(horizonmodel(r0, h)) ≈ r2(ref0)
+    @test r2(horizonmodel(r0, h)) ≈ 1 - rss(ref0) / sum(abs2, y[(1 + h):end])
+
+    riv = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z) + w), df; horizon = h)
+    refiv = Regress.iv(TSLS(), fit, @formula(yh ~ (x ~ z) + w))
+    @test r2(horizonmodel(riv, h)) ≈ r2(refiv)
+    fs = first_stage(riv, h)
+    @test r2(only(fs.models)) ≈ r2(Regress.ols(fit[1:(n - h), :], @formula(x ~ z + w)))
+    @test fs.F_nonrobust ≈ Regress.first_stage(refiv).F_nonrobust
+end
+
+@testitem "k-class lpiv matches Regress formula fits" tags = [:lpiv, :iv, :verification] begin
+    using LocalProjections
+    using DataFrames, StatsModels, Test
+    using StatsAPI: coef
+    using StableRNGs
+    import Regress
+
+    rng = StableRNG(11)
+    n, h = 300, 2
+    z1, z2, z3, u, w = (randn(rng, n) for _ in 1:5)
+    x = 0.5 .* z1 .+ 0.4 .* z2 .+ 0.3 .* z3 .+ 0.6 .* u
+    y = 1.0 .+ 0.8 .* x .+ 0.2 .* w .+ u .+ 0.15 .* z3
+    df = DataFrame(; y, x, z1, z2, z3, w)
+    # Row t of `fit` holds y[t + h], as `leads(y)` does at horizon h.
+    fit = DataFrame(; yh = [y[(1 + h):end]; fill(missing, h)], x, z1, z2, z3, w)
+    f = @formula(leads(y) ~ (x ~ z1 + z2 + z3) + w)
+    rt = lpiv(TSLS(), f, df; horizon = h)
+
+    for est in (LIML(), Fuller(1.0), KClass(1.5))
+        # Fuller(1)'s kappa is just below 1 at horizon 2 on this sample, which warns
+        fits = () -> (
+            lpiv(est, f, df; horizon = h),
+            Regress.iv(est, fit, @formula(yh ~ (x ~ z1 + z2 + z3) + w)),
+        )
+        r, ref = est isa Fuller ?
+            (@test_logs (:warn, r"kappa < 1") match_mode = :any fits()) : fits()
+        m = horizonmodel(r, h)
+        @test m.estimator == est
+        @test coef(m) ≈ coef(ref)
+        @test stderror(m) ≈ stderror(ref)
+        @test coefpath(r; term = :x) != coefpath(rt; term = :x)
+        # The first stage does not depend on the second-stage estimator
+        @test first_stage(r, h).F_robust ≈ first_stage(rt, h).F_robust
+        @test weakivtest(r, h).F_eff ≈ weakivtest(rt, h).F_eff
+    end
+end
+
+@testitem "Per-horizon models carry coefficient names" tags = [:core, :lpiv, :api] begin
+    using LocalProjections
+    using DataFrames, StatsModels, Test
+    using CovarianceMatrices: HC3
+    using StatsAPI: coeftable
+    using StableRNGs
+
+    rng = StableRNG(11)
+    n, H = 200, 3
+    z = randn(rng, n)
+    x = 0.6 .* z .+ randn(rng, n)
+    w = randn(rng, n)
+    y = 0.5 .* x .+ 0.2 .* w .+ randn(rng, n)
+    df = DataFrame(; y, x, z, w)
+
+    r = lp(@formula(leads(y) ~ x + w), df; horizon = H)
+    @test coefnames(r) == ["(Intercept)", "x", "w"]
+    for h in 0:H
+        @test coefnames(horizonmodel(r, h)) == coefnames(r)
+    end
+    rh = r + vcov(HC3())
+    @test coefnames(horizonmodel(rh, H)) == coefnames(r)
+    @test coeftable(horizonmodel(r, 1)).rownms == ["x", "w", "(Intercept)"]
+    @test occursin("w", sprint(show, coeftable(horizonmodel(r, 1))))
+
+    riv = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z) + w), df; horizon = H)
+    @test coefnames(horizonmodel(riv, 2)) == coefnames(riv) == ["(Intercept)", "w", "x"]
+    @test coeftable(horizonmodel(riv, 2)).rownms == ["w", "x", "(Intercept)"]
+    fs = first_stage(riv, 2)
+    @test fs.endogenous_names == ["x"]
+    @test fs.instrument_names == ["z"]
+    @test coefnames(only(fs.models)) == ["(Intercept)", "w", "z"]
+end
+
+@testitem "@formula is exported" tags = [:api] begin
+    using LocalProjections
+    using DataFrames, Test
+    import StatsModels
+
+    @test LocalProjections.var"@formula" === StatsModels.var"@formula"
+    df = DataFrame(y = randn(50), x = randn(50))
+    @test lp(@formula(leads(y) ~ x), df; horizon = 2) isa LocalProjection
 end
 
 @testitem "weakivtest for lpiv" tags = [:lpiv, :weakiv, :iv] begin
     using LocalProjections
+    using Regress: WeakIVTestResult
     using DataFrames, StableRNGs, StatsModels
 
     rng = StableRNG(4433222)
@@ -697,7 +869,7 @@ end
     df = DataFrame(y = y, x = x, z = z, z2 = z2, z3 = z3)
 
     horizon = 4
-    result = lpiv(@formula(leads(y) ~ (x ~ z + z2 + z3)), df; horizon = horizon)
+    result = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z + z2 + z3)), df; horizon = horizon)
 
     # Test single-horizon call
     r0 = weakivtest(result, 0)
@@ -716,8 +888,8 @@ end
     @test all(r -> r.F_eff > 0, results)
 
     # Test bounds checking
-    @test_throws BoundsError weakivtest(result, -1)
-    @test_throws BoundsError weakivtest(result, horizon + 1)
+    @test_throws "horizon -1 is outside the estimated horizons 0:$horizon" weakivtest(result, -1)
+    @test_throws "horizon $(horizon + 1) is outside the estimated horizons 0:$horizon" first_stage(result, horizon + 1)
 
     # Test keyword forwarding
     r_ols = weakivtest(result, 0; benchmark = :ols)
@@ -746,11 +918,12 @@ end
     # This should not error — lags(w1, 2) and lags(w2, 2) reference columns
     # :w1 and :w2 which are not the response variable :y
     result = lpiv(
+        TSLS(),
         @formula(leads(y) ~ (x ~ z) + lags(w1, 2) + lags(w2, 2)),
         df; horizon = horizon
     )
     @test result isa LocalProjectionIV
-    @test length(result.models) == horizon + 1
+    @test length(nobs(result)) == horizon + 1
 
     # Verify coefficients are finite
     irf = coefpath(result; term = :x)
@@ -765,6 +938,7 @@ end
 @testitem "tautological h=0 when response == shock" tags = [:lpiv, :iv, :tautological] begin
     using LocalProjections
     using DataFrames, StableRNGs, StatsModels
+    using Regress: FirstStageIV
     using CovarianceMatrices: HC1
 
     rng = StableRNG(7766)
@@ -778,7 +952,7 @@ end
     horizon = 4
 
     # IV LP where response == shock (x is both response and endogenous)
-    result = lpiv(@formula(leads(x) ~ (x ~ z) + w), df; horizon = horizon)
+    result = lpiv(TSLS(), @formula(leads(x) ~ (x ~ z) + w), df; horizon = horizon)
 
     @test result isa LocalProjectionIV
     @test result.tautological_h0
@@ -792,11 +966,11 @@ end
     irf_w = coefpath(result; term = :w)
     @test irf_w[1] == 0.0
 
-    # vcov: h=0 variance should be 0.0
-    cov = vcov(HC1(), result)
-    se = stderror(cov; term = :x)
+    # stderror: h=0 standard error is exactly 0, also after changing the estimator
+    se = stderror(result; term = :x)
     @test se[1] == 0.0
     @test all(isfinite, se[2:end])
+    @test stderror(result + vcov(HC1()); term = :w)[1] == 0.0
 
     # summarize: should not error
     summary = summarize(result, HC1())
@@ -805,19 +979,18 @@ end
     @test summary.lower[1] == 1.0
     @test summary.upper[1] == 1.0
 
-    # weakivtest: should not error, h=0 returns sentinel with F_eff = Inf
+    # weakivtest: h=0 has no IV estimate to test
     wiv = weakivtest(result)
     @test length(wiv) == horizon + 1
-    @test wiv[1].F_eff == Inf
+    @test wiv[1] === nothing
     @test all(r -> isfinite(r.F_eff), wiv[2:end])
+    @test_throws ArgumentError weakivtest(result, 0)
+    @test_throws "weakivtest is undefined at horizon 0 when the response equals the shock (x)" weakivtest(result, 0)
+    @test wiv[2].F_eff == weakivtest(result, 1).F_eff
+    @test isfinite(weakivtest(result, 1).F_eff)
 
-    # Single-horizon weakivtest at h=0
-    wiv0 = weakivtest(result, 0)
-    @test wiv0.F_eff == Inf
-
-    # Single-horizon weakivtest at h>0 should work normally
-    wiv1 = weakivtest(result, 1)
-    @test isfinite(wiv1.F_eff)
+    # first_stage at h=0 is still available
+    @test first_stage(result, 0) isa FirstStageIV
 
     # OLS LP where response == shock
     ols_result = lp(@formula(leads(x) ~ x + w), df; horizon = horizon)
@@ -826,1623 +999,505 @@ end
     @test irf_ols[1] == 1.0
 
     # Non-tautological case: response != shock
-    result_ok = lpiv(@formula(leads(y) ~ (x ~ z) + w), df; horizon = horizon)
+    result_ok = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z) + w), df; horizon = horizon)
     @test !result_ok.tautological_h0
 end
 
-@testitem "EWC bandwidth rule (LLSW 2018)" tags = [:ewc, :vcov, :api] begin
-    using LocalProjections
-    using DataFrames, StatsModels, StatsBase, Test
-
-    # Integer rule: B = floor(0.41 * T0^(2/3))
-    @test ewc_bandwidth(256) == 16   # baseline in the inference guide
-    @test ewc_bandwidth(100) == 8
-    @test ewc_bandwidth(1) == 1      # floor never below 1
-
-    # LP method uses the horizon-zero effective sample size
-    n = 150
-    df = DataFrame(x = randn(n), y = randn(n))
-    lp_result = lp(@formula(leads(y) ~ x + lags(y, 2)), df; horizon = 6)
-    T0 = Int(nobs(lp_result.models[1]))
-    @test T0 == n - 2  # two lags consumed
-    @test ewc_bandwidth(lp_result) == ewc_bandwidth(T0)
-end
-
-@testitem "EWC inference uses Student-t_B critical values" tags = [
-    :ewc, :vcov, :summarize, :api] begin
+@testitem "shock selection and formula validation" tags = [:core, :lpiv, :api] begin
     using LocalProjections
     using DataFrames, StatsModels, Test
-    using CovarianceMatrices: EWC, HC1
-    using Distributions: Normal, TDist, quantile
+    using StableRNGs
 
-    n = 200
-    df = DataFrame(x = randn(n), y = randn(n))
-    lp_result = lp(@formula(leads(y) ~ x + lags(y, 2)), df; horizon = 6)
-    B = ewc_bandwidth(lp_result)
-
-    beta = coefpath(lp_result; term = :x)
-    cov_ewc = LocalProjections.vcov(EWC(B), lp_result)
-    se_ewc = stderror(cov_ewc; term = :x)
-
-    # summarize pairs EWC with t_B, not the normal
-    s90 = summarize(lp_result, cov_ewc; term = :x, level = 0.90)
-    tcrit = quantile(TDist(B), 0.95)
-    zcrit = quantile(Normal(), 0.95)
-    @test s90.lower ≈ beta .- tcrit .* se_ewc
-    @test s90.upper ≈ beta .+ tcrit .* se_ewc
-    @test !(s90.upper ≈ beta .+ zcrit .* se_ewc)  # t_B bands are wider
-
-    # Non-EWC estimators keep normal critical values
-    cov_hc1 = LocalProjections.vcov(HC1(), lp_result)
-    se_hc1 = stderror(cov_hc1; term = :x)
-    s90_hc1 = summarize(lp_result, cov_hc1; term = :x, level = 0.90)
-    @test s90_hc1.upper ≈ beta .+ zcrit .* se_hc1
-
-    # as_irf_result follows the same pairing
-    irf = as_irf_result(lp_result; vcov_estimator = EWC(B), coverage = [0.90])
-    @test vec(irf.upper[1].data) ≈ beta .+ tcrit .* se_ewc
-    @test vec(irf.lower[1].data) ≈ beta .- tcrit .* se_ewc
-end
-
-@testitem "EWC covariance matches direct cosine-projection formula" tags = [
-    :ewc, :vcov, :verification] begin
-    using LocalProjections
-    using DataFrames, StatsModels, LinearAlgebra, Test
-    using CovarianceMatrices
-    using CovarianceMatrices: EWC
-    using StatsBase: modelmatrix, residuals
-
-    # AR(1) errors so the long-run correction actually matters
-    n = 250
-    e = zeros(n)
-    for t in 2:n
-        e[t] = 0.5 * e[t - 1] + randn()
-    end
-    x = randn(n)
-    y = 0.8 .* x .+ e
-    df = DataFrame(x = x, y = y)
-    lp_result = lp(@formula(leads(y) ~ x + lags(y, 1)), df; horizon = 3)
-    B = ewc_bandwidth(lp_result)
-
-    for m in lp_result.models
-        X = modelmatrix(m)
-        u = residuals(m)
-        T, k = size(X)
-        g = X .* u
-        # Guide §2.2: Type-II DCT projections of the score
-        Lam = [sqrt(2 / T) * sum(cos(π * j * (t - 0.5) / T) * g[t, :] for t in 1:T)
-               for j in 1:B]
-        Omega = sum(l * l' for l in Lam) / B
-        # Sandwich with the T/(T-k) correlated-dof adjustment
-        V_direct = (T / (T - k)) * T * ((X'X) \ Omega) / (X'X)
-        V_pkg = CovarianceMatrices.vcov(EWC(B), m)
-        @test V_pkg ≈ V_direct rtol = 1e-10
-    end
-end
-
-@testitem "weakivtest warns on unsupported vcov estimators" tags = [
-    :lpiv, :weakiv, :vcov, :ewc] begin
-    using LocalProjections
-    using DataFrames, StatsModels, Test, StableRNGs
-    using CovarianceMatrices: EWC, Bartlett, NeweyWest, HR1
-
-    # The warning gate itself, unit-tested deterministically
-    @test_logs (:warn, r"HC0-style") LocalProjections._warn_unsupported_weakiv_estimator(EWC(10))
-    @test_logs LocalProjections._warn_unsupported_weakiv_estimator(HR1())
-
-    rng = StableRNG(20260831)
-    n = 200
-    z = randn(rng, n)
-    u = randn(rng, n)
-    x = 0.5 .* z .+ 0.5 .* u
-    y = 2.0 .* x .+ u
-    df = DataFrame(y = y, x = x, z = z)
-    result = lpiv(@formula(leads(y) ~ (x ~ z)), df; horizon = 3)
-
-    # Supported estimators: no logging (default HR1, kernel HAC)
-    @test_logs weakivtest(result, 1)
-    @test_logs weakivtest(result + vcov(Bartlett{NeweyWest}()), 1)
-
-    # EWC is silently downgraded to HC0-style weighting upstream: warn.
-    # The warning fires before the computation; the computation itself runs
-    # Regress's numerically fragile Nagar routines, which throw on
-    # near-singular intermediates in a LAPACK-version-dependent way (drafted
-    # as an upstream issue) — so tolerate a downstream throw here.
-    result_ewc = result + vcov(EWC(10))
-    w_ewc = @test_logs (:warn, r"HC0-style") match_mode = :any begin
-        try
-            weakivtest(result_ewc, 1)
-        catch
-            nothing
-        end
-    end
-    # Vector method warns once for all horizons
-    @test_logs (:warn, r"HC0-style") match_mode = :any begin
-        try
-            weakivtest(result_ewc)
-        catch
-            nothing
-        end
-    end
-
-    # Where the computation completes, the warning does not change the
-    # returned statistics (documents the upstream fallback)
-    if w_ewc !== nothing
-        w_plain = weakivtest(result, 1)
-        @test w_ewc.F_eff == w_plain.F_eff
-    end
-end
-
-@testitem "Herbst–Johannsen correction matches direct lp_biascorr.m port" tags = [
-    :biascorr, :verification] begin
-    using LocalProjections
-    using DataFrames, StatsModels, LinearAlgebra, Statistics, Test, StableRNGs
-    using StatsBase: modelmatrix
-
-    rng = StableRNG(20260830)
-    n = 200
-    x = randn(rng, n)
-    y = zeros(n)
-    for t in 2:n
-        y[t] = 0.6 * y[t - 1] + 0.5 * x[t] + randn(rng)
-    end
-    df = DataFrame(y = y, x = x)
-    lp_result = lp(@formula(leads(y) ~ x + lags(y, 2)), df; horizon = 8)
-    bc = biascorrect(lp_result)
-
-    # Direct port of lp_biascorr.m (guide §3) on the same inputs
-    keep = [!(nm in ("(Intercept)", "x")) for nm in lp_result.coef_names]
-    w = modelmatrix(lp_result.models[1])[:, keep]
-    irs = coefpath(lp_result; term = :x)
-    T = size(w, 1)
-    H = lp_result.horizon
-    wd = w .- mean(w; dims = 1)
-    S0 = (wd' * wd) / (T - 1)
-    acf = [1 + tr(S0 \ ((wd[1:(end - j), :]' * wd[(j + 1):end, :]) / (T - j - 1)))
-           for j in 1:H]
-    irs_c = copy(irs)
-    for h in 1:H
-        irs_c[h + 1] = irs[h + 1] +
-                       (1 / (T - h)) * sum(acf[j] * irs_c[h - j + 1] for j in 1:h)
-    end
-
-    @test coefpath(bc) ≈ irs_c
-    @test bc.c ≈ acf
-    @test bc.T0 == T
-    @test bc.controls == ["y_lag1", "y_lag2"]
-    # Impact response is untouched; later horizons genuinely move
-    @test coefpath(bc)[1] == irs[1]
-    @test maximum(abs.(coefpath(bc)[2:end] .- irs[2:end])) > 0
-end
-
-@testitem "biascorrect conventions in summarize/as_irf_result" tags = [
-    :biascorr, :summarize, :api] begin
-    using LocalProjections
-    using DataFrames, StatsModels, Test, StableRNGs
-    using CovarianceMatrices: EWC, HC1
-    using Distributions: TDist, quantile
-
-    rng = StableRNG(20260830)
-    n = 200
-    x = randn(rng, n)
-    y = zeros(n)
-    for t in 2:n
-        y[t] = 0.6 * y[t - 1] + 0.5 * x[t] + randn(rng)
-    end
-    df = DataFrame(y = y, x = x)
-    lp_result = lp(@formula(leads(y) ~ x + lags(y, 2)), df; horizon = 8)
-    bc = biascorrect(lp_result)
-
-    # Wrapped-field forwarding
-    @test bc.horizon == lp_result.horizon
-    @test bc.shock === :x && bc.response === :y
-
-    # Script-22 convention: bands centered on θ̂ᶜ with SEs of the
-    # uncorrected OLS coefficients
-    s_bc = summarize(bc, HC1(); level = 0.90)
-    s_lp = summarize(lp_result, HC1(); level = 0.90)
-    @test s_bc.coef ≈ coefpath(bc)
-    @test s_bc.se == s_lp.se
-    @test (s_bc.upper .- s_bc.coef) ≈ (s_lp.upper .- s_lp.coef)
-
-    # Estimator/critical-value pairing flows through (t_B for EWC)
-    B = ewc_bandwidth(bc)
-    s_ewc = summarize(bc, EWC(B); level = 0.90)
-    tcrit = quantile(TDist(B), 0.95)
-    @test s_ewc.upper ≈ s_ewc.coef .+ tcrit .* s_ewc.se
-
-    # bc + vcov keeps the correction, changes only the attached estimator
-    bc2 = bc + LocalProjections.vcov(EWC(B))
-    @test bc2.c == bc.c && coefpath(bc2) ≈ coefpath(bc)
-
-    # as_irf_result centers on the corrected path and flags the metadata
-    irf = as_irf_result(bc; vcov_estimator = HC1(), coverage = [0.90])
-    @test vec(irf.data) ≈ coefpath(bc)
-    @test irf.metadata.bias_corrected === true
-end
-
-@testitem "biascorrect guards and edge cases" tags = [:biascorr, :api] begin
-    using LocalProjections
-    using DataFrames, StatsModels, Test, StableRNGs
-
-    rng = StableRNG(20260830)
-    n = 200
-    x = randn(rng, n)
-    y = zeros(n)
-    for t in 2:n
-        y[t] = 0.6 * y[t - 1] + 0.5 * x[t] + randn(rng)
-    end
-    df = DataFrame(y = y, x = x)
-
-    # Derived for OLS LP only
-    iv_result = lpiv(@formula(leads(y) ~ (x ~ x) + lags(y, 1)), df; horizon = 2)
-    @test_throws ArgumentError biascorrect(iv_result)
-
-    # Correction is defined for the shock's impulse response only
-    bc = biascorrect(lp(@formula(leads(y) ~ x + lags(y, 2)), df; horizon = 4))
-    @test_throws ArgumentError coefpath(bc; term = :y_lag1)
-
-    # Internal NaN gap → horizon-h sample is no longer the truncated
-    # horizon-0 sample (guide §3.2: T − h must be checked, not copied)
-    df_gap = copy(df)
-    df_gap.y[100] = NaN
-    lp_gap = lp(@formula(leads(y) ~ x + lags(y, 2)), df_gap; horizon = 4)
-    @test_throws ArgumentError biascorrect(lp_gap)
-
-    # Collinear controls → Σ̂₀ (near-)singular
-    df_col = copy(df)
-    df_col.z = 2 .* df.y
-    lp_col = lp(@formula(leads(y) ~ x + lags(y, 1) + lags(z, 1)), df_col;
-        horizon = 4)
-    @test_throws ArgumentError biascorrect(lp_col)
-
-    # Tautological h=0 (response == shock): θ̂₀ᶜ stays pinned at 1
-    lp_taut = lp(@formula(leads(x) ~ x + lags(y, 2)), df; horizon = 4)
-    @test lp_taut.tautological_h0
-    @test coefpath(biascorrect(lp_taut))[1] == 1.0
-
-    # No controls beyond intercept + shock: ĉ_j ≡ 1, recursion still runs
-    lp_min = lp(@formula(leads(y) ~ x), df; horizon = 4)
-    bc_min = biascorrect(lp_min)
-    @test all(bc_min.c .== 1.0)
-    @test coefpath(bc_min)[1] == coefpath(lp_min)[1]
-end
-
-@testitem "lagselect matches direct ic_var.m port" tags = [:lagselect, :verification] begin
-    using LocalProjections
-    using DataFrames, LinearAlgebra, StableRNGs, Test
-
-    rng = StableRNG(20260831)
-    T = 300
-    sh = zeros(T)
-    y = zeros(T)
-    for t in 3:T
-        sh[t] = 0.5 * sh[t - 1] + randn(rng)
-        y[t] = 0.7 * y[t - 1] - 0.35 * y[t - 2] + 0.8 * sh[t] + 0.4 * sh[t - 1] +
-               randn(rng)
-    end
-    df = DataFrame(shock = sh, y = y)
-    Y = Matrix(df[!, [:shock, :y]])
-
-    # Direct port of _estim/ic_var.m: criteria over p = 1:p_max with the penalty
-    # denominator fixed at T - p_max, but Sigma_p estimated on the full sample.
-    n = 2
-    pmax = 8
-    denom = T - pmax
-    aic_ref = Float64[]
-    bic_ref = Float64[]
-    for p in 1:pmax
-        v = LocalProjections._var_ols(Y, p)
-        ld = logdet(Symmetric(v.Σu))
-        k = n^2 * p + n
-        push!(aic_ref, ld + 2 * k / denom)
-        push!(bic_ref, ld + k * log(denom) / denom)
-    end
-
-    sel = lagselect(df, [:shock, :y]; maxlags = pmax, criterion = :aic)
-    @test sel.aic ≈ aic_ref rtol=1e-12
-    @test sel.bic ≈ bic_ref rtol=1e-12
-    @test sel.selected == argmin(aic_ref)
-    @test nlags(sel) == sel.selected
-    @test sel.lags == collect(1:pmax)
-    @test sel.nobs == T
-
-    selb = lagselect(df, [:shock, :y]; maxlags = pmax, criterion = :bic)
-    @test selb.selected == argmin(bic_ref)
-    # Both criteria are always computed; only the selection differs.
-    @test selb.aic == sel.aic
-    @test selb.bic == sel.bic
-
-    # BIC never selects a longer lag order than AIC here (heavier penalty).
-    @test selb.selected <= sel.selected
-end
-
-@testitem "_var_ols matches var_estim.m conventions and MacroEconometricTools" tags = [
-    :lagselect, :verification] begin
-    using LocalProjections
-    using DataFrames, LinearAlgebra, StableRNGs, Test
-    import MacroEconometricTools as MET
-
-    rng = StableRNG(11)
-    T = 300
-    Y = zeros(T, 2)
-    A1 = [0.5 0.0; 0.4 0.8]
-    for t in 2:T
-        Y[t, :] = A1 * Y[t - 1, :] + randn(rng, 2)
-    end
-
-    p = 2
-    v = LocalProjections._var_ols(Y, p)
-    @test v.T == T
-    @test v.Tu == T - p
-    @test size(v.A) == (2, 2, p)
-    @test size(v.U) == (T - p, 2)
-
-    # var_estim.m: Sigmahat = res'res / (T_u - (n*p + 1)), intercept included in
-    # the regressor count.
-    k = 2 * p + 1
-    @test v.Σu ≈ (v.U' * v.U) ./ ((T - p) - k) rtol=1e-12
-
-    # Cross-check the hand-rolled VAR against the hub package.
-    m = MET.VAR(Y, p)
-    @test v.A ≈ m.coefficients.lags rtol=1e-10
-    @test v.c ≈ m.coefficients.intercept rtol=1e-10
-    @test v.Σu ≈ Matrix(m.Σ) rtol=1e-10
-
-    # Residuals are orthogonal to the regressors.
-    @test maximum(abs, sum(v.U; dims = 1)) < 1e-9
-end
-
-@testitem "lagselect API and guards" tags = [:lagselect, :api] begin
-    using LocalProjections
-    using DataFrames, StableRNGs, Test
-
-    rng = StableRNG(4)
-    T = 120
-    df = DataFrame(shock = randn(rng, T), y = randn(rng, T))
-
-    sel = lagselect(df, [:shock, :y]; maxlags = 6)
-    @test sel isa VARLagSelection
-    @test nlags(sel) in 1:6
-
-    tbl = DataFrame(sel)
-    @test names(tbl) == ["lags", "aic", "bic"]
-    @test nrow(tbl) == 6
-
-    io = IOBuffer()
-    show(io, sel)
-    @test occursin("VARLagSelection", String(take!(io)))
-    show(io, MIME"text/plain"(), sel)
-    out = String(take!(io))
-    @test occursin("ic_var", out)
-    @test occursin("Selected", out)
-
-    @test_throws ArgumentError lagselect(df, [:shock, :y]; criterion = :hq)
-    @test_throws ArgumentError lagselect(df, [:shock, :y]; maxlags = 0)
-    @test_throws ArgumentError lagselect(df, [:shock, :y]; maxlags = T)
-    @test_throws ArgumentError lagselect(df, [:shock, :nope])
-    @test_throws ArgumentError lagselect(df, [:shock, :shock])
-    @test_throws ArgumentError lagselect(df, Symbol[])
-
-    dfm = copy(df)
-    dfm.y = Vector{Union{Missing, Float64}}(dfm.y)
-    dfm.y[10] = missing
-    @test_throws ArgumentError lagselect(dfm, [:shock, :y])
-
-    dfn = copy(df)
-    dfn.y[10] = NaN
-    @test_throws ArgumentError lagselect(dfn, [:shock, :y])
-end
-
-@testitem "Pope correction matches var_biascorr.m and its closed form" tags = [
-    :bootstrap, :verification] begin
-    using LocalProjections
-    using LinearAlgebra, Test
-
-    # Pope (1990) for a univariate AR(1): the scaled negative bias b equals
-    # exactly 1 + 3*rho. This is an external check, not a re-port.
-    for ρ in (0.0, 0.3, 0.5, 0.7, 0.9, 0.95)
-        T = 1000.0
-        Ac, δ = LocalProjections._pope_biascorrect(fill(ρ, 1, 1), fill(2.7, 1, 1), T)
-        @test δ == 1.0
-        @test (Ac[1, 1] - ρ) * T ≈ 1 + 3ρ rtol=1e-10
-    end
-
-    # Safeguard 1: an explosive OLS companion skips the correction entirely.
-    Ac, δ = LocalProjections._pope_biascorrect(fill(1.05, 1, 1), fill(1.0, 1, 1), 100.0)
-    @test δ == 0.0
-    @test Ac[1, 1] == 1.05
-
-    # Safeguard 2: delta backs off in steps of 0.01 until stability is restored.
-    # rho = 0.99, T = 20 would give 0.99 + (1 + 3*0.99)/20 = 1.1885 (explosive).
-    Ac, δ = LocalProjections._pope_biascorrect(fill(0.99, 1, 1), fill(1.0, 1, 1), 20.0)
-    @test 0 < δ < 1
-    @test abs(Ac[1, 1]) <= 1
-
-    # Direct port of _estim/var_biascorr.m on a bivariate VAR(2) with complex
-    # companion eigenvalues.
-    A = hcat([0.5 -0.6; 0.6 0.5], [0.1 0.0; 0.0 0.1])
-    Σ = [1.0 0.3; 0.3 2.0]
-    Tn = 200.0
-    n, np = size(A)
-    Acomp = [A; Matrix{Float64}(I, np - n, np - n) zeros(np - n, n)]
-    G = zeros(np, np)
-    G[1:n, 1:n] = Σ
-    Γ0 = reshape((I - kron(Acomp, Acomp)) \ vec(G), np, np)
-    At = Matrix(Acomp')
-    # NOTE: the middle term squares the TRANSPOSE, not A'A.
-    aux = inv(I - At) + At * inv(I - At * At) +
-          sum(λ * inv(I - λ * At) for λ in eigvals(Acomp))
-    b = real.(G * (aux / Γ0))
-    ref = (Acomp + b ./ Tn)[1:n, :]
-
-    got, δ2 = LocalProjections._pope_biascorrect(A, Σ, Tn)
-    @test δ2 == 1.0
-    @test got ≈ ref rtol=1e-10
-
-    # The 3-D method is the same correction, reshaped.
-    A3 = Array{Float64}(undef, 2, 2, 2)
-    A3[:, :, 1] = A[:, 1:2]
-    A3[:, :, 2] = A[:, 3:4]
-    got3, δ3 = LocalProjections._pope_biascorrect(A3, Σ, Tn)
-    @test δ3 == δ2
-    @test got3[:, :, 1] ≈ ref[:, 1:2] rtol=1e-12
-    @test got3[:, :, 2] ≈ ref[:, 3:4] rtol=1e-12
-end
-
-@testitem "moving-block resampling matches var_boot.m" tags = [:bootstrap, :verification] begin
-    using LocalProjections
-    using LinearAlgebra, StableRNGs, Statistics, Test
-
-    rng = StableRNG(202)
-    Tu, n = 97, 3
-    U = randn(rng, Tu, n)
-    for t in 2:Tu
-        U[t, :] .+= 0.4 .* U[t - 1, :]
-    end
-    ℓ = 12
-
-    # var_boot.m computes the position means with
-    #   filter(ones(1, Tu-l+1)/(Tu-l+1), 1, res), rows end-l+1:end
-    # which is the SLIDING-WINDOW mean over the Tu-l+1 possible block starts.
-    means = LocalProjections._position_means(U, ℓ)
-    @test size(means) == (ℓ, n)
-    for s in 1:ℓ, j in 1:n
-
-        @test means[s, j] ≈ mean(U[s:(Tu - ℓ + s), j]) rtol=1e-12
-    end
-    # Each position averages Tu - l + 1 terms, not Tu/l of them.
-    @test length(1:(Tu - ℓ + 1)) == Tu - ℓ + 1
-
-    # It is NOT the stride-l mean used by MacroEconometricTools.bootstrap_irf_block.
-    stride_means = [mean(U[s:ℓ:(Tu - ℓ + s), j]) for s in 1:ℓ, j in 1:n]
-    @test !isapprox(means, stride_means; rtol = 1e-3)
-
-    # Block layout with fixed starts is deterministic and matches the reference.
-    starts = [0, 5, 40, 60, 17, 33, 80, 2, 51]   # cld(97, 12) == 9 blocks
-    @test length(starts) == cld(Tu, ℓ)
-    dest = Matrix{Float64}(undef, Tu, n)
-    LocalProjections._mbb_residuals!(dest, U, means, starts)
-    for (b, off) in enumerate(starts), s in 1:ℓ
-
-        row = (b - 1) * ℓ + s
-        row > Tu && continue
-        for j in 1:n
-            @test dest[row, j] ≈ U[off + s, j] - means[s, j] rtol=1e-12
-        end
-    end
-
-    # Recentering makes the resampled residuals mean-zero in expectation: averaging
-    # over every admissible start at a fixed position gives exactly zero.
-    for s in 1:ℓ, j in 1:n
-
-        @test abs(mean(U[(0:(Tu - ℓ)) .+ s, j] .- means[s, j])) < 1e-10
-    end
-end
-
-@testitem "VAR simulation, impact vector and IRF recursion" tags = [
-    :bootstrap, :verification] begin
-    using LocalProjections
-    using LinearAlgebra, StableRNGs, Statistics, Test
-
-    # _var_simulate is var_sim.m: initial rows verbatim, then the VAR recursion.
-    c = [0.1, -0.2]
-    A = Array{Float64}(undef, 2, 2, 2)
-    A[:, :, 1] = [0.5 0.1; 0.0 0.6]
-    A[:, :, 2] = [0.1 0.0; 0.2 -0.1]
-    rng = StableRNG(5)
-    Tu = 50
-    Ustar = randn(rng, Tu, 2)
-    Yinit = randn(rng, 2, 2)
-    Y = LocalProjections._var_simulate(c, A, Ustar, Yinit)
-    @test size(Y) == (2 + Tu, 2)
-    @test Y[1:2, :] == Yinit
-    for t in 3:(2 + Tu)
-        expected = c .+ A[:, :, 1] * Y[t - 1, :] .+ A[:, :, 2] * Y[t - 2, :] .+
-                   Ustar[t - 2, :]
-        @test Y[t, :] ≈ expected rtol=1e-12
-    end
-
-    # _var_impact with innov_index = 1 is Sigma[:,1]/Sigma[1,1] = L[:,1]/L11.
-    rngu = StableRNG(6)
-    U = randn(rngu, 500, 3) * [1.0 0.0 0.0; 0.4 1.0 0.0; -0.3 0.2 1.0]'
-    ν = LocalProjections._var_impact(U, 1)
-    S = (U' * U) ./ size(U, 1)
-    @test ν ≈ S[:, 1] ./ S[1, 1] rtol=1e-10
-    L = cholesky(Symmetric(S)).L
-    @test ν ≈ L[:, 1] ./ L[1, 1] rtol=1e-10
-    @test ν[1] ≈ 1.0 rtol=1e-12   # unit-impact normalization
-
-    # _var_irf is the var_ir.m recursion Theta_h = sum_l A_l Theta_{h-l}.
-    H = 6
-    irf = LocalProjections._var_irf(A, [1.0, 0.0], H)
-    Θ = [Matrix{Float64}(I, 2, 2)]
-    for h in 1:H
-        M = zeros(2, 2)
-        for l in 1:min(h, 2)
-            M += A[:, :, l] * Θ[h - l + 1]
-        end
-        push!(Θ, M)
-    end
-    for h in 0:H
-        @test irf[:, h + 1] ≈ Θ[h + 1] * [1.0, 0.0] rtol=1e-12
-    end
-end
-
-@testitem "Hall percentile-t intervals match boot_ci.m" tags = [:bootstrap, :verification] begin
-    using LocalProjections
-    using DataFrames, Random, StableRNGs, Statistics, StatsModels, Test
-
-    rng = StableRNG(20260901)
-    T = 220
-    sh = zeros(T)
-    y = zeros(T)
-    for t in 2:T
-        sh[t] = 0.3 * sh[t - 1] + randn(rng)
-        y[t] = 0.6 * y[t - 1] + 0.8 * sh[t] + randn(rng)
-    end
-    df = DataFrame(shock = sh, y = y)
-    m = lp(@formula(leads(y) ~ shock + lags(y, 2) + lags(shock, 2)), df; horizon = 6)
-    b = varbootstrap(m, df; vars = [:shock, :y], nlags = 2, nboot = 300,
-        rng = StableRNG(77))
-
-    level = 0.90
-    α = 1 - level
-
-    # Direct port of _estim/boot_ci.m for all three constructions.
-    for h in 1:(b.horizon + 1)
-        θs = [x for x in b.theta_boot[:, h] if isfinite(x)]
-        ts = [(b.theta_boot[i, h] - b.pseudo_truth[h]) / b.se_boot[i, h]
-              for i in 1:b.nboot
-              if isfinite(b.theta_boot[i, h]) && isfinite(b.se_boot[i, h]) &&
-                     b.se_boot[i, h] > 0]
-
-        ql, qu = quantile(θs, α / 2), quantile(θs, 1 - α / 2)
-        tl, tu = quantile(ts, α / 2), quantile(ts, 1 - α / 2)
-
-        efron = (ql, qu)
-        hall = (b.theta[h] + b.pseudo_truth[h] - qu,
-            b.theta[h] + b.pseudo_truth[h] - ql)
-        # Note the quantile reversal on the studentized statistic.
-        hall_t = (b.theta[h] - b.se[h] * tu, b.theta[h] - b.se[h] * tl)
-
-        se_ = summarize(b; level = level, method = :efron)
-        sh_ = summarize(b; level = level, method = :hall)
-        st_ = summarize(b; level = level, method = :hall_t)
-
-        @test (se_.lower[h], se_.upper[h]) == efron
-        @test (sh_.lower[h], sh_.upper[h]) == hall
-        @test (st_.lower[h], st_.upper[h]) == hall_t
-    end
-
-    # The three constructions genuinely differ.
-    st = summarize(b; level = level, method = :hall_t)
-    sh_ = summarize(b; level = level, method = :hall)
-    se_ = summarize(b; level = level, method = :efron)
-    @test st.lower != sh_.lower
-    @test st.lower != se_.lower
-    @test sh_.lower != se_.lower
-
-    # Percentile-t bands are asymmetric around the point estimate.
-    @test !isapprox(st.upper .- st.coef, st.coef .- st.lower; rtol = 1e-6)
-end
-
-@testitem "varbootstrap end-to-end conventions" tags = [:bootstrap, :api] begin
-    using LocalProjections
-    using DataFrames, LinearAlgebra, Random, StableRNGs, Statistics, StatsModels, Test
-    using CovarianceMatrices
-
-    rng = StableRNG(20260902)
-    T = 240
-    sh = zeros(T)
-    y = zeros(T)
-    for t in 2:T
-        sh[t] = 0.3 * sh[t - 1] + randn(rng)
-        y[t] = 0.6 * y[t - 1] + 0.8 * sh[t] + randn(rng)
-    end
-    df = DataFrame(shock = sh, y = y)
-    m = lp(@formula(leads(y) ~ shock + lags(y, 4) + lags(shock, 4)), df; horizon = 10)
-
-    b = varbootstrap(m, df; vars = [:shock, :y], nlags = 4, nboot = 200,
-        rng = StableRNG(1))
-    @test b isa LPBootstrap
-    @test b.nboot == 200
-    @test b.nfail == 0
-    @test b.biascorrected && b.popecorrected
-    @test b.blocklength == ceil(Int, 5.03 * T^(1 / 4))
-    @test size(b.theta_boot) == (200, 11)
-    @test size(b.se_boot) == (200, 11)
-
-    # Reported path is the bias-corrected one; SEs are those of the UNCORRECTED
-    # coefficients (the reference never recomputes them).
-    @test b.theta ≈ coefpath(biascorrect(m); term = :shock) rtol=1e-12
-    @test b.se ≈ stderror(vcov(HC1(), m); term = :shock) rtol=1e-12
-    @test !isapprox(b.theta, coefpath(m; term = :shock); rtol = 1e-8)
-
-    # Property forwarding to the inner LP.
-    @test b.horizon == 10
-    @test b.shock == :shock
-    @test b.response == :y
-    @test coefpath(b) == b.theta
-
-    # Reproducibility: identical output threaded and unthreaded.
-    b_serial = varbootstrap(m, df; vars = [:shock, :y], nlags = 4, nboot = 100,
-        rng = StableRNG(42), threaded = false)
-    b_thread = varbootstrap(m, df; vars = [:shock, :y], nlags = 4, nboot = 100,
-        rng = StableRNG(42), threaded = true)
-    @test b_serial.theta_boot == b_thread.theta_boot
-    @test b_serial.se_boot == b_thread.se_boot
-
-    # Script-23 variant: no Pope, no Herbst-Johannsen.
-    b23 = varbootstrap(m, df; vars = [:shock, :y], nlags = 4, nboot = 100,
-        rng = StableRNG(1), biascorrect = false, popecorrect = false)
-    @test !b23.biascorrected && !b23.popecorrected
-    @test isnan(b23.pope_delta)
-    @test b23.theta ≈ coefpath(m; term = :shock) rtol=1e-12
-    @test !isapprox(b23.theta, b.theta; rtol = 1e-8)
-
-    # summarize returns a usable IRFSummary with pointwise bands.
-    s = summarize(b; level = 0.90)
-    @test s isa IRFSummary
-    @test s.level == 0.90
-    @test length(s.lower) == 11
-    # Ordering is guaranteed (q_{1-a/2} >= q_{a/2}); containment of the point
-    # estimate is NOT: a Hall percentile-t interval corrects for bias, so it can
-    # sit entirely to one side of theta-hat when the bootstrap t-distribution is
-    # shifted. Do not assert containment here.
-    @test all(s.lower .<= s.upper)
-    @test DataFrame(s) isa DataFrame
-
-    # Wider level gives wider bands.
-    s68 = summarize(b; level = 0.68)
-    @test all(s68.upper .- s68.lower .<= s.upper .- s.lower .+ 1e-12)
-
-    # Pseudo-truth is the VAR-implied response, not the LP path.
-    @test !isapprox(b.pseudo_truth, b.theta; rtol = 1e-6)
-    @test length(b.pseudo_truth) == 11
-
-    io = IOBuffer()
-    show(io, b)
-    @test occursin("LPBootstrap", String(take!(io)))
-    show(io, MIME"text/plain"(), b)
-    out = String(take!(io))
-    @test occursin("moving-block", out)
-    @test occursin("Herbst", out)
-    @test occursin("Pope", out)
-end
-
-@testitem "varbootstrap plotting and as_irf_result" tags = [:bootstrap, :api] begin
-    using LocalProjections
-    using DataFrames, Plots, StableRNGs, StatsModels, Test
-
-    rng = StableRNG(20260903)
-    T = 200
-    sh = randn(rng, T)
-    y = zeros(T)
-    for t in 2:T
-        y[t] = 0.5 * y[t - 1] + 0.9 * sh[t] + randn(rng)
-    end
-    df = DataFrame(shock = sh, y = y)
-    m = lp(@formula(leads(y) ~ shock + lags(y, 2)), df; horizon = 8)
-    b = varbootstrap(m, df; vars = [:shock, :y], nlags = 2, nboot = 150,
-        rng = StableRNG(3))
-
-    # Plot recipe: single and multiple levels, and each interval method.
-    @test plot(b) isa Plots.Plot
-    @test plot(b; levels = [0.68, 0.90]) isa Plots.Plot
-    @test plot(b; levels = [0.90], method = :efron) isa Plots.Plot
-    @test plot(b; levels = [0.90], method = :hall) isa Plots.Plot
-    @test_throws ArgumentError plot(b; levels = [1.5])
-
-    r = as_irf_result(b; coverage = [0.68, 0.90])
-    @test r isa LocalProjectionIRFResult
-    @test r.coverage == [0.68, 0.90]
-    @test r.metadata.bootstrap == true
-    @test r.metadata.bootstrap_method == :hall_t
-    @test r.metadata.nboot == 150
-    @test r.metadata.bias_corrected == true
-    @test r.metadata.pope_corrected == true
-    @test r.metadata.var_lags == 2
-    @test vec(r.data[1, 1, :]) ≈ b.theta rtol=1e-12
-
-    # Bands carried over are the bootstrap ones, and asymmetric.
-    s90 = summarize(b; level = 0.90)
-    @test vec(r.lower[2][1, 1, :]) ≈ s90.lower rtol=1e-12
-    @test vec(r.upper[2][1, 1, :]) ≈ s90.upper rtol=1e-12
-
-    @test_throws ArgumentError as_irf_result(b; term = :y)
-end
-
-@testitem "varbootstrap guards and edge cases" tags = [:bootstrap, :api] begin
-    using LocalProjections
-    using DataFrames, StableRNGs, StatsModels, Test
-
-    rng = StableRNG(20260904)
-    T = 180
-    sh = randn(rng, T)
-    y = zeros(T)
-    z = randn(rng, T)
-    for t in 2:T
-        y[t] = 0.5 * y[t - 1] + 0.9 * sh[t] + randn(rng)
-    end
-    df = DataFrame(shock = sh, y = y, z = z)
-    m = lp(@formula(leads(y) ~ shock + lags(y, 2)), df; horizon = 5)
-
-    # The shock must be in the VAR data vector.
-    @test_throws ArgumentError varbootstrap(m, df; vars = [:y], nlags = 2, nboot = 5)
-    # Every variable the LP formula needs must be simulated.
-    @test_throws ArgumentError varbootstrap(m, df; vars = [:shock], nlags = 2, nboot = 5)
-    # Block length must fit the residual sample.
-    @test_throws ArgumentError varbootstrap(m, df; vars = [:shock, :y], nlags = 2,
-        nboot = 5, blocklength = 10_000)
-    @test_throws ArgumentError varbootstrap(m, df; vars = [:shock, :y], nlags = 2,
-        nboot = 0)
-    # Interval method must be recognized.
-    # The low-draw warning is part of the contract (guide 5 checklist).
-    b = @test_logs (:warn, r"usable draws") match_mode=:any varbootstrap(
-        m, df; vars = [:shock, :y], nlags = 2, nboot = 50, rng = StableRNG(8))
-    @test_throws ArgumentError summarize(b; method = :bogus)
-    @test_throws ArgumentError summarize(b; level = 1.5)
-    @test_throws ArgumentError coefpath(b; term = :y)
-
-    # missing / NaN in the VAR columns are rejected (guide LP-1).
-    dfm = copy(df)
-    dfm.y = Vector{Union{Missing, Float64}}(dfm.y)
-    dfm.y[20] = missing
-    @test_throws ArgumentError varbootstrap(m, dfm; vars = [:shock, :y], nlags = 2,
-        nboot = 5)
-    dfn = copy(df)
-    dfn.y[20] = NaN
-    @test_throws ArgumentError varbootstrap(m, dfn; vars = [:shock, :y], nlags = 2,
-        nboot = 5)
-
-    # Anchored responses are not supported.
-    ma = lp(@formula(leads(y) | shock ~ shock + lags(y, 2)), df; horizon = 4)
-    @test_throws ArgumentError varbootstrap(ma, df; vars = [:shock, :y], nlags = 2,
-        nboot = 5)
-
-    # IV local projections are rejected, as for biascorrect.
-    x = 0.7 .* z .+ randn(StableRNG(9), T)
-    dfiv = copy(df)
-    dfiv.x = x
-    miv = lpiv(@formula(leads(y) ~ (x ~ z) + lags(y, 2)), dfiv; horizon = 4)
-    @test_throws ArgumentError varbootstrap(miv, dfiv; vars = [:x, :y], nlags = 2,
-        nboot = 5)
-
-    # cumul responses are supported and the pseudo-truth is cumulated.
-    mc = lp(@formula(cumul(y) ~ shock + lags(y, 2)), df; horizon = 6)
-    bc = varbootstrap(mc, df; vars = [:shock, :y], nlags = 2, nboot = 120,
-        rng = StableRNG(10))
-    bl = varbootstrap(lp(@formula(leads(y) ~ shock + lags(y, 2)), df; horizon = 6),
-        df; vars = [:shock, :y], nlags = 2, nboot = 120, rng = StableRNG(10))
-    @test bc.pseudo_truth ≈ cumsum(bl.pseudo_truth) rtol=1e-12
-    @test all(isfinite, summarize(bc).lower)
-
-    # Tautological h = 0 (response === shock) has a degenerate band, not a NaN.
-    mt = lp(@formula(leads(shock) ~ shock + lags(y, 2)), df; horizon = 5)
-    bt = varbootstrap(mt, df; vars = [:shock, :y], nlags = 2, nboot = 120,
-        rng = StableRNG(12))
-    st = summarize(bt; level = 0.90)
-    @test st.coef[1] == 1.0
-    @test st.se[1] == 0.0
-    @test st.lower[1] == 1.0 && st.upper[1] == 1.0
-    @test all(isfinite, st.lower) && all(isfinite, st.upper)
-end
-
-@testitem "horizon-tracking cumul() on the lpiv right-hand side" tags = [
-    :lpiv, :cumul, :verification] begin
-    using LocalProjections
-    using DataFrames, LinearAlgebra, StableRNGs, StatsModels, Test
-
-    rng = StableRNG(20260901)
-    T = 240
-    z = zeros(T)
-    g = zeros(T)
-    y = zeros(T)
-    for t in 3:T
-        z[t] = 0.4 * z[t - 1] + randn(rng)
-        g[t] = 0.6 * g[t - 1] + 0.8 * z[t] + 0.3 * randn(rng)
-        y[t] = 0.5 * y[t - 1] + 0.7 * g[t] + randn(rng)
-    end
-    df = DataFrame(y = y, g = g, z = z)
-
-    H = 6
-    res = lpiv(@formula(cumul(y) ~ (cumul(g) ~ z) + lags(y, 2) + lags(g, 2)),
-        df; horizon = H)
-
-    # Coefficient names must stay horizon-invariant, otherwise coefpath /
-    # summarize / the plot recipes cannot follow the path.
-    @test res.coef_names == ["(Intercept)", "y_lag1", "y_lag2", "g_lag1", "g_lag2",
-        "cumul(g)"]
-    @test res.shock == Symbol("cumul(g)")
-    @test res.horizon == H
-
-    path = coefpath(res; term = res.shock)
-    @test length(path) == H + 1
-    @test all(isfinite, path)
-
-    # Reference: build the cumulative columns by hand and run one just-identified
-    # 2SLS per horizon, the way jordagk.do does.
-    function manual(h)
-        cum(v) = Union{Missing, Float64}[t + h <= T ? sum(v[t:(t + h)]) : missing
-                                         for t in 1:T]
-        L(v, k) = Union{Missing, Float64}[i - k >= 1 ? v[i - k] : missing for i in 1:T]
-        cy, cg = cum(y), cum(g)
-        ctrl = [L(y, 1), L(y, 2), L(g, 1), L(g, 2)]
-        cols = vcat([cy, cg, z], ctrl)
-        idx = findall(t -> all(c -> !ismissing(c[t]), cols), 1:T)
-        W = hcat(ones(length(idx)), [Float64.(c[idx]) for c in ctrl]...)
-        X = hcat(W, Float64.(cg[idx]))
-        Z = hcat(W, Float64.(z[idx]))
-        b = (Z'X) \ (Z'Float64.(cy[idx]))
-        (nobs = length(idx), coef = b[end])
-    end
-
-    for h in 0:H
-        m = manual(h)
-        @test path[h + 1] ≈ m.coef rtol=1e-10
-        @test res.models[h + 1].nobs == m.nobs
-    end
-
-    # The usable sample shrinks by one observation per horizon: the cumulative
-    # response and regressor both need y_{t+h}, g_{t+h}.
-    @test [m.nobs for m in res.models] == [res.models[1].nobs - h for h in 0:H]
-end
-
-@testitem "horizon-tracking cumul()/leads() on the lp right-hand side" tags = [
-    :cumul, :leads, :verification] begin
-    using LocalProjections
-    using DataFrames, StableRNGs, StatsModels, Test
-
-    rng = StableRNG(4242)
-    T = 200
-    x = randn(rng, T)
-    y = zeros(T)
-    for t in 2:T
-        y[t] = 0.4 * y[t - 1] + 0.9 * x[t] + randn(rng)
-    end
-    df = DataFrame(y = y, x = x)
-
-    H = 4
-    res = lp(@formula(cumul(y) ~ cumul(x) + lags(y, 1)), df; horizon = H)
-    @test res.coef_names == ["(Intercept)", "cumul(x)", "y_lag1"]
-
-    path = coefpath(res; term = Symbol("cumul(x)"))
-    for h in 0:H
-        cum(v) = Union{Missing, Float64}[t + h <= T ? sum(v[t:(t + h)]) : missing
-                                         for t in 1:T]
-        cy, cx = cum(y), cum(x)
-        ly = Union{Missing, Float64}[i > 1 ? y[i - 1] : missing for i in 1:T]
-        idx = findall(t -> !ismissing(cy[t]) && !ismissing(cx[t]) && !ismissing(ly[t]), 1:T)
-        X = hcat(ones(length(idx)), Float64.(cx[idx]), Float64.(ly[idx]))
-        b = X \ Float64.(cy[idx])
-        @test path[h + 1] ≈ b[2] rtol=1e-10
-    end
-
-    # leads() on the RHS tracks the horizon in the same way.
-    resl = lp(@formula(leads(y) ~ leads(x) + lags(y, 1)), df; horizon = 2)
-    @test resl.coef_names == ["(Intercept)", "leads(x)", "y_lag1"]
-    pl = coefpath(resl; term = Symbol("leads(x)"))
-    # y_{t+h} on x_{t+h} reproduces the static contemporaneous regression at every h.
-    static = lp(@formula(leads(y) ~ x + lags(y, 1)), df; horizon = 0)
-    @test pl[1] ≈ coefpath(static; term = :x)[1] rtol=1e-10
-    @test all(isfinite, pl)
-end
-
-@testitem "explicit horizons pin RHS terms and leave the static path intact" tags = [
-    :cumul, :api] begin
-    using LocalProjections
-    using DataFrames, StableRNGs, StatsModels, Test
-
-    rng = StableRNG(77)
-    T = 160
-    x = randn(rng, T)
-    y = cumsum(randn(rng, T)) .+ 0.5 .* x
-    df = DataFrame(y = y, x = x)
-
-    # cumul(x, 2) carries its own horizon, so the column is the SAME at every h
-    # and the coefficient name records the pinned horizon.
-    pinned = lp(@formula(cumul(y) ~ cumul(x, 2)), df; horizon = 3)
-    @test pinned.coef_names == ["(Intercept)", "cumul(x, 2)"]
-
-    # Reference: the pinned column is the same at every horizon, only the
-    # cumulative response moves.
-    cx2 = Union{Missing, Float64}[t + 2 <= T ? sum(x[t:(t + 2)]) : missing for t in 1:T]
-    path = coefpath(pinned; term = Symbol("cumul(x, 2)"))
-    for h in 0:3
-        cy = Union{Missing, Float64}[t + h <= T ? sum(y[t:(t + h)]) : missing
-                                     for t in 1:T]
-        idx = findall(t -> !ismissing(cy[t]) && !ismissing(cx2[t]), 1:T)
-        X = hcat(ones(length(idx)), Float64.(cx2[idx]))
-        @test path[h + 1] ≈ (X \ Float64.(cy[idx]))[2] rtol=1e-10
-    end
-
-    # A formula with no horizon-tracking RHS term is unaffected by the change.
-    plain = lp(@formula(leads(y) ~ x), df; horizon = 3)
-    @test plain.coef_names == ["(Intercept)", "x"]
-    @test length(coefpath(plain; term = :x)) == 4
-end
-
-@testitem "horizon-tracking RHS terms are rejected by biascorrect and varbootstrap" tags = [
-    :biascorr, :bootstrap, :cumul] begin
-    using LocalProjections
-    using DataFrames, Random, StatsModels, Test
-
-    rng = Xoshiro(20260901)
-    T = 240
-    x = randn(rng, T)
-    y = zeros(T)
-    for t in 2:T
-        y[t] = 0.5 * y[t - 1] + 0.8 * x[t] + randn(rng)
-    end
-    df = DataFrame(y = y, x = x)
-
-    # The raw-formula detector: bare cumul()/leads() on the RHS, anywhere.
-    tracks = LocalProjections._rhs_tracks_horizon
-    @test tracks(@formula(leads(y) ~ x + cumul(x)))
-    @test tracks(@formula(leads(y) ~ leads(x) + lags(y, 2)))
-    @test tracks(@formula(cumul(y) ~ (cumul(x) ~ z) + lags(y, 2)))   # IV block
-    @test tracks(@formula(leads(y) ~ x & cumul(x)))                 # interaction
-    @test !tracks(@formula(cumul(y) ~ x + lags(y, 2)))               # LHS only
-    @test !tracks(@formula(leads(y) ~ cumul(x, 3) + leads(x, 2)))    # pinned
-
-    m_dyn = lp(@formula(leads(y) ~ x + cumul(x) + lags(y, 2)), df;
-        horizon = 6, shock = :x)
-    @test_throws ArgumentError biascorrect(m_dyn)
-    err = try
-        biascorrect(m_dyn)
-    catch e
-        e
-    end
-    @test occursin("horizon-tracking", err.msg)
-
-    # Without the guard the bootstrap would run and center the t-statistic on
-    # the VAR impulse response, which is not what this regression estimates.
-    @test_throws ArgumentError varbootstrap(m_dyn, df; vars = [:x, :y], nlags = 2,
-        nboot = 5, biascorrect = false, rng = Xoshiro(1))
-    err = try
-        varbootstrap(m_dyn, df; vars = [:x, :y], nlags = 2, nboot = 5,
-            biascorrect = false, rng = Xoshiro(1))
-    catch e
-        e
-    end
-    @test occursin("horizon-tracking", err.msg)
-
-    # A pinned horizon is not horizon-tracking. It still fails the correction,
-    # but on the structural sample check (cumul(x, 2) loses its last two rows
-    # at every horizon, so the sample is not the h = 0 one truncated by h).
-    m_pin = lp(@formula(leads(y) ~ x + cumul(x, 2) + lags(y, 2)), df;
-        horizon = 3, shock = :x)
-    err = try
-        biascorrect(m_pin)
-    catch e
-        e
-    end
-    @test err isa ArgumentError
-    @test !occursin("horizon-tracking", err.msg)
-    @test occursin("truncated", err.msg)
-end
-
-@testitem "state-dependent lp equals the hand-built regime interactions" tags = [
-    :state, :core, :verification] begin
-    using LocalProjections
-    using DataFrames, StatsModels, StatsBase, Test, Random
-    using CovarianceMatrices: HR0, Bartlett
-    using Regress: ols
-
-    rng = Random.Xoshiro(20260921)
-    n = 240
-    x = randn(rng, n)
-    s = Float64.(rand(rng, n) .< 0.4)
-    y = zeros(n)
-    for t in 2:n
-        y[t] = 0.5y[t - 1] + (s[t - 1] == 1 ? 1.5 : 0.5) * x[t] + randn(rng)
-    end
-    df = DataFrame(y = y, x = x, s = s)
-
-    r = lp(@formula(leads(y) ~ x + lags(y, 2)), df; horizon = 4, state = :s)
-    @test coefnames(r) == ["(Intercept)_s0", "x_s0", "y_lag1_s0", "y_lag2_s0",
-        "(Intercept)_s1", "x_s1", "y_lag1_s1", "y_lag2_s1"]
-    @test r.shock === :x_s0
-    @test r.state == LPState(:s, 1, ("s0", "s1"), :x)
-    @test Int.(nobs.(r.models)) == [n - 2 - h for h in 0:4]
-
-    # Same column space as the Ramey-Zubairy lists: L.state, a constant and the
-    # regressors interacted with L.state and 1 - L.state
-    for h in (0, 3)
-        ts = 3:(n - h)
-        I1 = s[ts .- 1]
-        Xh = hcat(ones(length(ts)), I1, x[ts] .* (1 .- I1), x[ts] .* I1,
-            y[ts .- 1] .* (1 .- I1), y[ts .- 1] .* I1, y[ts .- 2] .* (1 .- I1), y[ts .- 2] .*
-                                                                                I1)
-        mh = ols(Xh, y[ts .+ h]; has_intercept = false)
-        @test coefpath(r; term = :x_s0)[h + 1] ≈ coef(mh)[3] rtol = 1e-10
-        @test coefpath(r; term = :x_s1)[h + 1] ≈ coef(mh)[4] rtol = 1e-10
-        se = sqrt.(vcov(HR0(), r).variances[:x_s1])
-        @test se[h + 1] ≈ sqrt(vcov(HR0(), mh)[4, 4]) rtol = 1e-8
-    end
-
-    # ... and as two separate regressions, one per regime
-    ts = 3:n
-    for (k, term) in ((0.0, :x_s0), (1.0, :x_s1))
-        keep = ts[s[ts .- 1] .== k]
-        mk = ols(hcat(ones(length(keep)), x[keep], y[keep .- 1], y[keep .- 2]), y[keep];
-            has_intercept = false)
-        @test coefpath(r; term)[1] ≈ coef(mk)[2] rtol = 1e-10
-    end
-
-    # labels, shock designation, state already timed
-    df.sl = [missing; s[1:(end - 1)]]
-    r2 = lp(@formula(leads(y) ~ lags(y, 2) + x), df; horizon = 4, state = :sl,
-        statelag = 0, regimes = ("lo", "hi"), shock = :x)
-    @test r2.shock === :x_lo
-    @test coefpath(r2; term = :x_hi) ≈ coefpath(r; term = :x_s1) rtol = 1e-10
-    r3 = lp(@formula(leads(y) ~ lags(y, 2) + x), df; horizon = 2, state = :s, shock = :x_s1)
-    @test r3.shock === :x_s1 && r3.state.shock === :x
-
-    # statetest uses the covariance between the regimes
-    st = statetest(r, Bartlett(4))
-    @test st.diff ≈ coefpath(r; term = :x_s1) .- coefpath(r; term = :x_s0)
-    @test all(0 .<= st.pvalue .<= 1)
-    @test st.pvalue[1] < 0.01                     # 1.5 vs 0.5 on impact
-    @test size(DataFrame(st)) == (5, 5)
-    @test (r + vcov(Bartlett(4))).state == r.state
-
-    # tautological h = 0: the shock is the response, in both regimes
-    rt = lp(@formula(leads(x) ~ x + lags(y, 1)), df; horizon = 2, state = :s)
-    @test rt.tautological_h0
-    @test coefpath(rt; term = :x_s0)[1] == 1.0 && coefpath(rt; term = :x_s1)[1] == 1.0
-    @test vcov(HR0(), rt).variances[:x_s1][1] == 0.0
-    @test isnan(statetest(rt, HR0()).stat[1])
-end
-
-@testitem "state-dependent lp/lpiv reproduce Ramey-Zubairy (ivreg2, Stata 19.5)" tags = [
-    :state, :iv, :weakiv, :verification] begin
-    using LocalProjections
-    using DataFrames, StatsModels, StatsBase, Test
-    using CovarianceMatrices: Bartlett
-
-    # docs/src/data/ramey_zubairy.csv, read without CSV.jl
-    path = joinpath(@__DIR__, "..", "docs", "src", "data", "ramey_zubairy.csv")
-    lines = readlines(path)
-    hdr = Symbol.(split(lines[1], ","))
-    cols = [Union{Missing, Float64}[] for _ in hdr]
-    for l in lines[2:end], (j, v) in enumerate(split(l, ","; keepempty = true))
-
-        push!(cols[j], isempty(v) ? missing : parse(Float64, v))
-    end
-    rz = DataFrame(cols, hdr)
-
-    # Reference: stata_test/rz_compare.do, -ivreg2 ..., robust bw(6)-, h = 8, news shock
-    r = lp(@formula(leads(y) ~ newsy + lags(newsy, 4) + lags(y, 4) + lags(g, 4)), rz;
-        horizon = 8, state = :slack, regimes = ("exp", "rec"))
-    n = nobs(r.models[9])
-    @test n == 492
-    @test coefpath(r; term = :newsy_exp)[9] ≈ 8.98901816161449e-02 rtol = 1e-9
-    @test coefpath(r; term = :newsy_rec)[9] ≈ 3.70392317221167e-01 rtol = 1e-9
-    # ivreg2 applies no n/(n-k) to an OLS kernel HAC; Regress does (REG-2)
-    se = sqrt.(vcov(Bartlett(6), r).variances[:newsy_rec] .* (n - 28) ./ n)
-    @test se[9] ≈ 8.10147008674164e-02 rtol = 1e-8
-
-    m = lpiv(
-        @formula(cumul(y) ~ (cumul(g) ~ newsy) + lags(newsy, 4) + lags(y, 4) +
-                            lags(g, 4)),
-        rz;
-        horizon = 8, state = :slack, regimes = ("exp", "rec"))
-    gexp, grec = Symbol("cumul(g)_exp"), Symbol("cumul(g)_rec")
-    @test m.shock === gexp
-    @test m.endogenous_names == ["cumul(g)_exp", "cumul(g)_rec"]
-    @test m.instrument_names == ["newsy_exp", "newsy_rec"]
-    @test coefpath(m; term = gexp)[9] ≈ 5.90610510995029e-01 rtol = 1e-9
-    @test coefpath(m; term = grec)[9] ≈ 6.20128665175688e-01 rtol = 1e-9
-    V = vcov(Bartlett(6), m)
-    @test sqrt(V.variances[gexp][9]) ≈ 1.00411664695866e-01 rtol = 1e-8
-    @test sqrt(V.variances[grec][9]) ≈ 1.14414760866032e-01 rtol = 1e-8
-
-    st = statetest(m, Bartlett(6))
-    @test st.stat[9] ≈ 3.49868427322225e-02 rtol = 1e-7
-    @test st.pvalue[9] ≈ 8.51623232302201e-01 rtol = 1e-7
-
-    # Montiel Olea-Pflueger effective F of the one-regime regression (-weakivtest-)
-    mh = m + vcov(Bartlett(6))
-    @test weakivtest(mh, 8; regime = "rec").F_eff ≈ 1.86280736822122e+02 rtol = 1e-8
-    @test weakivtest(mh, 8; regime = 2).F_eff == weakivtest(mh, 8; regime = :rec).F_eff
-    @test length(weakivtest(mh; regime = 1)) == 9
-    @test_throws ArgumentError weakivtest(mh, 8)
-    @test_throws ArgumentError weakivtest(mh, 8; regime = "boom")
-end
-
-@testitem "state-dependent projections: guards" tags = [:state, :api] begin
-    using LocalProjections
-    using DataFrames, StatsModels, Test, Random
-    using CovarianceMatrices: HR0
-
-    rng = Random.Xoshiro(7)
+    rng = StableRNG(20261019)
     n = 120
-    df = DataFrame(y = randn(rng, n), x = randn(rng, n), z = randn(rng, n),
-        s = Float64.(rand(rng, n) .< 0.5), bad = 2 .* rand(rng, n), w = rand(rng, n))
-    f = @formula(leads(y) ~ x + lags(y, 1))
+    df = DataFrame(
+        y = randn(rng, n), x = randn(rng, n), w = randn(rng, n), z = randn(rng, n)
+    )
 
-    @test_throws ArgumentError lp(f, df; horizon = 2, state = :bad)
-    @test_throws ArgumentError lp(f, df; horizon = 2, state = :s, statelag = -1)
-    @test_throws ArgumentError lp(f, df; horizon = 2, state = :s, regimes = ("a",))
-    @test_throws ArgumentError lp(f, df; horizon = 2, state = :s, regimes = ("a", "a"))
-    @test_throws ArgumentError lp(f, df; horizon = 2, state = :s, shock = :nope)
+    @test lp(@formula(leads(y) ~ x), df; horizon = 1) isa AbstractLocalProjection
+    @test lpiv(TSLS(), @formula(leads(y) ~ (x ~ z)), df; horizon = 1) isa
+        AbstractLocalProjection
 
-    # a smooth weight in [0, 1] (Auerbach-Gorodnichenko) is accepted
-    rw = lp(f, df; horizon = 2, state = :w)
-    @test length(coefnames(rw)) == 6
+    # Default shock: first regressor other than the intercept, chosen by name
+    @test lp(@formula(leads(y) ~ w + x), df; horizon = 1).shock == :w
+    r0 = lp(@formula(leads(y) ~ 0 + x + w), df; horizon = 1)
+    @test r0.shock == :x
+    @test r0.coef_names == ["x", "w"]
+    @test lp(@formula(leads(y) ~ 0 + x), df; horizon = 1).shock == :x
 
-    r = lp(f, df; horizon = 2, state = :s)
-    @test_throws ArgumentError biascorrect(r)
-    @test_throws ArgumentError varbootstrap(r, df; vars = [:x, :y], nlags = 1, nboot = 5)
-    @test_throws ArgumentError statetest(lp(f, df; horizon = 2), HR0())
-    @test_throws ArgumentError statetest(r, HR0(); term = :nope)
+    # IV default shock: first endogenous variable, wherever it appears
+    @test lpiv(TSLS(), @formula(leads(y) ~ w + (x ~ z)), df; horizon = 1).shock == :x
+    riv0 = lpiv(TSLS(), @formula(leads(y) ~ 0 + (x ~ z)), df; horizon = 1)
+    @test riv0.shock == :x
+    @test riv0.coef_names == ["x"]
 
-    # linear results are untouched, and `regime` is rejected there
-    @test lp(f, df; horizon = 2).state === nothing
-    miv = lpiv(@formula(leads(y) ~ (x ~ z) + lags(y, 1)), df; horizon = 2)
-    @test miv.state === nothing
-    @test_throws ArgumentError weakivtest(miv, 1; regime = 1)
-    @test occursin("State:", sprint(show, MIME("text/plain"), r))
+    # Explicit shock
+    @test lp(@formula(leads(y) ~ x + w), df; horizon = 1, shock = :w).shock == :w
+    @test lpiv(TSLS(), @formula(leads(y) ~ (x ~ z) + w), df; horizon = 1, shock = :w).shock ==
+        :w
+
+    # Unknown shock: same message for OLS and IV
+    msg = "shock `nope` is not a coefficient of the model; available coefficients: (Intercept), x"
+    @test_throws msg lp(@formula(leads(y) ~ x), df; horizon = 1, shock = :nope)
+    @test_throws msg lpiv(TSLS(), @formula(leads(y) ~ (x ~ z)), df; horizon = 1, shock = :nope)
+
+    # The shock is validated before any horizon is fitted
+    df_nan = DataFrame(y = fill(NaN, n), x = df.x, z = df.z)
+    @test_throws "shock `nope`" lp(@formula(leads(y) ~ x), df_nan; horizon = 1, shock = :nope)
+    @test_throws "No complete observations available for horizon 0" lp(
+        @formula(leads(y) ~ x), df_nan; horizon = 1
+    )
+
+    # Response without a horizon transformation: same message for OLS and IV
+    msg = "the response must use leads(), cumul(), anchor(), or the y|z syntax"
+    @test_throws msg lp(@formula(y ~ x), df; horizon = 1)
+    @test_throws msg lpiv(TSLS(), @formula(y ~ (x ~ z)), df; horizon = 1)
+
+    @test_throws "horizon must be non-negative (got -1)" lp(@formula(leads(y) ~ x), df; horizon = -1)
+    @test_throws "horizon must be non-negative (got -1)" lpiv(
+        TSLS(), @formula(leads(y) ~ (x ~ z)), df; horizon = -1
+    )
+
+    # OLS and IV formulas are not interchangeable
+    @test_throws "use `lpiv(TSLS(), formula, data; horizon)`" lp(
+        @formula(leads(y) ~ (x ~ z)), df; horizon = 1
+    )
+    @test_throws "lpiv requires an `(endogenous ~ instruments)` term" lpiv(
+        TSLS(), @formula(leads(y) ~ x), df; horizon = 1
+    )
+    @test_throws "Not enough instruments: 1 < 2" lpiv(
+        TSLS(), @formula(leads(y) ~ (x + w ~ z)), df; horizon = 1
+    )
 end
 
-@testitem "ldiff() and firstdiff() match hand-built long differences" tags = [
-    :ldiff, :verification] begin
+@testitem "Tables.jl input, categorical controls and sample policy" tags = [:core, :lpiv, :api] begin
     using LocalProjections
-    using DataFrames, StableRNGs, StatsBase, StatsModels, Test
+    using DataFrames, StatsModels, StatsBase, Tables, Test
+    using CovarianceMatrices: HC1
+    using StableRNGs
 
-    rng = StableRNG(2025)
-    T = 220
-    x = randn(rng, T)
-    y = cumsum(0.5 .* x .+ randn(rng, T))
-    w = cumsum(randn(rng, T))
-    df = DataFrame(y = y, x = x, w = w)
-
-    H = 5
-    r = lp(@formula(ldiff(y) ~ x + lags(firstdiff(y), 2) + lags(firstdiff(w), 2)), df;
-        horizon = H)
-    @test r.coef_names == ["(Intercept)", "x", "firstdiff(y)_lag1", "firstdiff(y)_lag2",
-        "firstdiff(w)_lag1", "firstdiff(w)_lag2"]
-    @test r.response === :y
-    @test !r.tautological_h0
-
-    d(v) = [NaN; diff(v)]
-    L(v, j) = [t > j ? v[t - j] : NaN for t in eachindex(v)]
-    dy, dw = d(y), d(w)
-    X = hcat(ones(T), x, L(dy, 1), L(dy, 2), L(dw, 1), L(dw, 2))
-    for h in 0:H
-        Y = [2 <= t && t + h <= T ? y[t + h] - y[t - 1] : NaN for t in 1:T]
-        ok = .!isnan.(Y) .& vec(all(!isnan, X; dims = 2))
-        @test coef(r.models[h + 1]) ≈ X[ok, :] \ Y[ok] rtol = 1e-10
-        @test nobs(r.models[h + 1]) == count(ok)
-    end
-
-    # cumul(ldiff(y)) sums the long differences over horizons 0, ..., h
-    c = lp(@formula(cumul(ldiff(y)) ~ x + lags(firstdiff(y), 2)), df; horizon = 3)
-    Xc = X[:, 1:4]
-    for h in 0:3
-        Y = [2 <= t && t + h <= T ? sum(y[t + j] - y[t - 1] for j in 0:h) : NaN
-             for t in 1:T]
-        ok = .!isnan.(Y) .& vec(all(!isnan, Xc; dims = 2))
-        @test coef(c.models[h + 1]) ≈ Xc[ok, :] \ Y[ok] rtol = 1e-10
-    end
-
-    # anchor(y, lag(y)) is the same long difference
-    a = lp(@formula(anchor(y, lag(y)) ~ x + lags(firstdiff(y), 2) + lags(firstdiff(w), 2)),
-        df; horizon = H)
-    @test coefpath(a) ≈ coefpath(r) rtol = 1e-12
-end
-
-@testitem "hbr() and cumul(hbr()) match hand-built HBR responses in lp and lpiv" tags = [
-    :hbr, :lpiv, :verification] begin
-    using LocalProjections
-    using DataFrames, StableRNGs, StatsBase, StatsModels, Test
-
-    rng = StableRNG(1889)
-    T = 240
-    z = randn(rng, T)
-    Y = 100 .+ cumsum(1 .+ 0.3 .* z .+ randn(rng, T))
-    G = 20 .+ cumsum(0.2 .+ 0.5 .* z .+ 0.5 .* randn(rng, T))
-    df = DataFrame(Y = Y, G = G, z = z)
-
-    L(v, j) = [t > j ? v[t - j] : NaN for t in eachindex(v)]
-    X = hcat(ones(T), L(z, 1), L(log.(Y), 1), L(log.(G), 1))
-    hb(x, t, h) = 2 <= t && t + h <= T ? (x[t + h] - x[t - 1]) / Y[t - 1] : NaN
-    chb(x, t, h) = 2 <= t && t + h <= T ? sum(x[t + j] - x[t - 1] for j in 0:h) / Y[t - 1] :
-                   NaN
-
+    rng = StableRNG(20261020)
+    n = 150
+    x = randn(rng, n)
+    z = x .+ randn(rng, n)
+    w = randn(rng, n)
+    y = cumsum(randn(rng, n)) .+ 0.5 .* x
+    g = rand(rng, ["a", "b", "c"], n)
+    df = DataFrame(; y, x, z, w, g)
     H = 4
-    ry = lp(@formula(hbr(Y) ~ z + lags(z, 1) + lags(log(Y), 1) + lags(log(G), 1)), df;
-        horizon = H)
-    rg = lp(@formula(hbr(G, Y) ~ z + lags(z, 1) + lags(log(Y), 1) + lags(log(G), 1)), df;
-        horizon = H)
-    @test ry.response === :Y && rg.response === :G
-    Xz = hcat(X[:, 1], z, X[:, 2:end])
-    for h in 0:H, (r, x) in ((ry, Y), (rg, G))
 
-        yh = [hb(x, t, h) for t in 1:T]
-        ok = .!isnan.(yh) .& vec(all(!isnan, Xz; dims = 2))
-        @test coef(r.models[h + 1]) ≈ Xz[ok, :] \ yh[ok] rtol = 1e-8
+    # Any Tables.jl table gives the same estimates as a DataFrame
+    f = @formula(leads(y) ~ x + lags(w, 2))
+    r_df = lp(f, df; horizon = H)
+    r_nt = lp(f, (; y, x, z, w); horizon = H)
+    @test coefpath(r_nt) == coefpath(r_df)
+    @test nobs(r_nt) == nobs(r_df)
+    fiv = @formula(cumul(y) ~ (x ~ z) + w)
+    @test coefpath(lpiv(TSLS(), fiv, Tables.rowtable(df); horizon = H)) ==
+        coefpath(lpiv(TSLS(), fiv, df; horizon = H))
+    @test_throws "data must be a Tables.jl table" lp(f, [y x]; horizon = H)
+
+    # String columns enter through StatsModels contrasts (dummy coding)
+    rc = lp(@formula(leads(y) ~ x + g), df; horizon = 1)
+    @test rc.coef_names == ["(Intercept)", "x", "g: b", "g: c"]
+    Xg = hcat(ones(n), x, g .== "b", g .== "c")
+    @test coef(horizonmodel(rc, 0)) ≈ Xg \ y
+    riv = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z) + g), df; horizon = 1)
+    @test riv.coef_names == ["(Intercept)", "g: b", "g: c", "x"]
+    g_miss = allowmissing(g)
+    g_miss[3] = missing
+    @test_throws "categorical variable `g` contains missing values" lp(
+        @formula(leads(y) ~ x + g), DataFrame(; y, x, g = g_miss); horizon = 1
+    )
+
+    # Missing values in numeric columns drop rows per horizon without shifting time:
+    # with y[50] missing, horizon h loses row 50 - h (and the last h rows).
+    y_miss = allowmissing(y)
+    y_miss[50] = missing
+    rm = lp(@formula(leads(y) ~ x), DataFrame(; y = y_miss, x); horizon = 2)
+    @test nobs(rm) == [n - 1, n - 2, n - 3]
+    for h in 0:2
+        keep = [t + h <= n && !ismissing(y_miss[t + h]) for t in 1:n]
+        y_h = Float64[y_miss[t + h] for t in 1:n if keep[t]]
+        @test coef(horizonmodel(rm, h)) ≈ hcat(ones(sum(keep)), x[keep]) \ y_h
     end
 
-    # One-step cumulative multiplier in HBR units, by 2SLS
-    m = lpiv(
-        @formula(cumul(hbr(Y)) ~
-                 (cumul(hbr(G, Y)) ~ z) + lags(z, 1) + lags(log(Y), 1) +
-                 lags(log(G), 1)),
-        df; horizon = H)
-    @test m.shock === Symbol("cumul(hbr(G, Y))")
-    @test m.endogenous_names == ["cumul(hbr(G, Y))"]
-    for h in 0:H
-        cy = [chb(Y, t, h) for t in 1:T]
-        cg = [chb(G, t, h) for t in 1:T]
-        Xf, Zf = hcat(X, cg), hcat(X, z)
-        ok = .!isnan.(cy) .& vec(all(!isnan, Xf; dims = 2))
-        Xo, Zo, yo = Xf[ok, :], Zf[ok, :], cy[ok]
-        P = Zo * ((Zo' * Zo) \ Zo')
-        @test coef(m.models[h + 1]) ≈ (Xo' * P * Xo) \ (Xo' * P * yo) rtol = 1e-8
-    end
+    # Fixed sample: every horizon uses the rows available at all horizons
+    r_fix = lp(f, df; horizon = H, sample = :fixed)
+    @test r_fix.sample === :fixed
+    @test r_df.sample === :varying
+    @test allequal(nobs(r_fix))
+    @test nobs(horizonmodel(r_fix, 0)) == n - 2 - H  # two lags at the start, H leads at the end
+    @test coef(horizonmodel(r_fix, H)) ≈ coef(horizonmodel(r_df, H))
+    rows = 3:(n - H)
+    X_fix = hcat(ones(length(rows)), x[rows], w[rows .- 1], w[rows .- 2])
+    @test coef(horizonmodel(r_fix, 0)) ≈ X_fix \ y[rows]
+    riv_fix = lpiv(TSLS(), fiv, df; horizon = H, sample = :fixed)
+    @test riv_fix.sample === :fixed
+    @test allequal(nobs(riv_fix))
+    @test riv_fix.sample === (riv_fix + vcov(HC1())).sample
 
-    # the multiplier is the ratio of cumulated HBR responses on a common sample
-    # only approximately, but at h = 0 with one instrument it is exactly the
-    # indirect-least-squares ratio of the two h = 0 reduced forms
-    @test coefpath(m)[1] ≈ coefpath(ry)[1] / coefpath(rg)[1] rtol = 1e-8
+    msg = "sample must be :varying or :fixed (got :all)"
+    @test_throws msg lp(f, df; horizon = H, sample = :all)
+    @test_throws msg lpiv(TSLS(), fiv, df; horizon = H, sample = :all)
+
+    # Per-horizon sample sizes are displayed
+    shown = sprint(show, MIME"text/plain"(), r_df)
+    @test occursin("Sample:     varying", shown)
+    @test occursin("Obs (h=0:$H): $(join(nobs(r_df), ", "))", shown)
+    @test occursin("Sample:       fixed", sprint(show, MIME"text/plain"(), riv_fix))
 end
 
-@testitem "long-difference terms: pinned horizons, parsing and guards" tags = [
-    :ldiff, :hbr, :api] begin
-    using LocalProjections
-    using DataFrames, StableRNGs, StatsModels, Test
+@testitem "Panel local projections" tags = [:panel, :core, :lpiv, :api] begin
+    using DataFrames, StatsBase, StatsModels, Test
+    using StableRNGs
 
-    rng = StableRNG(36)
-    T = 150
-    x = randn(rng, T)
-    s = 10 .+ cumsum(abs.(randn(rng, T)))
-    y = cumsum(randn(rng, T)) .+ x
-    g = 0.3 .* s .+ randn(rng, T)
-    df = DataFrame(y = y, x = x, s = s, g = g)
+    rng = StableRNG(20261022)
+    N, T = 3, 15
+    df = DataFrame(
+        id = repeat(["a", "b", "c"], inner = T), t = repeat(1:T, N),
+        y = randn(rng, N * T), x = randn(rng, N * T), z = randn(rng, N * T)
+    )
+    shuffled = df[sortperm(randn(rng, N * T)), :]
+    H = 3
 
-    # Explicit horizons pin RHS terms, which then do not track the projection
-    p = lp(@formula(leads(y) ~ x + hbr(g, s, 2) + cumul(ldiff(g), 1) + ldiff(g, 0)), df;
-        horizon = 3)
-    @test p.coef_names ==
-          ["(Intercept)", "x", "hbr(g, s, 2)", "cumul(ldiff(g), 1)", "ldiff(g, 0)"]
-    @test !LocalProjections._rhs_tracks_horizon(p.base_formula)
-    # hbr(x, 3) is hbr(x, x, 3); ldiff(x, 0) is the first difference
-    q = lp(@formula(leads(y) ~ x + hbr(s, 3) + ldiff(g, 0) + firstdiff(g)), df; horizon = 0)
-    @test q.coef_names[3] == "hbr(s, 3)"
-    X = modelmatrix(q.models[1])
-    @test X[:, 4] == X[:, 5]
-
-    # A bare ldiff/hbr on the RHS tracks the horizon, in lp and lpiv
-    tr = lpiv(@formula(leads(y) ~ (cumul(hbr(g, s)) ~ x)), df; horizon = 2)
-    @test LocalProjections._rhs_tracks_horizon(tr.base_formula)
-    @test LocalProjections._rhs_tracks_horizon(lp(@formula(leads(y) ~ ldiff(g)), df;
-        horizon = 1).base_formula)
-
-    # Horizons written on the left-hand side are overridden by the projection
-    @test coefpath(lp(@formula(ldiff(y, 7) ~ x), df; horizon = 2)) ≈
-          coefpath(lp(@formula(ldiff(y) ~ x), df; horizon = 2))
-
-    # Errors
-    @test_throws ArgumentError lp(@formula(y ~ x), df; horizon = 1)
-    @test_throws ArgumentError lp(@formula(cumul(ldiff(y, 3)) ~ x), df; horizon = 1)
-    @test_throws ArgumentError lp(@formula(hbr(g, s, x) ~ x), df; horizon = 1)
-    @test_throws ArgumentError lp(@formula(firstdiff(y, 2) ~ x), df; horizon = 1)
-    df0 = copy(df)
-    df0.s[10] = 0.0
-    @test_throws ArgumentError lp(@formula(hbr(g, s) ~ x), df0; horizon = 1)
-
-    # Procedures derived for responses in levels reject long differences
-    r = lp(@formula(ldiff(y) ~ x + lags(firstdiff(y), 2)), df; horizon = 3)
-    @test_throws ArgumentError biascorrect(r)
-    @test_throws ArgumentError varbootstrap(r, df; vars = [:x, :y], nlags = 2, nboot = 5)
-    @test_throws ArgumentError biascorrect(lp(@formula(cumul(hbr(y, s)) ~ x), df; horizon = 2))
-
-    # The state split applies to long-difference projections as to any other
-    df.st = Float64.(x .> 0)
-    rs = lp(@formula(ldiff(y) ~ x + lags(firstdiff(y), 1)), df; horizon = 2, state = :st)
-    @test rs.coef_names[1:3] == ["(Intercept)_st0", "x_st0", "firstdiff(y)_lag1_st0"]
-
-    # Formulas built programmatically work too
-    f = ldiff(term(:y)) ~ term(1) + term(:x) + lags(firstdiff(term(:y)), 2)
-    @test coefpath(lp(f, df; horizon = 2)) ≈ coefpath(lp(
-        @formula(ldiff(y) ~ x + lags(firstdiff(y), 2)), df; horizon = 2))
-end
-
-@testitem "HBR multipliers reproduce Stata (ivreg2) on the Ramey-Zubairy data" tags = [
-    :hbr, :state, :verification] begin
-    using LocalProjections
-    using DataFrames, StatsModels, StatsBase, Test
-    using CovarianceMatrices: Bartlett
-
-    path = joinpath(@__DIR__, "..", "docs", "src", "data", "ramey_zubairy.csv")
-    lines = readlines(path)
-    hdr = Symbol.(split(lines[1], ","))
-    cols = [Union{Missing, Float64}[] for _ in hdr]
-    for l in lines[2:end], (j, v) in enumerate(split(l, ","; keepempty = true))
-
-        push!(cols[j], isempty(v) ? missing : parse(Float64, v))
-    end
-    rz = DataFrame(cols, hdr)
-
-    # Reference: stata_test/rz_hbr_compare.do, variables rebuilt from rzdatnew.csv;
-    # -newey, lag(5)- and -ivreg2, robust bw(6)-, h = 8
-    irf = lp(
-        @formula(hbr(ypc) ~
-                 newsy_hbr + lags(newsy_hbr, 4) + lags(log(ypc), 4) +
-                 lags(log(gpc), 4)),
-        rz;
-        horizon = 8)
-    @test nobs(irf.models[9]) == 492
-    @test coefpath(irf)[9] ≈ 3.12765742949768e-01 rtol = 1e-9
-    @test sqrt(vcov(Bartlett(6), irf).variances[:newsy_hbr][9]) ≈ 1.05398551104355e-01 rtol = 1e-9
-
-    f = @formula(cumul(hbr(ypc)) ~
-                 (cumul(hbr(gpc, ypc)) ~ newsy_hbr) + lags(newsy_hbr, 4) +
-                 lags(log(ypc), 4) + lags(log(gpc), 4))
-    m = lpiv(f, rz; horizon = 8)
-    g = Symbol("cumul(hbr(gpc, ypc))")
-    @test coefpath(m)[9] ≈ 7.03828970486729e-01 rtol = 1e-8
-    @test sqrt(vcov(Bartlett(6), m).variances[g][9]) ≈ 6.99921592211031e-02 rtol = 1e-7
-    @test weakivtest(m + vcov(Bartlett(6)), 8).F_robust ≈ 1.44834530781619e+01 rtol = 1e-8
-
-    ms = lpiv(f, rz; horizon = 8, state = :slack, regimes = ("exp", "rec"))
-    gexp, grec = Symbol("cumul(hbr(gpc, ypc))_exp"), Symbol("cumul(hbr(gpc, ypc))_rec")
-    @test coefpath(ms; term = gexp)[9] ≈ 7.68340603825077e-01 rtol = 1e-8
-    @test coefpath(ms; term = grec)[9] ≈ 6.26191624567483e-01 rtol = 1e-8
-    V = vcov(Bartlett(6), ms)
-    @test sqrt(V.variances[gexp][9]) ≈ 1.12658838507871e-01 rtol = 1e-6
-    @test sqrt(V.variances[grec][9]) ≈ 1.32589668223685e-01 rtol = 1e-6
-    @test statetest(ms, Bartlett(6)).stat[9] ≈ 6.86856330533422e-01 rtol = 1e-6
-end
-
-@testitem "long-difference LPs reproduce Piger-Stockwell (Stata newey)" tags = [
-    :ldiff, :verification] begin
-    using LocalProjections
-    using DataFrames, StatsModels, StatsBase, Statistics, Test
-    using CovarianceMatrices: Bartlett
-
-    path = joinpath(@__DIR__, "..", "docs", "src", "data", "piger_stockwell.csv")
-    lines = readlines(path)
-    hdr = Symbol.(split(lines[1], ","))
-    cols = [Union{Missing, Float64}[] for _ in hdr]
-    for l in lines[2:end], (j, v) in enumerate(split(l, ","; keepempty = true))
-
-        push!(cols[j], isempty(v) ? missing : parse(Float64, v))
-    end
-    ps = DataFrame(cols, hdr)[1:(length(lines) - 1 - 57), :]
-    ps.mp = coalesce.(ps.mp ./ std(skipmissing(ps.mp)), NaN)
-
-    # Reference: stata_test/ps_compare.do, -newey, lag(37)- on the data of their
-    # application code (Figure 20), which matches the MATLAB loop to 1e-14
-    r = lp(
-        @formula(ldiff(lip) ~
-                 mp + lags(firstdiff(lip), 12) + lags(firstdiff(lcpi), 12) +
-                 lags(firstdiff(lsp500), 12) + lags(firstdiff(ebp), 12) +
-                 lags(firstdiff(gs1), 12)),
-        ps; horizon = 36)
-    se = stderror(vcov(Bartlett(38), r); term = :mp)
-    @test nobs(r.models[13]) == 347 && nobs(r.models[37]) == 323
-    @test coefpath(r)[13] ≈ -2.54697060725518e-01 rtol = 1e-10
-    @test se[13] ≈ 2.25082209688571e-01 rtol = 1e-10
-    @test coefpath(r)[37] ≈ -3.25545542946992e-01 rtol = 1e-10
-    @test se[37] ≈ 2.98261379130978e-01 rtol = 1e-10
-end
-
-@testitem "sample = :common estimates every horizon on the common complete-case sample" tags = [
-    :sample, :verification] begin
-    using LocalProjections
-    using CovarianceMatrices, DataFrames, StableRNGs, StatsBase, StatsModels, Test
-    import Regress
-
-    rng = StableRNG(2024)
-    T = 180
-    x = randn(rng, T)
-    y = zeros(T)
-    for t in 2:T
-        y[t] = 0.6 * y[t - 1] + x[t] + 0.5 * randn(rng)
-    end
-    df = DataFrame(y = y, x = x)
-    f = @formula(leads(y) ~ x + lags(y, 2))
-    H = 6
-
-    byh = lp(f, df; horizon = H)
-    com = lp(f, df; horizon = H, sample = :common)
-    @test byh.sample === :horizon
-    @test com.sample === :common
-    @test nobs.(byh.models) == [T - 2 - h for h in 0:H]
-    @test all(==(T - 2 - H), nobs.(com.models))
-
-    # Hand-built regressions on the rows t = 3..T−H, the sample of the
-    # maximum horizon, at every horizon.
-    rows = 3:(T - H)
-    X = hcat(ones(length(rows)), x[rows], y[rows .- 1], y[rows .- 2])
-    for h in 0:H
-        @test coef(com.models[h + 1]) ≈ X \ y[rows .+ h] rtol = 1e-10
-        @test modelmatrix(com.models[h + 1]) == X
-    end
-    # The maximum horizon is the same regression under both choices.
-    @test coef(com.models[end]) == coef(byh.models[end])
-
-    # Covariances are those of the fixed-sample regressions.
-    for est in (HC1(), Bartlett(4), EWC(5))
-        V = vcov(est, com)
-        for h in (0, 3, H)
-            m = Regress.ols(X, y[rows .+ h]; has_intercept = false)
-            @test stderror(V; term = :x)[h + 1] ≈ sqrt(vcov(est, m)[2, 2]) rtol = 1e-10
+    # Regression of resp(g, i, h) on regressors(g, i), pooling rows i of every unit g
+    # for which all values exist inside that unit
+    function pooled(resp, regressors, first_row, h)
+        X = Vector{Float64}[]
+        Y = Float64[]
+        for g in groupby(df, :id; sort = true), i in first_row:(T - h)
+            push!(Y, resp(g, i, h))
+            push!(X, regressors(g, i))
         end
+        return reduce(hcat, X)' \ Y
     end
 
-    # An internal gap (NaN, see LP-1) removes row k from the horizon-0 sample
-    # and row k − h from the horizon-h one; the common sample drops all of them.
-    k = 90
-    ygap = copy(y)
-    ygap[k] = NaN
-    dfg = DataFrame(y = ygap, x = x)
-    byhg = lp(f, dfg; horizon = H)
-    comg = lp(f, dfg; horizon = H, sample = :common)
-    keep = [t
-            for t in 3:(T - H)
-            if !any(t + h == k for h in 0:H) && !(t - 1 == k) &&
-                   !(t - 2 == k)]
-    @test all(==(length(keep)), nobs.(comg.models))
-    Xg = hcat(ones(length(keep)), x[keep], ygap[keep .- 1], ygap[keep .- 2])
+    # Leads and lags are computed within unit; unit dummies through a string column
+    r = lp(@formula(leads(y) ~ x + lags(z, 1) + id), shuffled; horizon = H, unit = :id, time = :t)
+    @test coefnames(r) == ["(Intercept)", "x", "z_lag1", "id: b", "id: c"]
+    @test nobs(r) == [N * (T - 1 - h) for h in 0:H]
     for h in 0:H
-        @test coef(comg.models[h + 1]) ≈ Xg \ ygap[keep .+ h] rtol = 1e-10
+        @test coef(horizonmodel(r, h)) ≈ pooled(
+            (g, i, h) -> g.y[i + h],
+            (g, i) -> [1.0, g.x[i], g.z[i - 1], g.id[i] == "b", g.id[i] == "c"], 2, h
+        )
     end
-    @test nobs(byhg.models[1]) > nobs(comg.models[1])
-    # ... and is then smaller than the maximum-horizon sample.
-    @test nobs(comg.models[end]) < nobs(byhg.models[end])
-
-    # Horizon-tracking right-hand side: cumul(x) is rebuilt per horizon, the
-    # rows stay those complete at every horizon.
-    dyn = lp(@formula(cumul(y) ~ cumul(x) + lags(y, 1)), df; horizon = H, sample = :common)
-    rows1 = 2:(T - H)
-    for h in (0, 2, H)
-        cy = [sum(y[t:(t + h)]) for t in rows1]
-        cx = [sum(x[t:(t + h)]) for t in rows1]
-        Xd = hcat(ones(length(rows1)), cx, y[rows1 .- 1])
-        @test coef(dyn.models[h + 1]) ≈ Xd \ cy rtol = 1e-10
+    rc = lp(@formula(cumul(y) ~ x), shuffled; horizon = H, unit = :id, time = :t)
+    ra = lp(@formula(y | z ~ x), shuffled; horizon = H, unit = :id, time = :t)
+    for h in 0:H
+        @test coef(horizonmodel(rc, h)) ≈
+            pooled((g, i, h) -> sum(g.y[i:(i + h)]), (g, i) -> [1.0, g.x[i]], 1, h)
+        @test coef(horizonmodel(ra, h)) ≈
+            pooled((g, i, h) -> g.y[i + h] - g.z[i], (g, i) -> [1.0, g.x[i]], 1, h)
     end
+    riv = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z)), shuffled; horizon = H, unit = :id, time = :t)
+    @test nobs(riv) == [N * (T - h) for h in 0:H]
+    @test (riv.unit, riv.time) == (:id, :t)
 
-    # `+ vcov` keeps the choice, and summarize/ewc_bandwidth use the common T.
-    @test (com + vcov(HC1())).sample === :common
-    @test ewc_bandwidth(com) == ewc_bandwidth(T - 2 - H)
-    @test length(summarize(com, HC1()).coef) == H + 1
-    @test occursin("common, T = $(T - 2 - H)",
-        sprint(show, MIME"text/plain"(), com))
-    @test occursin("per horizon", sprint(show, MIME"text/plain"(), byh))
+    # Row order does not matter; a single unit matches the time-series fit
+    @test coefpath(lp(@formula(cumul(y) ~ x), df; horizon = H, unit = :id, time = :t)) ==
+        coefpath(rc)
+    a = df[df.id .== "a", :]
+    f = @formula(leads(y) ~ x + lags(z, 2))
+    @test coefpath(lp(f, a; horizon = H, unit = :id, time = :t)) == coefpath(lp(f, a; horizon = H))
+    @test coefpath(lp(f, a[end:-1:1, :]; horizon = H, time = :t)) == coefpath(lp(f, a; horizon = H))
+
+    # Any sortable time values; units of different lengths, some shorter than the horizon
+    quarterly = transform(shuffled, :t => ByRow(t -> "$(2000 + (t - 1) ÷ 4)Q$(mod1(t, 4))") => :q)
+    rq = lp(
+        @formula(leads(y) ~ x + lags(z, 1) + id), quarterly; horizon = H, unit = :id, time = :q
+    )
+    @test coefpath(rq) == coefpath(r)
+    short = vcat(df[df.t .>= 4, :], DataFrame(id = "d", t = [1, 2], y = 1.0, x = 1.0, z = 1.0))
+    rs = lp(@formula(leads(y) ~ x), short; horizon = H, unit = :id, time = :t)
+    @test nobs(rs) == [N * (T - 3 - h) + max(2 - h, 0) for h in 0:H]
+
+    # Display
+    shown = sprint(show, MIME"text/plain"(), r)
+    @test occursin("Unit:       id", shown)
+    @test occursin("Time:       t", shown)
+    @test !occursin("Unit:", sprint(show, MIME"text/plain"(), lp(f, a; horizon = H)))
+
+    # Bad panel structure fails fast
+    f0 = @formula(leads(y) ~ x)
+    @test_throws "time 1 appears in more than one row in unit \"a\"" lp(
+        f0, vcat(df, df[1:1, :]); horizon = 1, unit = :id, time = :t
+    )
+    @test_throws "time 2 appears in more than one row" lp(
+        f0, a[[1, 2, 2, 3], :]; horizon = 1, time = :t
+    )
+    @test_throws "no row at time 5 in unit \"a\", between 4 and 6; add a row with missing values" lp(
+        f0, df[Not(5), :]; horizon = 1, unit = :id, time = :t
+    )
+    @test_throws "`unit` requires `time`" lp(f0, df; horizon = 1, unit = :id)
+    @test_throws "time column `date` is not in the data" lp(
+        f0, df; horizon = 1, unit = :id, time = :date
+    )
+    @test_throws "unit column `country` is not in the data" lp(
+        f0, df; horizon = 1, unit = :country, time = :t
+    )
+    dm = allowmissing(df, :id)
+    dm.id[3] = missing
+    @test_throws "unit column `id` contains missing or NaN values" lp(
+        f0, dm; horizon = 1, unit = :id, time = :t
+    )
+    @test_throws "time column `t` contains missing or NaN values" lp(
+        f0, transform(df, :t => (t -> [t[1:(end - 1)]; NaN]) => :t); horizon = 1, unit = :id, time = :t
+    )
 end
 
-@testitem "sample = :common in lpiv and state-dependent projections" tags = [
-    :sample, :lpiv, :state] begin
-    using LocalProjections
-    using CovarianceMatrices, DataFrames, StableRNGs, StatsBase, StatsModels, Test
+@testitem "Panel clustered inference" tags = [:panel, :vcov, :lpiv, :api] begin
+    using DataFrames, StatsBase, StatsModels, Test
+    using CovarianceMatrices: CovarianceMatrices, HC1, CR0, CR1, CR2, Bartlett, DriscollKraay, Clustering
+    using StableRNGs
 
-    rng = StableRNG(99)
-    T = 220
-    z = randn(rng, T)
-    u = randn(rng, T)
-    x = 0.8 .* z .+ 0.5 .* u
-    y = zeros(T)
-    for t in 2:T
-        y[t] = 0.5 * y[t - 1] + x[t] + u[t]
+    rng = StableRNG(20261023)
+    N, T = 4, 12
+    df = DataFrame(
+        id = repeat(["a", "b", "c", "d"], inner = T), t = repeat(1:T, N),
+        y = randn(rng, N * T), x = randn(rng, N * T), z = randn(rng, N * T)
+    )
+    df.grp = repeat(1:2, inner = 2T)
+    shuffled = df[sortperm(randn(rng, N * T)), :]
+    H = 3
+    f = @formula(leads(y) ~ x)
+
+    # Rows used at horizon h, in (unit, time) order: periods 1:(T - h) of every unit
+    used(h) = df[df.t .<= T - h, :]
+    manual_se(r, est, h) = stderror(horizonmodel(r + vcov(HC1()), h) + vcov(est))[2]
+
+    # Panels cluster by unit by default
+    r = lp(f, shuffled; horizon = H, unit = :id, time = :t)
+    @test occursin("Vcov:       CR1(:id)", sprint(show, MIME"text/plain"(), r))
+    @test stderror(r) ≈ [manual_se(r, CR1(used(h).id), h) for h in 0:H]
+    @test stderror(r) == stderror(r + vcov(CR1(:id)))
+    @test DataFrame(summarize(r)).se == stderror(r)
+    @test stderror(r + vcov(HC1())) != stderror(r)
+
+    # Multi-way clusters, other CR estimators, columns outside the formula
+    r2 = r + vcov(CR1((:id, :t)))
+    @test occursin("Vcov:       CR1((:id, :t))", sprint(show, MIME"text/plain"(), r2))
+    @test stderror(r2) ≈ [manual_se(r, CR1((used(h).id, used(h).t)), h) for h in 0:H]
+    @test stderror(r + vcov(CR0(:grp))) ≈ [manual_se(r, CR0(used(h).grp), h) for h in 0:H]
+    @test stderror(r + vcov(CR2(:id))) ≈ [manual_se(r, CR2(used(h).id), h) for h in 0:H]
+
+    # A single series clusters by any column; its default stays HC1
+    a = df[df.id .== "a", :]
+    a.week = repeat(1:3, inner = 4)
+    ra = lp(f, a; horizon = H)
+    @test !occursin("CR1", sprint(show, MIME"text/plain"(), ra))
+    @test stderror(ra + vcov(CR1(:week))) ≈
+        [manual_se(ra, CR1(a.week[1:(T - h)]), h) for h in 0:H]
+
+    # Driscoll-Kraay names the time and unit columns
+    for dk in (DriscollKraay(Bartlett(2); tis = :t, iis = :id), DriscollKraay(Bartlett(2), :t, :id; correction = :sss))
+        rdk = r + vcov(dk)
+        @test occursin("Vcov:       $(repr(dk))", sprint(show, MIME"text/plain"(), rdk))
+        @test stderror(rdk) ≈ [
+            manual_se(r, DriscollKraay(Bartlett(2), used(h).t, used(h).id; correction = CovarianceMatrices.correction(dk)), h)
+                for h in 0:H
+        ]
     end
-    s = Float64.(randn(rng, T) .> 0)
-    df = DataFrame(y = y, x = x, z = z, s = s)
-    H = 5
 
-    iv = lpiv(@formula(leads(y) ~ (x ~ z) + lags(y, 1)), df; horizon = H,
-        sample = :common)
-    @test iv.sample === :common
-    @test all(==(T - 1 - H), nobs.(iv.models))
-    rows = 2:(T - H)
-    W = hcat(ones(length(rows)), y[rows .- 1])
-    X = hcat(W, x[rows])
-    Z = hcat(W, z[rows])
-    Px = Z * (Z \ X)
+    # A period with no rows at some horizon keeps its distance from its neighbors: with
+    # y missing at t = 6 for every unit, horizon h has no rows at period 6 - h
+    gap = transform(df, [:y, :t] => ByRow((y, t) -> t == 6 ? missing : y) => :y)
+    rg = lp(f, gap; horizon = H, unit = :id, time = :t)
+    dk = DriscollKraay(Bartlett(3); tis = :t, iis = :id)
     for h in 0:H
-        @test coef(iv.models[h + 1]) ≈ Px \ y[rows .+ h] rtol = 1e-8
-    end
-    ivh = lpiv(@formula(leads(y) ~ (x ~ z) + lags(y, 1)), df; horizon = H)
-    @test ivh.sample === :horizon
-    @test coef(iv.models[end]) ≈ coef(ivh.models[end]) rtol = 1e-12
-    @test (iv + vcov(HC1())).sample === :common
-    @test occursin("common", sprint(show, MIME"text/plain"(), iv))
-
-    # Internal gaps in the instrument and in the response: the common rows
-    # avoid both at every horizon.
-    kz, ky = 80, 150
-    zg, yg = copy(z), copy(y)
-    zg[kz] = NaN
-    yg[ky] = NaN
-    dfg = DataFrame(y = yg, x = x, z = zg)
-    ivg = lpiv(@formula(leads(y) ~ (x ~ z) + lags(y, 1)), dfg; horizon = H,
-        sample = :common)
-    keep = [t for t in 2:(T - H)
-            if t != kz && t - 1 != ky && all(t + h != ky for h in 0:H)]
-    @test all(==(length(keep)), nobs.(ivg.models))
-    Wg = hcat(ones(length(keep)), yg[keep .- 1])
-    Xg = hcat(Wg, x[keep])
-    Zg = hcat(Wg, zg[keep])
-    Pg = Zg * (Zg \ Xg)
-    for h in 0:H
-        @test coef(ivg.models[h + 1]) ≈ Pg \ yg[keep .+ h] rtol = 1e-8
+        rows = (gap.t .<= T - h) .& (gap.t .!= 6 - h)
+        th, uh = gap.t[rows], gap.id[rows]
+        on_grid = DriscollKraay(Bartlett(3), Clustering(th, T - h), uh)
+        compressed = DriscollKraay(Bartlett(3), th, uh)
+        @test stderror(rg + vcov(dk))[h + 1] ≈ manual_se(rg, on_grid, h)
+        @test !(stderror(rg + vcov(dk))[h + 1] ≈ manual_se(rg, compressed, h))
     end
 
-    # State dependence: the split design of the maximum horizon at every h.
-    f = @formula(leads(y) ~ x + lags(y, 1))
-    sth = lp(f, df; horizon = H, state = :s)
-    stc = lp(f, df; horizon = H, state = :s, sample = :common)
-    @test stc.sample === :common
-    @test all(==(nobs(sth.models[end])), nobs.(stc.models))
-    for h in 0:H
-        @test modelmatrix(stc.models[h + 1]) == modelmatrix(sth.models[end])
-    end
-    @test coef(stc.models[end]) == coef(sth.models[end])
-    @test length(statetest(stc, HC1()).pvalue) == H + 1
+    # IV local projections
+    riv = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z)), shuffled; horizon = H, unit = :id, time = :t)
+    @test occursin("Vcov:         CR1(:id)", sprint(show, MIME"text/plain"(), riv))
+    @test stderror(riv) ≈ [manual_se(riv, CR1(used(h).id), h) for h in 0:H]
+    @test stderror(riv + vcov(dk)) ≈ [
+        manual_se(riv, DriscollKraay(Bartlett(3), used(h).t, used(h).id), h) for h in 0:H
+    ]
+
+    # Estimators that cannot be resolved per horizon fail fast
+    @test_throws "cluster column `country` is not in the data" r + vcov(CR1(:country))
+    @test_throws "holds one cluster value per observation" r + vcov(CR1(df.id))
+    @test_throws "holds one time and unit index per observation" r + vcov(
+        DriscollKraay(Bartlett(2), df.t, df.id)
+    )
+    @test_throws "time index column `date` is not in the data" r + vcov(
+        DriscollKraay(Bartlett(2), :date, :id)
+    )
+    dm = allowmissing(df, :grp)
+    dm.grp[T] = missing   # unit "a", period T: used only at h = 0
+    rm = lp(f, dm; horizon = H, unit = :id, time = :t)
+    @test_throws "cluster column `grp` contains missing or NaN values in the rows used at horizon 0" rm +
+        vcov(CR1(:grp))
 end
 
-@testitem "sample keyword: guards and downstream procedures" tags = [:sample, :api] begin
-    using LocalProjections
-    using DataFrames, Random, StableRNGs, StatsModels, Test
+@testitem "Absorbed fixed effects" tags = [:panel, :vcov, :lpiv, :api] begin
+    using DataFrames, StatsBase, StatsModels, Test
+    using CovarianceMatrices: HC1, CR1
+    using Regress: Regress
+    using StableRNGs
 
-    rng = StableRNG(5)
-    T = 150
-    x = randn(rng, T)
-    y = zeros(T)
-    for t in 2:T
-        y[t] = 0.5 * y[t - 1] + x[t] + randn(rng)
+    rng = StableRNG(20261020)
+    N, T = 12, 15
+    df = DataFrame(id = repeat(1:N, inner = T), t = repeat(1:T, N))
+    a = randn(rng, N)
+    df.x = randn(rng, N * T) .+ a[df.id]
+    df.z = df.x .+ randn(rng, N * T)
+    df.w = randn(rng, N * T)
+    df.y = 0.5 .* df.x .+ 0.3 .* df.w .+ 2 .* a[df.id] .+ randn(rng, N * T)
+    df.sid = string.(df.id)
+    shuffled = df[sortperm(randn(rng, N * T)), :]
+    H = 3
+
+    # Response at t + h within each unit; rows without it are dropped
+    function at_horizon(h)
+        d = copy(df)
+        d.yh = [i + h <= nrow(d) && d.id[i + h] == d.id[i] ? d.y[i + h] : missing for i in 1:nrow(d)]
+        return dropmissing(d, :yh)
     end
-    df = DataFrame(y = y, x = x, dy = [0.0; diff(y)])
-    f = @formula(leads(y) ~ x + lags(y, 2) + lags(x, 2))
 
-    @test_throws ArgumentError lp(f, df; horizon = 3, sample = :maxhorizon)
-    @test_throws ArgumentError lpiv(@formula(leads(y) ~ (x ~ dy)), df; horizon = 3,
-        sample = :all)
-    # No row is complete at every horizon.
-    @test_throws ArgumentError lp(f, df[1:10, :]; horizon = 9, sample = :common)
+    r = lp(@formula(leads(y) ~ x + w + fe(id)), shuffled; horizon = H, unit = :id, time = :t)
+    @test coefnames(r) == ["x", "w"]
+    @test all(h -> coefnames(horizonmodel(r, h)) == ["x", "w"], 0:H)
+    # Absorbing the unit effects gives the coefficients of unit dummies
+    rd = lp(@formula(leads(y) ~ x + w + sid), shuffled; horizon = H, unit = :id, time = :t)
+    @test coefpath(r) ≈ coefpath(rd)
+    @test coefpath(r; term = :w) ≈ coefpath(rd; term = :w)
 
-    com = lp(f, df; horizon = 8, sample = :common)
-    @test_throws ArgumentError biascorrect(com)
-    @test biascorrect(lp(f, df; horizon = 8)) isa BiasCorrectedLP
-    @test_throws ArgumentError varbootstrap(com, df; vars = [:x, :y], nlags = 2,
-        nboot = 5)
-    @test_throws ArgumentError fevd(
-        lp(@formula(cumul(dy) ~ x + lags(dy, 1)), df; horizon = 4, sample = :common), df)
+    for h in 0:H
+        d = at_horizon(h)
+        fm = Regress.ols(d, @formula(yh ~ x + w + fe(id)); drop_singletons = false)
+        @test coef(horizonmodel(r, h)) ≈ coef(fm)
+        # Unit FE nested in unit clusters count once in the small-sample factor
+        @test stderror(horizonmodel(r, h)) ≈ stderror(fm + vcov(CR1(:id)))
+        @test stderror(horizonmodel(r + vcov(HC1()), h)) ≈ stderror(fm + vcov(HC1()))
+        @test nobs(horizonmodel(r, h)) == nobs(fm)
+    end
 
-    # varbootstrap re-estimates each draw with the projection's sample: with the
-    # same seeds the simulated data agree, so the maximum horizon (one sample
-    # under both choices) matches while horizon 0 does not.
-    byh = lp(f, df; horizon = 8)
-    bc = varbootstrap(com, df; vars = [:x, :y], nlags = 2, nboot = 30,
-        biascorrect = false, rng = Xoshiro(11))
-    bh = varbootstrap(byh, df; vars = [:x, :y], nlags = 2, nboot = 30,
-        biascorrect = false, rng = Xoshiro(11))
-    @test bc.nfail == 0
-    @test bc.theta == coefpath(com)
-    @test bc.theta_boot[:, end] ≈ bh.theta_boot[:, end] rtol = 1e-12
-    @test !(bc.theta_boot[:, 1] ≈ bh.theta_boot[:, 1])
+    r2 = lp(@formula(leads(y) ~ x + w + fe(id) + fe(t)), df; horizon = H, unit = :id, time = :t)
+    f2 = Regress.ols(at_horizon(2), @formula(yh ~ x + w + fe(id) + fe(t)); drop_singletons = false)
+    @test coef(horizonmodel(r2, 2)) ≈ coef(f2)
+    @test stderror(horizonmodel(r2, 2)) ≈ stderror(f2 + vcov(CR1(:id)))
+
+    # An explicit intercept is absorbed too
+    @test coefnames(lp(@formula(leads(y) ~ 1 + x + fe(id)), df; horizon = 1, unit = :id, time = :t)) == ["x"]
+
+    riv = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z) + w + fe(id)), df; horizon = H, unit = :id, time = :t)
+    fiv = Regress.iv(TSLS(), at_horizon(2), @formula(yh ~ (x ~ z) + w + fe(id)); drop_singletons = false) +
+        vcov(CR1(:id))
+    @test coef(horizonmodel(riv, 2)) ≈ coef(fiv)
+    @test stderror(horizonmodel(riv, 2)) ≈ stderror(fiv)
+    @test first_stage(riv, 2).F_robust ≈ Regress.first_stage(fiv).F_robust
+
+    pf(f, d = df) = lp(f, d; horizon = 1, unit = :id, time = :t)
+    @test_throws "fixed effects must appear as separate `fe(column)` terms" pf(@formula(leads(y) ~ x + fe(id) & w))
+    @test_throws "fixed effects must appear as separate `fe(column)` terms" lpiv(
+        TSLS(), @formula(leads(y) ~ (x ~ z + fe(id))), df; horizon = 1
+    )
+    @test_throws "formula must contain at least one regressor besides fixed effects" pf(@formula(leads(y) ~ fe(id)))
+    @test_throws "fixed effect column `nope` is not in the data" pf(@formula(leads(y) ~ x + fe(nope)))
+    dm = allowmissing(df, :id)
+    dm.g = copy(dm.id)
+    dm.g[3] = missing
+    @test_throws "fixed effect column `g` contains missing or NaN values" pf(@formula(leads(y) ~ x + fe(g)), dm)
+end
+
+@testitem "Horizon-indexed model access" tags = [:api, :core] begin
+    using DataFrames, StatsBase, StatsModels
+    using StableRNGs
+
+    rng = StableRNG(20261021)
+    n = 120
+    x = randn(rng, n)
+    z = x .+ randn(rng, n)
+    y = cumsum(randn(rng, n)) .+ 0.5 .* x
+    df = DataFrame(; y, x, z)
+    H = 3
+
+    r = lp(@formula(leads(y) ~ x), df; horizon = H)
+    ix = findfirst(==("x"), coefnames(r))
+    @test coefnames(r) == ["(Intercept)", "x"]
+    @test [coef(horizonmodel(r, h))[ix] for h in 0:H] == coefpath(r)
+    @test nobs(r) == [nobs(horizonmodel(r, h)) for h in 0:H] == [n - h for h in 0:H]
+    @test horizonmodel(r, Int32(2)) === horizonmodel(r, 2)
+    @test_throws "horizon -1 is outside the estimated horizons 0:3" horizonmodel(r, -1)
+    @test_throws "horizon 4 is outside the estimated horizons 0:3" horizonmodel(r, H + 1)
+    @test_throws MethodError coefnames(r, 0)
+
+    riv = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z)), df; horizon = H)
+    @test [coef(horizonmodel(riv, h))[ix] for h in 0:H] == coefpath(riv)
+    @test nobs(riv) == [n - h for h in 0:H]
+    @test_throws "horizon 4 is outside the estimated horizons 0:3" horizonmodel(riv, H + 1)
+end
+
+@testitem "Plotting draws the IRF object" tags = [:plots, :api] begin
+    ENV["GKSwstype"] = "nul"  # headless GR for Plots
+    using LocalProjections
+    using DataFrames, StatsModels, CovarianceMatrices, Test
+    using MacroEconometricTools: point_estimate, lowerbounds, upperbounds
+    import CairoMakie, Plots
+
+    x = sin.(0.3 .* (1:80))
+    df = DataFrame(x = x, y = 0.5 .* x .+ cos.(1:80))
+    r = lp(@formula(leads(y) ~ x), df; horizon = 4)
+    ys(pts) = [p[2] for p in pts]
+
+    # Makie, single panel: line and band are the IRF object's estimate and bounds
+    fig = CairoMakie.Figure()
+    ax = CairoMakie.Axis(fig[1, 1])
+    @test irfplot!(ax, r, HC3(); levels = [0.9]) === ax
+    irf = as_irf_result(r + vcov(HC3()); coverage = [0.9])
+    line = only(filter(p -> p isa CairoMakie.Lines, ax.scene.plots))
+    band = only(filter(p -> p isa CairoMakie.Band, ax.scene.plots))
+    @test ys(line[1][]) ≈ vec(Array(point_estimate(irf)))
+    @test ys(band[1][]) ≈ vec(Array(only(lowerbounds(irf))))
+    @test ys(band[2][]) ≈ vec(Array(only(upperbounds(irf))))
+
+    # Makie, figure: one band per level
+    fig = irfplot(r; levels = [0.68, 0.9], xtickstep = 2)
+    @test fig isa CairoMakie.Figure
+    ax = only(filter(c -> c isa CairoMakie.Axis, fig.content))
+    @test count(p -> p isa CairoMakie.Band, ax.scene.plots) == 2
+
+    # Plots: the recipe draws the same bounds and estimate
+    plt = Plots.plot(r; levels = [0.9])
+    irf = as_irf_result(r; coverage = [0.9])
+    @test any(s -> s[:y] ≈ vec(Array(point_estimate(irf))), plt.series_list)
+    @test any(
+        s -> s[:fillrange] isa AbstractVector &&
+            s[:fillrange] ≈ vec(Array(only(lowerbounds(irf)))),
+        plt.series_list
+    )
+    @test Plots.plot(r, HC3()) isa Plots.Plot
+
+    # Levels go through the same validation as summarize and as_irf_result
+    msg = "confidence levels must lie strictly between 0 and 1; got 95"
+    @test_throws msg irfplot(r; levels = [95])
+    @test_throws msg Plots.plot(r; levels = [95])
+end
+
+@testitem "export surface" tags = [:api] begin
+    using LocalProjections
+    using Test
+    for name in (
+            :AbstractLocalProjection, :lp, :lpiv, :TSLS, :LIML, :Fuller, :KClass,
+            :leads, :lags, :lag, :lead, :cumul, :anchor,
+            :first_stage, :weakivtest, :as_irf_result, :irfplot, :irfplot!, :fe,
+        )
+        @test Base.isexported(LocalProjections, name)
+    end
+    for name in (:CumulTerm, :LeadTerm, :AnchorTerm)
+        @test Base.ispublic(LocalProjections, name)
+        @test !Base.isexported(LocalProjections, name)
+    end
+    for name in (:WeakIVTestResult, :FirstStageIV, :LocalProjectionIRFResult, :LPSchemaContext, :VcovSpec)
+        @test !Base.ispublic(LocalProjections, name)
+    end
 end

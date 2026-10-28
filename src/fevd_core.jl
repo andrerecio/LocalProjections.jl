@@ -105,8 +105,10 @@ shock is unpredictable from ``W_{t-1}``. The prewhitened quantities are `NaN`
 when the ``2h+3`` moments cannot be prewhitened on ``n - 1`` rows
 (`feasible = false`).
 """
-function _gl_r2(y::AbstractVector{Float64}, W::AbstractMatrix{Float64},
-        xf::AbstractMatrix{Float64}; avar::Bool = true)
+function _gl_r2(
+        y::AbstractVector{Float64}, W::AbstractMatrix{Float64},
+        xf::AbstractMatrix{Float64}; avar::Bool = true
+    )
     n = length(y)
     k = size(xf, 2)
     fe = y - W * (W \ y)
@@ -128,8 +130,10 @@ function _gl_r2(y::AbstractVector{Float64}, W::AbstractMatrix{Float64},
     V = _gl_gogt(G, _gl_lrv_nw(Z, L), n)
     feasible = m < n - 1
     V_pw = feasible ? _gl_gogt(G, _gl_prewhitened_lrv(Z, L), n) : fill(NaN, m, m)
-    return (; s, theta = θ, fe, avar_pw = V_pw, avar = V,
-        se_pw = _gl_delta_se(ξ, V_pw), se = _gl_delta_se(ξ, V), bandwidth = L, feasible)
+    return (;
+        s, theta = θ, fe, avar_pw = V_pw, avar = V,
+        se_pw = _gl_delta_se(ξ, V_pw), se = _gl_delta_se(ξ, V), bandwidth = L, feasible,
+    )
 end
 
 """
@@ -160,10 +164,12 @@ degrees-of-freedom factor. Returns a named tuple with the per-horizon
 estimates and the matrices the asymptotic variance needs (`resid_lp`,
 `beta_lp`, `fe`, `v`).
 """
-function _gl_lp(dhy::Matrix{Float64}, C::Matrix{Float64}, W::Matrix{Float64},
+function _gl_lp(
+        dhy::Matrix{Float64}, C::Matrix{Float64}, W::Matrix{Float64},
         q::Union{Nothing, Matrix{Float64}}, x::Vector{Float64}, σ²x::Float64,
         t0::Int, t0lp::Int, H::Int; estimator::Symbol, dofadjust::Bool,
-        irf_se::Bool = true)
+        irf_se::Bool = true
+    )
     T = size(dhy, 1)
     nc = size(C, 2)
     kW = size(W, 2)
@@ -207,7 +213,7 @@ function _gl_lp(dhy::Matrix{Float64}, C::Matrix{Float64}, W::Matrix{Float64},
         psi[h + 1] = blp[1]
         beta_lp[:, h + 1] = blp
         resid_lp[rlp, h + 1] = ulp
-        perfect[h + 1] = sum(abs2, ulp) <= 1e-20 * sum(abs2, ylp)
+        perfect[h + 1] = sum(abs2, ulp) <= 1.0e-20 * sum(abs2, ylp)
 
         f = u + Cperp[rows, :] * b[1:nc]
         fe[rows, h + 1] = f
@@ -234,8 +240,10 @@ function _gl_lp(dhy::Matrix{Float64}, C::Matrix{Float64}, W::Matrix{Float64},
         end
     end
     share = σ²x .* cumsum(psi .^ 2) ./ mse
-    return (; share, psi, irf_se = se_psi, mse, sigma2v, fe, v, resid_lp, beta_lp,
-        Q, perfect)
+    return (;
+        share, psi, irf_se = se_psi, mse, sigma2v, fe, v, resid_lp, beta_lp,
+        Q, perfect,
+    )
 end
 
 """
@@ -254,8 +262,10 @@ where `m` is the LP-B denominator (pass `m = σ²h` for LP-A). Both are exact at
 share instead. The LP-B last entry is computed as ``-s/m``, which is the same
 number without dividing by ``1 - s``.
 """
-function _gl_lp_gradient(estimator::Symbol, ψ::AbstractVector{Float64}, σ²x::Float64,
-        σ²h::Float64, m::Float64, s::Float64, Nq::Int)
+function _gl_lp_gradient(
+        estimator::Symbol, ψ::AbstractVector{Float64}, σ²x::Float64,
+        σ²h::Float64, m::Float64, s::Float64, Nq::Int
+    )
     np = length(ψ)
     g = zeros(Nq * np + 2)
     c = estimator === :lpa ? 1 / σ²h : (1 - s) / m
@@ -279,9 +289,11 @@ with `err` ``= \\hat f`` (LP-A) or ``\\hat v`` (LP-B), demeaned column by column
 ``G = -\\mathrm{blkdiag}(I_{h+1} \\otimes \\hat\\Sigma_q, I_2)`` with `Σq` the
 second-moment matrix of ``q_t`` over ``t_0^{LP}, \\dots, T``.
 """
-function _gl_lp_avar(Q::Matrix{Float64}, resid_lp::Matrix{Float64},
+function _gl_lp_avar(
+        Q::Matrix{Float64}, resid_lp::Matrix{Float64},
         err::AbstractVector{Float64}, x::Vector{Float64}, σ²x::Float64, σ²h::Float64,
-        beta_lp::Matrix{Float64}, Σq::Matrix{Float64}, t0::Int, t0lp::Int, h::Int)
+        beta_lp::Matrix{Float64}, Σq::Matrix{Float64}, t0::Int, t0lp::Int, h::Int
+    )
     T, Nq = size(Q)
     rows = max(t0, t0lp):(T - h)
     n = length(rows)
@@ -293,8 +305,12 @@ function _gl_lp_avar(Q::Matrix{Float64}, resid_lp::Matrix{Float64},
     Z[:, m - 1] = view(x, rows) .^ 2 .- σ²x
     Z[:, m] = view(err, rows) .^ 2 .- σ²h
     Z .-= mean(Z; dims = 1)
-    G = lu(-cat(kron(Matrix{Float64}(I, h + 1, h + 1), Σq), Matrix{Float64}(I, 2, 2);
-        dims = (1, 2)))
+    G = lu(
+        -cat(
+            kron(Matrix{Float64}(I, h + 1, h + 1), Σq), Matrix{Float64}(I, 2, 2);
+            dims = (1, 2)
+        )
+    )
     L = _gl_bandwidth(n)
     V = _gl_gogt(G, _gl_lrv_nw(Z, L), n)
     feasible = m < n - 1

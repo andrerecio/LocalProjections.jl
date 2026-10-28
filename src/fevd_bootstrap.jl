@@ -22,13 +22,21 @@ rows as initial conditions), with the maximum-likelihood covariance
 Ties go to the first candidate. Returns `(; p, values)`. These conventions
 differ from [`lagselect`](@ref) (the `ic_var.m` port), which is left unchanged.
 """
-function _gl_lagselect(Y::AbstractMatrix{Float64}, candidates::AbstractVector{Int};
-        criterion::Symbol = :hqic)
-    criterion in (:hqic, :bic, :aic) || throw(ArgumentError(
-        "`criterion` must be :hqic, :bic or :aic (got :$criterion)"))
+function _gl_lagselect(
+        Y::AbstractMatrix{Float64}, candidates::AbstractVector{Int};
+        criterion::Symbol = :hqic
+    )
+    criterion in (:hqic, :bic, :aic) || throw(
+        ArgumentError(
+            "`criterion` must be :hqic, :bic or :aic (got :$criterion)"
+        )
+    )
     isempty(candidates) && throw(ArgumentError("`nlags` has no candidate lag order"))
-    all(>=(1), candidates) || throw(ArgumentError(
-        "the candidate VAR lag orders must be at least 1 (got $(candidates))"))
+    all(>=(1), candidates) || throw(
+        ArgumentError(
+            "the candidate VAR lag orders must be at least 1 (got $(candidates))"
+        )
+    )
     n = size(Y, 2)
     pmax = maximum(candidates)
     Tic = size(Y, 1) - pmax
@@ -39,7 +47,7 @@ function _gl_lagselect(Y::AbstractMatrix{Float64}, candidates::AbstractVector{In
         _check_var_rank(Ω)
         k = n^2 * p
         penalty = criterion === :hqic ? 2k * log(log(Tic)) / Tic :
-                  criterion === :bic ? k * log(Tic) / Tic : 2k / Tic
+            criterion === :bic ? k * log(Tic) / Tic : 2k / Tic
         values[i] = logdet(Symmetric(Ω)) + penalty
     end
     return (; p = candidates[argmin(values)], values)
@@ -65,8 +73,10 @@ function _gl_point(f::LPFEVD, d::NamedTuple)
         share = [_gl_r2_rows(des, f.t0:(T - h), h) for h in 0:H]
         return (; share, psi = nothing, σ²x)
     end
-    r = _gl_lp(des.dhy, des.C, des.W, des.q, des.x, σ²x, f.t0, f.t0lp, H;
-        estimator = f.estimator, dofadjust = f.dofadjust, irf_se = false)
+    r = _gl_lp(
+        des.dhy, des.C, des.W, des.q, des.x, σ²x, f.t0, f.t0lp, H;
+        estimator = f.estimator, dofadjust = f.dofadjust, irf_se = false
+    )
     return (; share = r.share, psi = r.psi, σ²x)
 end
 
@@ -91,12 +101,14 @@ end
 
 # One simulated share at horizon h: θ* = θ̂ + M z, redrawn while a variance is
 # nonpositive (R²: θ₃; LP-A/B: σ²x and σ²_h). NaN after `maxtries` rejections.
-function _gl_sim_share(rng::AbstractRNG, θ̂::Vector{Float64}, M::Matrix{Float64},
-        estimator::Symbol, h::Int; maxtries::Int = 10_000)
+function _gl_sim_share(
+        rng::AbstractRNG, θ̂::Vector{Float64}, M::Matrix{Float64},
+        estimator::Symbol, h::Int; maxtries::Int = 10_000
+    )
     m = length(θ̂)
     z = Vector{Float64}(undef, size(M, 2))
     for _ in 1:maxtries
-        θ = θ̂ + M * Random.randn!(rng, z)
+        θ = θ̂ + M * randn!(rng, z)
         if estimator === :r2
             θ[m] > 0 || continue
             k = h + 1
@@ -160,8 +172,10 @@ struct FEVDBootstrap
     irfstr_draws::Union{Nothing, Matrix{Float64}}
     vars::Union{Nothing, Vector{Symbol}}
     nlags::Union{Nothing, Int}
-    ic::Union{Nothing,
-        @NamedTuple{criterion::Symbol, candidates::Vector{Int}, values::Vector{Float64}}}
+    ic::Union{
+        Nothing,
+        @NamedTuple{criterion::Symbol, candidates::Vector{Int}, values::Vector{Float64}}
+    }
     skipfirst::Union{Nothing, Bool}
     burnin::Union{Nothing, Int}
     blocklength::Union{Nothing, Int}
@@ -179,22 +193,27 @@ end
 # The bootstrap's own fields first (they take precedence in `getproperty`), then
 # those of the wrapped LPFEVD that it does not shadow (`se_pw`, `se`)
 function Base.propertynames(b::FEVDBootstrap)
-    Tuple(unique((fieldnames(FEVDBootstrap)..., propertynames(getfield(b, :fevd))...)))
+    return Tuple(unique((fieldnames(FEVDBootstrap)..., propertynames(getfield(b, :fevd))...)))
 end
 
 # Rows of `draws` (and of the optional LP draws) whose draw did not fail.
 # `errors[b]` holds the exception of draw `b` (or `nothing`); the first one is
 # reported so that a systematic failure is not reduced to a count.
-function _fevd_draw_moments(draws::Matrix{Float64}, failures::Vector{Int},
-        errors::Vector{Any}, what::String)
+function _fevd_draw_moments(
+        draws::Matrix{Float64}, failures::Vector{Int},
+        errors::Vector{Any}, what::String
+    )
     nboot = length(failures)
     nfail = sum(failures)
     i = findfirst(!isnothing, errors)
     cause = i === nothing ? "" : "; first error: " * sprint(showerror, errors[i])
-    nfail == nboot && throw(ErrorException(
-        "fevdbootstrap ($what): all $nboot draws failed" * cause))
+    nfail == nboot && throw(
+        ErrorException(
+            "fevdbootstrap ($what): all $nboot draws failed" * cause
+        )
+    )
     nfail > 0 && @warn "fevdbootstrap ($what): $nfail of $nboot draws failed and " *
-          "are excluded from the bias correction and the bands" * cause
+        "are excluded from the bias correction and the bands" * cause
     ok = failures .== 0
     kept = draws[ok, :]
     return kept, ok, nfail
@@ -229,8 +248,10 @@ end
 # Pairs `y => v` for the levels `y` that the specification uses only through
 # `lags(firstdiff(y), p)` and whose first difference is the column `v` of
 # `candidates` (diff(y) ≈ v[2:end]).
-function _fevd_level_pairs(f::LPFEVD, data::AbstractDataFrame,
-        candidates::AbstractVector{Symbol})
+function _fevd_level_pairs(
+        f::LPFEVD, data::NamedTuple,
+        candidates::AbstractVector{Symbol}
+    )
     plain = Symbol[]
     diffs = Symbol[]
     for spec in (f.spec, f.irf_spec)
@@ -245,13 +266,13 @@ function _fevd_level_pairs(f::LPFEVD, data::AbstractDataFrame,
     pairs = Pair{Symbol, Symbol}[]
     for s in unique(diffs)
         s in plain && continue
-        ds = diff(Vector{Float64}(data[!, s]))
+        ds = diff(Vector{Float64}(data[s]))
         for v in candidates
             v === s && continue
-            hasproperty(data, v) || continue
-            col = data[!, v]
+            haskey(data, v) || continue
+            col = data[v]
             (eltype(col) <: Real && all(isfinite, col)) || continue
-            if isapprox(ds, Vector{Float64}(col[2:end]); rtol = 1e-8)
+            if isapprox(ds, Vector{Float64}(col[2:end]); rtol = 1.0e-8)
                 push!(pairs, s => v)
                 break
             end
@@ -260,22 +281,36 @@ function _fevd_level_pairs(f::LPFEVD, data::AbstractDataFrame,
     return pairs
 end
 
-function _fevd_var(f::LPFEVD, data::AbstractDataFrame; vars, nlags, criterion::Symbol,
-        skipfirst::Bool, burnin::Integer, nboot::Int, rng::AbstractRNG, threaded::Bool)
-    f.trend == 0 || throw(ArgumentError(
-        "method = :var is not available with `trend` ≥ 1: the reference simulates the " *
-        "trend on the burn-in clock but estimates it on the sample clock; use " *
-        "method = :block or :simulation"))
-    nrow(data) == f.T || throw(ArgumentError(
-        "`data` has $(nrow(data)) rows but the FEVD was estimated on $(f.T); pass the " *
-        "data frame given to `fevd`"))
+function _fevd_var(
+        f::LPFEVD, data::NamedTuple; vars, nlags, criterion::Symbol,
+        skipfirst::Bool, burnin::Integer, nboot::Int, rng::AbstractRNG, threaded::Bool
+    )
+    f.trend == 0 || throw(
+        ArgumentError(
+            "method = :var is not available with `trend` ≥ 1: the reference simulates the " *
+                "trend on the burn-in clock but estimates it on the sample clock; use " *
+                "method = :block or :simulation"
+        )
+    )
+    _gl_nrows(data) == f.T || throw(
+        ArgumentError(
+            "`data` has $(_gl_nrows(data)) rows but the FEVD was estimated on $(f.T); pass " *
+                "the data given to `fevd`"
+        )
+    )
     burnin >= 0 || throw(ArgumentError("`burnin` must be non-negative (got $burnin)"))
-    criterion in (:hqic, :bic, :aic) || throw(ArgumentError(
-        "`criterion` must be :hqic, :bic or :aic (got :$criterion)"))
+    criterion in (:hqic, :bic, :aic) || throw(
+        ArgumentError(
+            "`criterion` must be :hqic, :bic or :aic (got :$criterion)"
+        )
+    )
     skipfirst && f.lhs !== :cumul &&
-        throw(ArgumentError(
+        throw(
+        ArgumentError(
             "`skipfirst` reproduces the reference's VAR on rows 2:T, which only arises with " *
-            "a cumul(v) response; with ldiff(y) the VAR always uses every row"))
+                "a cumul(v) response; with ldiff(y) the VAR always uses every row"
+        )
+    )
     # Levels that enter only through firstdiff() and whose difference is another
     # variable (cumul(dy) with lags(firstdiff(y), p)): the VAR simulates the
     # difference and each draw rebuilds the level by cumulation, as the reference
@@ -288,15 +323,21 @@ function _fevd_var(f::LPFEVD, data::AbstractDataFrame; vars, nlags, criterion::S
     else
         varlist = collect(Symbol, vars)
         for (s, d) in levels
-            s in varlist && throw(ArgumentError(
-                "`vars` holds both $s and its first difference $d, so the VAR would be " *
-                "singular; drop $s: each draw rebuilds it by cumulating $d"))
+            s in varlist && throw(
+                ArgumentError(
+                    "`vars` holds both $s and its first difference $d, so the VAR would be " *
+                        "singular; drop $s: each draw rebuilds it by cumulating $d"
+                )
+            )
         end
     end
     absent = setdiff(f.variables, varlist, first.(levels))
-    isempty(absent) || throw(ArgumentError(
-        "the FEVD specification uses $(absent), which are not in `vars` = $(varlist); " *
-        "every variable the estimator needs must be simulated by the VAR"))
+    isempty(absent) || throw(
+        ArgumentError(
+            "the FEVD specification uses $(absent), which are not in `vars` = $(varlist); " *
+                "every variable the estimator needs must be simulated by the VAR"
+        )
+    )
     j = findfirst(isequal(f.shock), varlist)
     r = findfirst(isequal(f.response), varlist)
 
@@ -333,8 +374,12 @@ function _fevd_var(f::LPFEVD, data::AbstractDataFrame; vars, nlags, criterion::S
             init = rand(drng, 1:(v.Tu + 1))
             Yb = _var_simulate(v.c, v.A, Ustar, Y[init:(init + p - 1), :])
             # the origin of a rebuilt level is irrelevant: it enters through firstdiff
-            d = NamedTuple{names}((Tuple(Yb[keep, k] for k in cols)...,
-                Tuple(accumulate(+, Yb[keep, k]) for k in lcols)...))
+            d = NamedTuple{names}(
+                (
+                    Tuple(Yb[keep, k] for k in cols)...,
+                    Tuple(accumulate(+, Yb[keep, k]) for k in lcols)...,
+                )
+            )
             all(c -> all(isfinite, c), d) || error("non-finite simulated data")
             est = _gl_point(f, d)
             all(isfinite, est.share) || error("non-finite share")
@@ -362,22 +407,32 @@ function _fevd_var(f::LPFEVD, data::AbstractDataFrame; vars, nlags, criterion::S
     else
         irf_kept = irf_bc = irf_se_boot = irfstr_kept = nothing
     end
-    return FEVDBootstrap(f, :var, kept, m, pseudo, f.share .- (m .- pseudo),
+    return FEVDBootstrap(
+        f, :var, kept, m, pseudo, f.share .- (m .- pseudo),
         _col_std(kept), copy(f.se_pw), copy(f.se), irf_kept, irf_bc, irf_se_boot,
         irfstr_kept, varlist, p, ic, skipfirst, Int(burnin), nothing, nothing, nothing,
-        nboot, nfail)
+        nboot, nfail
+    )
 end
 
-function _fevd_block(f::LPFEVD; blocklength::Integer, nboot::Int, rng::AbstractRNG,
-        threaded::Bool)
-    f.estimator === :r2 || throw(ArgumentError(
-        "method = :block (Kilian–Kim) is defined for the R² estimator only; use " *
-        ":var or :simulation for LP-A/LP-B"))
+function _fevd_block(
+        f::LPFEVD; blocklength::Integer, nboot::Int, rng::AbstractRNG,
+        threaded::Bool
+    )
+    f.estimator === :r2 || throw(
+        ArgumentError(
+            "method = :block (Kilian–Kim) is defined for the R² estimator only; use " *
+                ":var or :simulation for LP-A/LP-B"
+        )
+    )
     ℓ = Int(blocklength)
     ℓ >= 1 || throw(ArgumentError("`blocklength` must be at least 1 (got $ℓ)"))
     H = f.horizon
-    f.nobs[end] >= ℓ || throw(ArgumentError(
-        "`blocklength` = $ℓ exceeds the $(f.nobs[end]) observations of horizon $H"))
+    f.nobs[end] >= ℓ || throw(
+        ArgumentError(
+            "`blocklength` = $ℓ exceeds the $(f.nobs[end]) observations of horizon $H"
+        )
+    )
     des = f.design
     T, t0 = f.T, f.t0
     seeds = rand(rng, UInt64, nboot)
@@ -413,28 +468,34 @@ function _fevd_block(f::LPFEVD; blocklength::Integer, nboot::Int, rng::AbstractR
 
     kept, _, nfail = _fevd_draw_moments(draws, failures, errors, "block bootstrap")
     m = _col_mean(kept)
-    return FEVDBootstrap(f, :block, kept, m, nothing, 2 .* f.share .- m, _col_std(kept),
+    return FEVDBootstrap(
+        f, :block, kept, m, nothing, 2 .* f.share .- m, _col_std(kept),
         copy(f.se_pw), copy(f.se), nothing, nothing, nothing, nothing, nothing, nothing,
-        nothing, nothing, nothing, ℓ, nothing, nothing, nboot, nfail)
+        nothing, nothing, nothing, ℓ, nothing, nothing, nboot, nfail
+    )
 end
 
-function _fevd_simulation(f::LPFEVD; prewhiten::Bool, bound::Bool, nboot::Int,
-        rng::AbstractRNG, threaded::Bool)
+function _fevd_simulation(
+        f::LPFEVD; prewhiten::Bool, bound::Bool, nboot::Int,
+        rng::AbstractRNG, threaded::Bool
+    )
     H = f.horizon
     est = f.estimator
     clamp01 = bound && est === :r2
     Vs = prewhiten ? f.avar_pw : f.avar
-    factors = Union{Nothing, Matrix{Float64}}[all(isfinite, Vs[h + 1]) ?
-                                              _gl_psd_factor(Vs[h + 1]) : nothing
-                                              for h in 0:H]
+    factors = Union{Nothing, Matrix{Float64}}[
+        all(isfinite, Vs[h + 1]) ?
+            _gl_psd_factor(Vs[h + 1]) : nothing
+            for h in 0:H
+    ]
     skipped = [h for h in 0:H if factors[h + 1] === nothing]
     hint = prewhiten && any(h -> all(isfinite, f.avar[h + 1]), skipped) ?
-           " The covariance without prewhitening is available at some of them " *
-           "(`prewhiten = false`)." : ""
+        " The covariance without prewhitening is available at some of them " *
+        "(`prewhiten = false`)." : ""
     isempty(skipped) || @warn "fevdbootstrap (simulation): the " *
-          "$(prewhiten ? "prewhitened " : "")asymptotic variance is not available at " *
-          "horizons $(skipped) (see the warnings of `fevd`); the bias-corrected share " *
-          "and its standard errors are NaN there." * hint
+        "$(prewhiten ? "prewhitened " : "")asymptotic variance is not available at " *
+        "horizons $(skipped) (see the warnings of `fevd`); the bias-corrected share " *
+        "and its standard errors are NaN there." * hint
 
     seeds = rand(rng, UInt64, nboot)
     draws = fill(NaN, nboot, H + 1)
@@ -465,30 +526,38 @@ function _fevd_simulation(f::LPFEVD; prewhiten::Bool, bound::Bool, nboot::Int,
             g = _gl_r2_gradient(θ, bc[h + 1])
         else
             Nq = (length(θ) - 2) ÷ (h + 1)
-            g = _gl_lp_gradient(est, view(f.irf, 1:(h + 1)), f.shock_var, θ[end],
-                f.mse[h + 1], bc[h + 1], Nq)
+            g = _gl_lp_gradient(
+                est, view(f.irf, 1:(h + 1)), f.shock_var, θ[end],
+                f.mse[h + 1], bc[h + 1], Nq
+            )
         end
         se_pw[h + 1] = _gl_delta_se(g, f.avar_pw[h + 1])
         se[h + 1] = _gl_delta_se(g, f.avar[h + 1])
     end
     # Only horizons with a bias-corrected share: where the covariance used for the
     # draws is missing, bc (and so the gradient) is NaN, already reported above
-    negative = [h
-                for h in 0:H
-                if isfinite(bc[h + 1]) &&
-        ((isnan(se_pw[h + 1]) && all(isfinite, f.avar_pw[h + 1])) ||
-         (isnan(se[h + 1]) && all(isfinite, f.avar[h + 1])))]
+    negative = [
+        h
+            for h in 0:H
+            if isfinite(bc[h + 1]) &&
+            (
+                (isnan(se_pw[h + 1]) && all(isfinite, f.avar_pw[h + 1])) ||
+                (isnan(se[h + 1]) && all(isfinite, f.avar[h + 1]))
+            )
+    ]
     isempty(negative) || @warn "fevdbootstrap (simulation): the delta-method variance " *
-          "at the bias-corrected share is negative at horizons $(negative) (the " *
-          "covariance is not positive semidefinite); the standard errors are NaN there."
-    return FEVDBootstrap(f, :simulation, kept, m, nothing, bc, _col_std(kept), se_pw, se,
+        "at the bias-corrected share is negative at horizons $(negative) (the " *
+        "covariance is not positive semidefinite); the standard errors are NaN there."
+    return FEVDBootstrap(
+        f, :simulation, kept, m, nothing, bc, _col_std(kept), se_pw, se,
         nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing,
-        nothing, prewhiten, clamp01, nboot, nfail)
+        nothing, prewhiten, clamp01, nboot, nfail
+    )
 end
 
 """
     fevdbootstrap(f::LPFEVD, data = nothing; method = :var, nboot = 2000,
-                  rng = Random.default_rng(), threaded = false, kwargs...) -> FEVDBootstrap
+                  rng = default_rng(), threaded = false, kwargs...) -> FEVDBootstrap
 
 Bias correction of a Gorodnichenko–Lee forecast-error variance decomposition
 (see [`fevd`](@ref)) by one of the three procedures of the paper. Each produces
@@ -582,10 +651,11 @@ fevdbootstrap(f; method = :block, rng = Xoshiro(1))
 fevdbootstrap(f; method = :simulation, rng = Xoshiro(1))
 ```
 """
-function fevdbootstrap(f::LPFEVD, data::Union{Nothing, AbstractDataFrame} = nothing;
+function fevdbootstrap(
+        f::LPFEVD, data = nothing;
         method::Symbol = :var,
         nboot::Integer = 2000,
-        rng::AbstractRNG = Random.default_rng(),
+        rng::AbstractRNG = default_rng(),
         threaded::Bool = false,
         vars::Union{Nothing, AbstractVector{Symbol}} = nothing,
         nlags::Union{Integer, AbstractVector{<:Integer}} = 1:10,
@@ -594,70 +664,96 @@ function fevdbootstrap(f::LPFEVD, data::Union{Nothing, AbstractDataFrame} = noth
         burnin::Integer = 100,
         blocklength::Integer = 4,
         prewhiten::Bool = true,
-        bound::Bool = true)
-    method in _FEVD_METHODS || throw(ArgumentError(
-        "`method` must be :var, :block or :simulation (got :$method)"))
-    nboot >= 2 || throw(ArgumentError(
-        "`nboot` must be at least 2 (got $nboot): the draws' standard deviation " *
-        "needs two of them"))
+        bound::Bool = true
+    )
+    method in _FEVD_METHODS || throw(
+        ArgumentError(
+            "`method` must be :var, :block or :simulation (got :$method)"
+        )
+    )
+    nboot >= 2 || throw(
+        ArgumentError(
+            "`nboot` must be at least 2 (got $nboot): the draws' standard deviation " *
+                "needs two of them"
+        )
+    )
     B = Int(nboot)
     if method === :var
-        data === nothing && throw(ArgumentError(
-            "method = :var fits a VAR to the data; pass the data frame given to `fevd`"))
-        return _fevd_var(f, data; vars, nlags, criterion, skipfirst, burnin,
-            nboot = B, rng, threaded)
+        data === nothing && throw(
+            ArgumentError(
+                "method = :var fits a VAR to the data; pass the data given to `fevd`"
+            )
+        )
+        return _fevd_var(
+            f, _gl_table(data); vars, nlags, criterion, skipfirst, burnin,
+            nboot = B, rng, threaded
+        )
     elseif method === :block
         return _fevd_block(f; blocklength, nboot = B, rng, threaded)
     end
     return _fevd_simulation(f; prewhiten, bound, nboot = B, rng, threaded)
 end
 
-function fevdbootstrap(f::LPFEVD, data; kwargs...)
-    fevdbootstrap(f, DataFrame(data); kwargs...)
-end
-
-const _FEVD_METHOD_LABELS = Dict(:var => "VAR residual bootstrap",
-    :block => "moving-block bootstrap", :simulation => "asymptotic simulation")
+const _FEVD_METHOD_LABELS = Dict(
+    :var => "VAR residual bootstrap",
+    :block => "moving-block bootstrap", :simulation => "asymptotic simulation"
+)
 
 function Base.show(io::IO, b::FEVDBootstrap)
-    print(io, "FEVDBootstrap(estimator=:", b.estimator, ", method=:", b.method,
-        ", horizon=0:", b.horizon, ", nboot=", b.nboot, ")")
+    return print(
+        io, "FEVDBootstrap(estimator=:", b.estimator, ", method=:", b.method,
+        ", horizon=0:", b.horizon, ", nboot=", b.nboot, ")"
+    )
 end
 
 function Base.show(io::IO, ::MIME"text/plain", b::FEVDBootstrap)
     f = b.fevd
-    println(io, "FEVDBootstrap (Gorodnichenko–Lee ", _fevd_label(f.estimator), ", ",
-        _FEVD_METHOD_LABELS[b.method], ")")
+    println(
+        io, "FEVDBootstrap (Gorodnichenko–Lee ", _fevd_label(f.estimator), ", ",
+        _FEVD_METHOD_LABELS[b.method], ")"
+    )
     println(io, "  Response:   ", f.spec.lhs_term)
     println(io, "  Shock:      ", f.shock)
     if b.method === :var
-        println(io, "  VAR:        ", join(string.(b.vars), ", "), "   (p = ", b.nlags,
+        println(
+            io, "  VAR:        ", join(string.(b.vars), ", "), "   (p = ", b.nlags,
             b.ic === nothing ? "" : ", by :$(b.ic.criterion)", ")",
-            b.skipfirst ? ", rows 2:T" : "", ", burn-in ", b.burnin)
+            b.skipfirst ? ", rows 2:T" : "", ", burn-in ", b.burnin
+        )
     elseif b.method === :block
         println(io, "  Blocks:     length ", b.blocklength)
     else
-        println(io, "  Covariance: ", b.prewhiten ? "prewhitened" : "not prewhitened",
-            b.bound ? ", R² draws clamped to [0, 1]" : "")
+        println(
+            io, "  Covariance: ", b.prewhiten ? "prewhitened" : "not prewhitened",
+            b.bound ? ", R² draws clamped to [0, 1]" : ""
+        )
     end
     println(io, "  Draws:      ", b.nboot, b.nfail > 0 ? " ($(b.nfail) failed)" : "")
     hz = collect(0:(f.horizon))
     if b.pseudo_truth === nothing
-        data = (; h = hz, s = f.share, bc = b.biascorrected, m = b.mean_draws,
-            sb = b.se_boot)
+        data = (;
+            h = hz, s = f.share, bc = b.biascorrected, m = b.mean_draws,
+            sb = b.se_boot,
+        )
         labels = ["Horizon", "Share", "Bias-corr.", "Mean draws", "s.e. (draws)"]
     else
-        data = (; h = hz, s = f.share, bc = b.biascorrected, m = b.mean_draws,
-            pt = b.pseudo_truth, sb = b.se_boot)
-        labels = ["Horizon", "Share", "Bias-corr.", "Mean draws", "VAR share",
-            "s.e. (draws)"]
+        data = (;
+            h = hz, s = f.share, bc = b.biascorrected, m = b.mean_draws,
+            pt = b.pseudo_truth, sb = b.se_boot,
+        )
+        labels = [
+            "Horizon", "Share", "Bias-corr.", "Mean draws", "VAR share",
+            "s.e. (draws)",
+        ]
     end
     nc = length(labels)
-    pretty_table(io, data;
+    pretty_table(
+        io, data;
         column_labels = labels,
         title = "Forecast-error variance share of $(f.shock)",
-        formatters = [fmt__round(4, collect(2:nc))],
+        formatters = [(v, i, j) -> j >= 2 ? round(v; digits = 4) : v],
         alignment = fill(:r, nc),
-        table_format = TextTableFormat(borders = text_table_borders__unicode_rounded))
+        table_format = TextTableFormat(borders = text_table_borders__unicode_rounded)
+    )
     return nothing
 end

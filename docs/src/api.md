@@ -5,24 +5,23 @@
 ```@docs
 lp
 lpiv
+horizonmodel
 coefpath
+nobs(::AbstractLocalProjection)
 ```
 
 ## Covariance and summaries
 
+The covariance estimator is stored in the result (HC1 by default, `CR1(unit)` for
+panels); `lp_result + vcov(estimator)` returns a copy that uses `estimator` at every
+horizon. Bands built on `EWC(B)` use Student-``t_B`` critical values.
+
 ```@docs
-vcov(::LocalProjections.CovarianceMatrices.AbstractAsymptoticVarianceEstimator, ::LocalProjections.LPResult)
-vcov(::LocalProjections.CovarianceMatrices.AbstractAsymptoticVarianceEstimator, ::LocalProjections.BiasCorrectedLP)
-stderror(::LocalProjections.LocalProjectionCovariance)
+stderror(::AbstractLocalProjection)
 summarize
+IRFSummary
 ewc_bandwidth
 ```
-
-## Estimation sample
-
-`lp` and `lpiv` take `sample = :horizon` (default: every horizon uses all its
-complete observations) or `sample = :common` (every horizon uses the
-observations complete at all horizons `0:horizon`); see the `lp` docstring.
 
 ## State dependence
 
@@ -75,21 +74,18 @@ FEVDSummary
 ## Instrumental variables
 
 ```@docs
-first_stage(::LocalProjections.LocalProjectionIV, ::Int)
-first_stage(::LocalProjections.LocalProjectionIV)
-weakivtest(::LocalProjections.LocalProjectionIV, ::Int)
-weakivtest(::LocalProjections.LocalProjectionIV)
+first_stage(::LocalProjectionIV, ::Int)
+first_stage(::LocalProjectionIV)
+weakivtest(::LocalProjectionIV, ::Int)
+weakivtest(::LocalProjectionIV)
 ```
 
 ## Result types
 
 ```@docs
+AbstractLocalProjection
 LocalProjection
 LocalProjectionIV
-LocalProjectionCovariance
-IRFSummary
-LocalProjections.LPResult
-LocalProjections.LPEstimate
 ```
 
 ## Transformation terms
@@ -108,21 +104,29 @@ anchor
 ldiff
 hbr
 firstdiff
-LongDiffTerm
-DiffTerm
+LocalProjections.LongDiffTerm
+LocalProjections.DiffTerm
 ```
 
 ## Plotting and conversion
 
-Plots.jl recipes are available for every result type: `plot(lp, cov_or_estimator; term, levels)`,
+Every plot draws the `LocalProjectionIRFResult` that `as_irf_result` returns, with
+the plotting methods of MacroEconometricTools.jl. With Plots.jl:
+`plot(lp; term, levels)`, `plot(lp, estimator; term, levels)`,
 `plot(b::LPBootstrap; levels, method)`, `plot(f::LPFEVD; levels, prewhiten)` and
-`plot(b::FEVDBootstrap; levels, band, biascorrected, prewhiten)`. The Makie functions `irfplot` and
-`irfplot!` are re-exported from MacroEconometricTools.jl and enabled by the
-package extension once Makie is loaded.
+`plot(b::FEVDBootstrap; levels, band, biascorrected, prewhiten)`. The Makie
+functions `irfplot` and `irfplot!` are re-exported from MacroEconometricTools.jl and
+need a Makie backend.
 
 ```@docs
-as_irf_result
-irfplot_axis
+as_irf_result(::AbstractLocalProjection)
+as_irf_result(::LPBootstrap)
+as_irf_result(::LPFEVD)
+as_irf_result(::FEVDBootstrap)
+irfplot(::AbstractLocalProjection)
+irfplot!(::Any, ::AbstractLocalProjection)
+irfplot(::LPBootstrap)
+irfplot(::LPFEVD)
 ```
 
 ## Index

@@ -1,5 +1,5 @@
 repos:
-  - repo: https://github.com/qiaojunfeng/pre-commit-julia-format
-    rev: v0.2.0
+  - repo: https://github.com/fredrikekre/runic-pre-commit
+    rev: v2.2.0
     hooks:
-      - id: julia-format
+      - id: runic
