@@ -118,6 +118,57 @@ summary_99 = summarize(lp_result, HC1(); level=0.99)
 println("99% CI width: ", round.(summary_99.upper .- summary_99.lower, digits=3))
 ```
 
+## Joint Inference Across Horizons
+
+The bands above are *pointwise*: each covers its own horizon with probability
+`level`, so they cannot test hypotheses that involve several horizons (is the
+response zero everywhere? is it monotone?). The estimates of different horizons
+come from regressions on overlapping samples and are correlated. `jointvcov`
+estimates their covariance by stacking the scores of every horizon on one time axis
+(Stata's `suest`), under the stored estimator, with the pointwise standard errors on
+its diagonal:
+
+```@example infer
+V = jointvcov(lp_result; term=:x)
+round.(V[1:4, 1:4], digits=5)
+```
+
+`jointtest` is the Wald test that the response equals `value` (0 by default) at all
+`horizons` (all of them by default). Its reference distribution follows the
+estimator: ``\chi^2_m`` for HC and kernel HAC, and the fixed-smoothing
+``F_{m,B-m+1}`` for `EWC(B)`, which needs ``B \ge m``.
+
+```@example infer
+jointtest(lp_result; term=:x)
+```
+
+```@example infer
+jointtest(lp_ewc; term=:x, horizons=0:6)
+```
+
+A *simultaneous* band covers the whole response with probability `level`.
+The sup-t band of Montiel Olea and Plagborg-Møller (2019) widens the pointwise one
+by a common critical value ``c``, the `level` quantile of
+``\max_h |\hat\theta_h - \theta_h| / \mathrm{se}_h``, which is simulated from the
+correlation in `jointvcov` (for `EWC(B)`, from its fixed-smoothing limit).
+`bands = :supt` builds it in `summarize`, `plot`, `irfplot` and `as_irf_result`:
+
+```@example infer
+supt_critical_value(lp_result; term=:x, level=0.90)   # vs 1.645 pointwise
+```
+
+```@example infer
+summarize(lp_result; term=:x, level=0.90, bands=:supt)
+```
+
+Any shape restriction can be read off the simultaneous band: if no function with
+the hypothesized shape fits inside it, the hypothesis is rejected at `1 - level`.
+The critical value is simulated with a fixed default seed (100,000 draws, Monte
+Carlo error up to about 0.01 at 95%); pass `rng` and `ndraws` to `supt_critical_value` to
+change them. Joint inference covers OLS and IV projections on a single time series
+with HC0–HC5, kernel HAC or EWC estimators; panels, `fe()` and cluster or
+Driscoll–Kraay estimators throw.
+
 ## Plotting IRFs
 
 Using Plots.jl with our plot recipes:
@@ -139,6 +190,12 @@ plot(lp_result, HC1();
      xlabel="Horizon",
      ylabel="Response",
      legend=:topright)
+```
+
+### Simultaneous Bands
+
+```@example infer
+plot(lp_result, HC1(); levels=[0.90], bands=:supt, title="90% sup-t band")
 ```
 
 ### Comparing Variance Estimators

@@ -23,6 +23,20 @@ IRFSummary
 ewc_bandwidth
 ```
 
+## Joint inference across horizons
+
+The covariance of an impulse-response path across horizons, Wald tests of
+several horizons at once, and sup-t simultaneous bands (`summarize`, `plot`,
+`irfplot` and `as_irf_result` take `bands = :supt`); see the
+[inference tutorial](tutorials/inference.md).
+
+```@docs
+jointvcov
+jointtest
+JointTest
+supt_critical_value
+```
+
 ## State dependence
 
 `lp` and `lpiv` take `state`, `statelag` and `regimes` keywords; see their
@@ -71,6 +85,15 @@ FEVDBootstrap
 FEVDSummary
 ```
 
+The variance share of a projection's implicit shock, the ``R^2`` recipe of
+Plagborg-Møller's local-projection course:
+
+```@docs
+implicitshock
+implicitfevd
+ImplicitFEVD
+```
+
 ## Instrumental variables
 
 ```@docs
@@ -114,7 +137,8 @@ Every plot draws the `LocalProjectionIRFResult` that `as_irf_result` returns, wi
 the plotting methods of MacroEconometricTools.jl. With Plots.jl:
 `plot(lp; term, levels)`, `plot(lp, estimator; term, levels)`,
 `plot(b::LPBootstrap; levels, method)`, `plot(f::LPFEVD; levels, prewhiten)` and
-`plot(b::FEVDBootstrap; levels, band, biascorrected, prewhiten)`. The Makie
+`plot(b::FEVDBootstrap; levels, band, biascorrected, prewhiten)` and `plot(f::ImplicitFEVD)`;
+`bands = :supt` gives simultaneous bands for projections. The Makie
 functions `irfplot` and `irfplot!` are re-exported from MacroEconometricTools.jl and
 need a Makie backend.
 

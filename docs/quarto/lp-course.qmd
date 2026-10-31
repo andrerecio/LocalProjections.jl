@@ -1,0 +1,278 @@
+---
+title: "Variance decompositions and joint inference"
+subtitle: "Plagborg-Møller's local-projection course: temperature shocks and world GDP (Bilal and Känzig), 1960–2019"
+engine: julia
+---
+
+```{julia}
+#| echo: false
+#| output: false
+include("_setup.jl")
+using CovarianceMatrices: HC0, EWC
+using LinearAlgebra: diag
+using Distributions: Chisq, ccdf
+```
+
+Mikkel Plagborg-Møller's short course *Local projections for applied
+macroeconomics* (2026) works one example through its Stata code: the effect of
+global temperature shocks on world GDP, after Bilal and Känzig (2026). This page
+reruns two of its steps that the package did not have: the **variance
+decomposition** of lecture 1, which asks how much of the GDP forecast error the
+temperature shock explains, and the **joint inference** of lecture 3, a Wald test
+of all horizons at once and a simultaneous confidence band. In Stata they take a
+loop of `regress`/`predict`, `suest` and a user-written command; here they are
+`implicitfevd`, `jointtest` and `bands = :supt`. Every number is checked against
+the course's Stata commands at the end of the page.
+
+## Data and specification
+
+The course's extract of the Bilal–Känzig data ships as
+`docs/src/data/bilal_kanzig.csv`: annual, 1960–2019, with world real GDP per
+capita (100·log, `lnrgdppc_world_pwt`), the global temperature anomaly
+(`gtmp_bkly_aw_dtfe2s`, the Hamilton-filter forecast error of global temperature
+in °C), a global-recession indicator, the log oil price and the one-year Treasury
+yield.
+
+```{julia}
+bk = bk_data()
+first(bk[:, [:year, :lnrgdppc_world_pwt, :gtmp_bkly_aw_dtfe2s, :recessiondates]], 3)
+```
+
+With $y_t$ log GDP, $x_t$ the anomaly, $r_t$ the recession indicator and $w_t$ the
+four lagged series, the local projection is
+
+$$
+y_{t+h} = \mu_h + \theta_h x_t + \sum_{j=0}^{2} \gamma_{h,j} r_{t-j}
+        + \sum_{j=1}^{2} \delta_{h,j}' w_{t-j} + \xi_{h,t+h}, \qquad h = 0, \dots, 10,
+$$
+
+with heteroskedasticity-robust (HC1) standard errors, the course's
+`reg ..., robust`. The lagged controls make them valid without a HAC correction
+(lag augmentation).
+
+```{julia}
+m = lp(@formula(leads(lnrgdppc_world_pwt) ~ gtmp_bkly_aw_dtfe2s + recessiondates +
+                lags(recessiondates, 2) + lags(lnrgdppc_world_pwt, 2) +
+                lags(gtmp_bkly_aw_dtfe2s, 2) + lags(lnpoil_wti, 2) + lags(treasury1y, 2)),
+       bk; horizon = 10)
+summarize(m; level = 0.68)
+```
+
+```{julia}
+#| echo: false
+#| output: false
+θ = coefpath(m)
+x̃ = implicitshock(m)
+sdx = std(filter(isfinite, x̃))
+```
+
+A 1 °C anomaly lowers world GDP per capita by `{julia} f2(-θ[5])`% after four years
+and `{julia} f2(-θ[7])`% after six.
+
+## The implicit shock
+
+By Frisch–Waugh, $\theta_h$ is the response to $\tilde x_t$, the residual of $x_t$
+on all the controls: the movement in temperature that recessions and past
+economic conditions do not explain. `implicitshock` returns it, aligned with the
+rows of the data:
+
+```{julia}
+x̃ = implicitshock(m)
+std(filter(isfinite, x̃))
+```
+
+```{julia}
+#| echo: false
+#| fig-cap: "The implicit temperature shock (°C), the residual of the anomaly on the controls."
+#| fig-height: 2.6
+ok = isfinite.(x̃)
+p = plot(bk.year[ok], x̃[ok]; c = INK, lw = 1.4, base()..., title = "implicit shock, °C")
+hline!(p, [0.0]; c = RULE, ls = :dot, lw = 0.8)
+plot(p; size = (720, 260), FIGKW...)
+```
+
+Its standard deviation, `{julia} f2(sdx)` °C, is the size of a typical shock, so
+a 1 °C impulse is about `{julia} round(Int, 1 / sdx)` standard deviations, an
+unusually large one.
+
+## Variance decomposition
+
+How much of the uncertainty about future GDP is due to temperature shocks? The
+course's recipe, a version of Gorodnichenko and Lee (2020), runs at each horizon
+two regressions:
+
+1. regress $y_{t+h}$ on the controls (everything but $x_t$) and keep the forecast
+   error $\hat f_{h,t+h}$;
+2. regress $\hat f_{h,t+h}$ on a constant and $\tilde x_t, \tilde x_{t+1}, \dots,
+   \tilde x_{t+h}$; the share is its $R^2$.
+
+The share is the fraction of the forecast-error variance that would disappear if
+the current and future shocks were known. `implicitfevd` runs both steps from the
+fitted projection:
+
+```{julia}
+fv = implicitfevd(m)
+```
+
+```{julia}
+#| echo: false
+#| fig-cap: "Share of the forecast-error variance of world GDP due to temperature shocks."
+#| fig-height: 2.8
+p = plot(0:10, fv.share; c = INK, lw = 1.8, marker = :circle, ms = 3, msw = 0,
+         mc = INK, ylims = (0, 0.6), xticks = 0:10, base()...,
+         title = "share of forecast-error variance", xlabel = "horizon (years)")
+plot(p; size = (720, 280), FIGKW...)
+```
+
+Temperature shocks explain `{julia} round(100 * fv.share[3]; digits = 1)`% of the
+variance of the two-year GDP forecast error and
+`{julia} round(100 * fv.share[8]; digits = 1)`% of the seven-year one, the figures
+on the course's slides.
+
+The package's `fevd`, the port of Gorodnichenko and Lee's own code, would not
+accept this specification as it stands: it treats the shock as observed and
+demeaned rather than residualized, conditions only on lagged variables, and needs
+a `cumul` or `ldiff` response. `implicitfevd` follows the course instead: the shock
+is $\tilde x_t$, the forecast error conditions on the contemporaneous recession
+indicator too, and the $R^2$ is the centred one of a regression with a constant.
+It has no standard errors, as in the course.
+
+## Joint inference across horizons
+
+The 68% band above covers each horizon with probability 0.68 *separately*. A
+hypothesis about several horizons needs the covariance of the estimates across
+horizons, which are correlated because the regressions share their observations.
+`jointvcov` stacks the scores of every horizon on one time axis (Stata's `suest`),
+and `jointtest` is the Wald test that the response is zero at every horizon:
+
+```{julia}
+t = jointtest(m)
+```
+
+```{julia}
+#| echo: false
+#| output: false
+V = jointvcov(m)
+R = V ./ sqrt.(diag(V) * diag(V)')
+```
+
+The estimates are strongly correlated across neighbouring horizons (the
+correlation of $\hat\theta_5$ and $\hat\theta_6$ is `{julia} f2(R[6, 7])`), so the
+pointwise band cannot be read as a joint statement. The null of no effect at any
+horizon is rejected with a p-value of `{julia} f3(t.pvalue)`.
+
+A **simultaneous** band covers the whole response with probability 0.68. The
+sup-t band of Montiel Olea and Plagborg-Møller (2019) widens the pointwise band by
+a common critical value, the 68% quantile of $\max_h |\hat\theta_h - \theta_h| /
+\mathrm{se}_h$, simulated from that correlation:
+
+```{julia}
+c68 = supt_critical_value(m; level = 0.68)
+```
+
+```{julia}
+#| echo: false
+#| fig-cap: "Response of world GDP per capita (%) to a 1 °C temperature shock: 68% pointwise band (shaded) and 68% sup-t simultaneous band (dashed)."
+#| fig-height: 3.2
+s_pw = summarize(m; level = 0.68)
+s_si = summarize(m; level = 0.68, bands = :supt)
+p = plot(0:10, s_pw.lower; fillrange = s_pw.upper, linealpha = 0, fillcolor = INK,
+         fillalpha = BANDALPHA, xticks = 0:10, base()...,
+         title = "response of world GDP (%) to a 1 °C shock", xlabel = "horizon (years)")
+plot!(p, 0:10, [s_si.lower s_si.upper]; c = ACCENT, ls = :dash, lw = 1.2)
+hline!(p, [0.0]; c = RULE, ls = :dot, lw = 0.8)
+plot!(p, 0:10, s_pw.coef; c = INK, lw = 1.8, marker = :circle, ms = 3, msw = 0, mc = INK)
+plot(p; size = (720, 320), FIGKW...)
+```
+
+```{julia}
+#| echo: false
+#| output: false
+excl(s) = findall((s.upper .< 0) .| (s.lower .> 0)) .- 1
+s90 = summarize(m; level = 0.90, bands = :supt)
+hrange(v) = length(v) > 1 && v == collect(first(v):last(v)) ? "$(first(v))–$(last(v))" : join(v, ", ")
+```
+
+The simultaneous band uses `{julia} f2(c68)` standard errors instead of one. It
+still excludes zero at horizons `{julia} hrange(excl(s_si))`, so the negative effect
+of temperature shocks on GDP survives the joint reading. At the 90% level
+(critical value `{julia} f2(supt_critical_value(m; level = 0.9))`) it excludes zero
+at horizons `{julia} hrange(excl(s90))`. Any shape restriction can be checked the
+same way: a monotone response, for instance, is rejected if no monotone function
+fits inside the band.
+
+`bands = :supt` works in `summarize`, `plot` and `irfplot` alike:
+
+```julia
+summarize(m; level = 0.68, bands = :supt)
+plot(m; levels = [0.68], bands = :supt)
+```
+
+With an `EWC(B)` estimator the test becomes the fixed-smoothing $F_{m,\,B-m+1}$
+test and the sup-t draws come from the fixed-$b$ limit, whose margins are
+Student-$t_B$. With $T = 58$ the LLSW rule gives only
+`{julia} ewc_bandwidth(m)` cosine terms, fewer than the eleven horizons, and an
+EWC variance has rank at most $B$, so the joint test is available only for a few
+horizons at a time:
+
+```{julia}
+jointtest(m, EWC(ewc_bandwidth(m)); horizons = 4:8)
+```
+
+## Checking against Stata
+
+```{julia}
+#| echo: false
+#| output: false
+t0 = jointtest(m, HC0())
+N = count(reduce(.|, m.rows))
+```
+
+The course's commands were rerun through PyStata (StataNow 19.5) on the same data,
+with the residuals stored in double precision. The variance shares agree to
+`{julia} @sprintf("%.0e", maximum(abs.(fv.share .- BK_STATA.r2)))`:
+
+```{julia}
+#| echo: false
+#| output: asis
+mdtable(["h", "Stata `e(r2)`", "implicitfevd"],
+        [[h, f4(BK_STATA.r2[h + 1]), f4(fv.share[h + 1])] for h in 0:10];
+        align = ["---:", "---:", "---:"])
+```
+
+For the joint test the two programs differ in one convention.
+`suest, vce(robust)` multiplies the stacked heteroskedasticity-robust matrix of
+every horizon by $N/(N-1)$, with $N = `{julia} N`$ the observations used at any
+horizon, while `jointtest` keeps the finite-sample factor of each horizon's own
+pointwise standard error, here the HC1 factor $n_h/(n_h-k)$ with $n_h$ falling from
+58 to 48 and $k = 13$, so its statistic is smaller. With the unadjusted `HC0()`
+stored, the two are proportional:
+
+| | $\chi^2(11)$ | p-value |
+|---|---:|---:|
+| Stata: `suest lp*, vce(robust)`, `test` | `{julia} f2(BK_STATA.chi2)` | `{julia} f4(BK_STATA.p)` |
+| `jointtest(m, HC0()).wald * (N - 1) / N` | `{julia} f2(t0.wald * (N - 1) / N)` | `{julia} f4(ccdf(Chisq(11), t0.wald * (N - 1) / N))` |
+| `jointtest(m)` (HC1, the pointwise factors) | `{julia} f2(t.statistic)` | `{julia} f4(t.pvalue)` |
+
+The covariance matrix itself matches `suest` to about $10^{-10}$ of its scale. The
+design is ill-conditioned (log GDP near 900 next to its own lags), so the smallest
+entries agree to fewer digits.
+
+The sup-t critical value depends only on the correlation, which every
+heteroskedasticity-robust estimator shares, so it does not depend on the
+convention. The course computes it with Kessler's `estimate_supt_critical_value`,
+by default from 1000 `drawnorm` draws (seed 192837), which gives
+`{julia} f4(BK_STATA.cv68_1000)` at 68%. Applied to those same draws, the package's
+quantile rule returns the same number to the last digit. Stata's draws cannot be
+reproduced in Julia, so the default `supt_critical_value` (100,000 draws of its own)
+is compared with a million Stata draws:
+
+| level | Stata, $10^6$ draws | `supt_critical_value` |
+|---|---:|---:|
+| 68% | `{julia} f3(BK_STATA.cv_1e6[1])` | `{julia} f3(c68)` |
+| 90% | `{julia} f3(BK_STATA.cv_1e6[2])` | `{julia} f3(supt_critical_value(m; level = 0.9))` |
+| 95% | `{julia} f3(BK_STATA.cv_1e6[3])` | `{julia} f3(supt_critical_value(m; level = 0.95))` |
+
+The differences are Monte Carlo error. On Stata/BE the course's `lecture3.do`
+fails at this step: the command stores its 1000 draws in a Stata matrix, and BE
+caps matrices at 800 rows.
