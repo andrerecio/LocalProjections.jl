@@ -230,7 +230,7 @@ window.Quarto = {
 </section>
 <section id="fevd-and-joint-inference" class="level3 example-card">
 <h3 class="anchored" data-anchor-id="fevd-and-joint-inference"><a href="./lp-course.html">FEVD and joint inference</a></h3>
-<p>The variance decomposition and the joint tests and simultaneous bands of Plagborg-Møller’s local-projection course: temperature shocks and world GDP, 1960–2019, checked against the course’s Stata code.</p>
+<p>The variance decomposition and the joint tests and simultaneous bands of Plagborg-Møller’s local-projection course: temperature shocks and world GDP, 1960–2019.</p>
 <p><span class="figs">share of the GDP forecast error at 7 years: 49% · sup-t 68% critical value 1.88</span></p>
 </section>
 </div>
@@ -254,7 +254,7 @@ window.Quarto = {
 <p>From <code>docs/quarto/</code>:</p>
 <div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb3"><pre class="sourceCode sh code-with-copy"><code class="sourceCode bash"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="ex">julia</span> <span class="at">--project</span><span class="op">=</span>. <span class="at">-e</span> <span class="st">'using Pkg; Pkg.instantiate()'</span></span>
 <span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="ex">quarto</span> render</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
-<p>Computed results are frozen in <code>_freeze/</code>, so a page is re-run only when its source changes. A change to the package itself does not invalidate them: re-render a page explicitly (<code>quarto render ramey-zubairy.qmd</code> always executes) or delete <code>_freeze/</code>. This build: LocalProjections at commit c5b7d3c, Julia 1.13.1.</p>
+<p>Computed results are frozen in <code>_freeze/</code>, so a page is re-run only when its source changes. A change to the package itself does not invalidate them: re-render a page explicitly (<code>quarto render ramey-zubairy.qmd</code> always executes) or delete <code>_freeze/</code>. This build: LocalProjections at commit 270aee9, Julia 1.13.1.</p>
 
 
 </section>

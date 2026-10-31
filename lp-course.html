@@ -204,7 +204,6 @@ window.Quarto = {
   <li><a href="#the-implicit-shock" id="toc-the-implicit-shock" class="nav-link" data-scroll-target="#the-implicit-shock">The implicit shock</a></li>
   <li><a href="#variance-decomposition" id="toc-variance-decomposition" class="nav-link" data-scroll-target="#variance-decomposition">Variance decomposition</a></li>
   <li><a href="#joint-inference-across-horizons" id="toc-joint-inference-across-horizons" class="nav-link" data-scroll-target="#joint-inference-across-horizons">Joint inference across horizons</a></li>
-  <li><a href="#checking-against-stata" id="toc-checking-against-stata" class="nav-link" data-scroll-target="#checking-against-stata">Checking against Stata</a></li>
   </ul>
 </nav>
     </div>
@@ -231,7 +230,7 @@ window.Quarto = {
 </header>
 
 
-<p>Mikkel Plagborg-Møller’s short course <em>Local projections for applied macroeconomics</em> (2026) works one example through its Stata code: the effect of global temperature shocks on world GDP, after Bilal and Känzig (2026). This page reruns two of its steps that the package did not have: the <strong>variance decomposition</strong> of lecture 1, which asks how much of the GDP forecast error the temperature shock explains, and the <strong>joint inference</strong> of lecture 3, a Wald test of all horizons at once and a simultaneous confidence band. In Stata they take a loop of <code>regress</code>/<code>predict</code>, <code>suest</code> and a user-written command; here they are <code>implicitfevd</code>, <code>jointtest</code> and <code>bands = :supt</code>. Every number is checked against the course’s Stata commands at the end of the page.</p>
+<p>Mikkel Plagborg-Møller’s short course <em>Local projections for applied macroeconomics</em> (2026) works one example through its Stata code: the effect of global temperature shocks on world GDP, after Bilal and Känzig (2026). This page reruns two of its steps that the package did not have: the <strong>variance decomposition</strong> of lecture 1, which asks how much of the GDP forecast error the temperature shock explains, and the <strong>joint inference</strong> of lecture 3, a Wald test of all horizons at once and a simultaneous confidence band. In Stata they take a loop of <code>regress</code>/<code>predict</code>, <code>suest</code> and a user-written command; here they are <code>implicitfevd</code>, <code>jointtest</code> and <code>bands = :supt</code>.</p>
 <section id="data-and-specification" class="level2">
 <h2 class="anchored" data-anchor-id="data-and-specification">Data and specification</h2>
 <p>The course’s extract of the Bilal–Känzig data ships as <code>docs/src/data/bilal_kanzig.csv</code>: annual, 1960–2019, with world real GDP per capita (100·log, <code>lnrgdppc_world_pwt</code>), the global temperature anomaly (<code>gtmp_bkly_aw_dtfe2s</code>, the Hamilton-filter forecast error of global temperature in °C), a global-recession indicator, the log oil price and the one-year Treasury yield.</p>
@@ -289,7 +288,11 @@ window.Quarto = {
 y_{t+h} = \mu_h + \theta_h x_t + \sum_{j=0}^{2} \gamma_{h,j} r_{t-j}
         + \sum_{j=1}^{2} \delta_{h,j}' w_{t-j} + \xi_{h,t+h}, \qquad h = 0, \dots, 10,
 \]</span></p>
-<p>with heteroskedasticity-robust (HC1) standard errors, the course’s <code>reg ..., robust</code>. The lagged controls make them valid without a HAC correction (lag augmentation).</p>
+<p>with heteroskedasticity-robust (HC1) standard errors, the course’s <code>reg ..., robust</code>. This is the argument of Montiel Olea and Plagborg-Møller (2021): once the projection controls for lags of the data (lag augmentation), the conventional heteroskedasticity-robust standard errors are valid, with no HAC correction and no bandwidth to choose. A recent version of the LP–VAR primer of Montiel Olea, Plagborg-Møller, Qian and Wolf (2025) goes one step further:</p>
+<blockquote class="blockquote">
+<p>The LP estimator should be bias-corrected using the procedure of Herbst and Johannsen (2024). Instead of reporting HAC standard errors for LP, simply report the conventional heteroskedasticity-robust standard errors—or even better, the bootstrap confidence interval discussed in Supplemental Appendix B.</p>
+</blockquote>
+<p>The package has both: <code>biascorrect(m)</code> for the Herbst–Johannsen correction and <code>varbootstrap(m, data; vars, nlags)</code> for that bootstrap. This page stays with the course’s HC1 standard errors.</p>
 <div id="6" class="cell" data-execution_count="1">
 <div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb2"><pre class="sourceCode julia code-with-copy"><code class="sourceCode julia"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a>m <span class="op">=</span> <span class="fu">lp</span>(<span class="pp">@formula</span>(<span class="fu">leads</span>(lnrgdppc_world_pwt) <span class="op">~</span> gtmp_bkly_aw_dtfe2s <span class="op">+</span> recessiondates <span class="op">+</span></span>
 <span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a>                <span class="fu">lags</span>(recessiondates, <span class="fl">2</span>) <span class="op">+</span> <span class="fu">lags</span>(lnrgdppc_world_pwt, <span class="fl">2</span>) <span class="op">+</span></span>
@@ -429,132 +432,6 @@ y_{t+h} = \mu_h + \theta_h x_t + \sum_{j=0}^{2} \gamma_{h,j} r_{t-j}
   p-value:    0.5164</code></pre>
 </div>
 </div>
-</section>
-<section id="checking-against-stata" class="level2">
-<h2 class="anchored" data-anchor-id="checking-against-stata">Checking against Stata</h2>
-<p>The course’s commands were rerun through PyStata (StataNow 19.5) on the same data, with the residuals stored in double precision. The variance shares agree to 4e-14:</p>
-<table class="caption-top table">
-<thead>
-<tr class="header">
-<th style="text-align: right;">h</th>
-<th style="text-align: right;">Stata <code>e(r2)</code></th>
-<th style="text-align: right;">implicitfevd</th>
-</tr>
-</thead>
-<tbody>
-<tr class="odd">
-<td style="text-align: right;">0</td>
-<td style="text-align: right;">0.0082</td>
-<td style="text-align: right;">0.0082</td>
-</tr>
-<tr class="even">
-<td style="text-align: right;">1</td>
-<td style="text-align: right;">0.0267</td>
-<td style="text-align: right;">0.0267</td>
-</tr>
-<tr class="odd">
-<td style="text-align: right;">2</td>
-<td style="text-align: right;">0.0851</td>
-<td style="text-align: right;">0.0851</td>
-</tr>
-<tr class="even">
-<td style="text-align: right;">3</td>
-<td style="text-align: right;">0.1052</td>
-<td style="text-align: right;">0.1052</td>
-</tr>
-<tr class="odd">
-<td style="text-align: right;">4</td>
-<td style="text-align: right;">0.1846</td>
-<td style="text-align: right;">0.1846</td>
-</tr>
-<tr class="even">
-<td style="text-align: right;">5</td>
-<td style="text-align: right;">0.3068</td>
-<td style="text-align: right;">0.3068</td>
-</tr>
-<tr class="odd">
-<td style="text-align: right;">6</td>
-<td style="text-align: right;">0.4492</td>
-<td style="text-align: right;">0.4492</td>
-</tr>
-<tr class="even">
-<td style="text-align: right;">7</td>
-<td style="text-align: right;">0.4916</td>
-<td style="text-align: right;">0.4916</td>
-</tr>
-<tr class="odd">
-<td style="text-align: right;">8</td>
-<td style="text-align: right;">0.4603</td>
-<td style="text-align: right;">0.4603</td>
-</tr>
-<tr class="even">
-<td style="text-align: right;">9</td>
-<td style="text-align: right;">0.4599</td>
-<td style="text-align: right;">0.4599</td>
-</tr>
-<tr class="odd">
-<td style="text-align: right;">10</td>
-<td style="text-align: right;">0.4383</td>
-<td style="text-align: right;">0.4383</td>
-</tr>
-</tbody>
-</table>
-<p>For the joint test the two programs differ in one convention. <code>suest, vce(robust)</code> multiplies the stacked heteroskedasticity-robust matrix of every horizon by <span class="math inline">\(N/(N-1)\)</span>, with <span class="math inline">\(N = 58\)</span> the observations used at any horizon, while <code>jointtest</code> keeps the finite-sample factor of each horizon’s own pointwise standard error, here the HC1 factor <span class="math inline">\(n_h/(n_h-k)\)</span> with <span class="math inline">\(n_h\)</span> falling from 58 to 48 and <span class="math inline">\(k = 13\)</span>, so its statistic is smaller. With the unadjusted <code>HC0()</code> stored, the two are proportional:</p>
-<table class="caption-top table">
-<thead>
-<tr class="header">
-<th></th>
-<th style="text-align: right;"><span class="math inline">\(\chi^2(11)\)</span></th>
-<th style="text-align: right;">p-value</th>
-</tr>
-</thead>
-<tbody>
-<tr class="odd">
-<td>Stata: <code>suest lp*, vce(robust)</code>, <code>test</code></td>
-<td style="text-align: right;">30.32</td>
-<td style="text-align: right;">0.0014</td>
-</tr>
-<tr class="even">
-<td><code>jointtest(m, HC0()).wald * (N - 1) / N</code></td>
-<td style="text-align: right;">30.32</td>
-<td style="text-align: right;">0.0014</td>
-</tr>
-<tr class="odd">
-<td><code>jointtest(m)</code> (HC1, the pointwise factors)</td>
-<td style="text-align: right;">23.16</td>
-<td style="text-align: right;">0.0168</td>
-</tr>
-</tbody>
-</table>
-<p>The covariance matrix itself matches <code>suest</code> to about <span class="math inline">\(10^{-10}\)</span> of its scale. The design is ill-conditioned (log GDP near 900 next to its own lags), so the smallest entries agree to fewer digits.</p>
-<p>The sup-t critical value depends only on the correlation, which every heteroskedasticity-robust estimator shares, so it does not depend on the convention. The course computes it with Kessler’s <code>estimate_supt_critical_value</code>, by default from 1000 <code>drawnorm</code> draws (seed 192837), which gives 1.8907 at 68%. Applied to those same draws, the package’s quantile rule returns the same number to the last digit. Stata’s draws cannot be reproduced in Julia, so the default <code>supt_critical_value</code> (100,000 draws of its own) is compared with a million Stata draws:</p>
-<table class="caption-top table">
-<thead>
-<tr class="header">
-<th>level</th>
-<th style="text-align: right;">Stata, <span class="math inline">\(10^6\)</span> draws</th>
-<th style="text-align: right;"><code>supt_critical_value</code></th>
-</tr>
-</thead>
-<tbody>
-<tr class="odd">
-<td>68%</td>
-<td style="text-align: right;">1.877</td>
-<td style="text-align: right;">1.877</td>
-</tr>
-<tr class="even">
-<td>90%</td>
-<td style="text-align: right;">2.424</td>
-<td style="text-align: right;">2.417</td>
-</tr>
-<tr class="odd">
-<td>95%</td>
-<td style="text-align: right;">2.689</td>
-<td style="text-align: right;">2.680</td>
-</tr>
-</tbody>
-</table>
-<p>The differences are Monte Carlo error. On Stata/BE the course’s <code>lecture3.do</code> fails at this step: the command stores its 1000 draws in a Stata matrix, and BE caps matrices at 800 rows.</p>
 
 
 </section>
