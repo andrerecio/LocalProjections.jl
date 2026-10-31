@@ -57,8 +57,9 @@ Montiel Olea, Plagborg-Møller, Qian and Wolf (2025) goes one step further:
 > bootstrap confidence interval discussed in Supplemental Appendix B.
 
 The package has both: `biascorrect(m)` for the Herbst–Johannsen correction and
-`varbootstrap(m, data; vars, nlags)` for that bootstrap. This page stays with the
-course's HC1 standard errors.
+`varbootstrap(m, data; vars, nlags)` for that bootstrap; the
+[Ramey–Zubairy page](ramey-zubairy.qmd#bias-correction-and-bootstrap-bands)
+applies them. This page stays with the course's HC1 standard errors.
 
 ```{julia}
 m = lp(@formula(leads(lnrgdppc_world_pwt) ~ gtmp_bkly_aw_dtfe2s + recessiondates +
