@@ -74,21 +74,6 @@ end
 # ── Plagborg-Møller's course: Bilal & Känzig, annual, 1960–2019 ──────────────
 bk_data() = CSV.read(datafile("bilal_kanzig.csv"), DataFrame)
 
-# Stata reference: the course's commands rerun through PyStata (StataNow 19.5),
-# with residuals stored as double (fork stata_test/lp_course/course_check.do).
-const BK_STATA = (
-    r2 = [
-        0.008201821727452985, 0.026707978736787874, 0.08512454437910177,
-        0.10523099348585685, 0.18455619400706835, 0.3068270800430123,
-        0.44917978906123746, 0.49159722060512523, 0.46031884005625956,
-        0.45985882322669525, 0.43832824462791553,
-    ],
-    chi2 = 30.31615522231833,           # suest, vce(robust); test, chi2(11)
-    p = 0.0014131342754274,
-    cv68_1000 = 1.8907431111693178,     # estimate_supt_critical_value defaults
-    cv_1e6 = (1.876955331138056, 2.4242624061779217, 2.689406001140615),
-)
-
 # ── figure style (shared with docs/make_rz_*.jl) ─────────────────────────────
 const INK = RGB(0.106, 0.18, 0.31)          # response line and band fill
 const BANDALPHA = 0.18

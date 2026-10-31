@@ -57,7 +57,7 @@ ways with `ldiff`.
 ### [FEVD and joint inference](lp-course.qmd)
 The variance decomposition and the joint tests and simultaneous bands of
 Plagborg-Møller's local-projection course: temperature shocks and world GDP,
-1960–2019, checked against the course's Stata code.
+1960–2019.
 
 [share of the GDP forecast error at 7 years: `{julia} round(Int, 100 * fv_bk.share[8])`% · sup-t 68% critical value `{julia} f2(supt_critical_value(m_bk; level = 0.68))`]{.figs}
 :::

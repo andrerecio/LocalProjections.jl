@@ -8,9 +8,8 @@ engine: julia
 #| echo: false
 #| output: false
 include("_setup.jl")
-using CovarianceMatrices: HC0, EWC
+using CovarianceMatrices: EWC
 using LinearAlgebra: diag
-using Distributions: Chisq, ccdf
 ```
 
 Mikkel Plagborg-Møller's short course *Local projections for applied
@@ -21,8 +20,7 @@ decomposition** of lecture 1, which asks how much of the GDP forecast error the
 temperature shock explains, and the **joint inference** of lecture 3, a Wald test
 of all horizons at once and a simultaneous confidence band. In Stata they take a
 loop of `regress`/`predict`, `suest` and a user-written command; here they are
-`implicitfevd`, `jointtest` and `bands = :supt`. Every number is checked against
-the course's Stata commands at the end of the page.
+`implicitfevd`, `jointtest` and `bands = :supt`.
 
 ## Data and specification
 
@@ -47,8 +45,20 @@ y_{t+h} = \mu_h + \theta_h x_t + \sum_{j=0}^{2} \gamma_{h,j} r_{t-j}
 $$
 
 with heteroskedasticity-robust (HC1) standard errors, the course's
-`reg ..., robust`. The lagged controls make them valid without a HAC correction
-(lag augmentation).
+`reg ..., robust`. This is the argument of Montiel Olea and Plagborg-Møller
+(2021): once the projection controls for lags of the data (lag augmentation), the
+conventional heteroskedasticity-robust standard errors are valid, with no HAC
+correction and no bandwidth to choose. A recent version of the LP–VAR primer of
+Montiel Olea, Plagborg-Møller, Qian and Wolf (2025) goes one step further:
+
+> The LP estimator should be bias-corrected using the procedure of Herbst and
+> Johannsen (2024). Instead of reporting HAC standard errors for LP, simply report
+> the conventional heteroskedasticity-robust standard errors—or even better, the
+> bootstrap confidence interval discussed in Supplemental Appendix B.
+
+The package has both: `biascorrect(m)` for the Herbst–Johannsen correction and
+`varbootstrap(m, data; vars, nlags)` for that bootstrap. This page stays with the
+course's HC1 standard errors.
 
 ```{julia}
 m = lp(@formula(leads(lnrgdppc_world_pwt) ~ gtmp_bkly_aw_dtfe2s + recessiondates +
@@ -218,61 +228,3 @@ horizons at a time:
 ```{julia}
 jointtest(m, EWC(ewc_bandwidth(m)); horizons = 4:8)
 ```
-
-## Checking against Stata
-
-```{julia}
-#| echo: false
-#| output: false
-t0 = jointtest(m, HC0())
-N = count(reduce(.|, m.rows))
-```
-
-The course's commands were rerun through PyStata (StataNow 19.5) on the same data,
-with the residuals stored in double precision. The variance shares agree to
-`{julia} @sprintf("%.0e", maximum(abs.(fv.share .- BK_STATA.r2)))`:
-
-```{julia}
-#| echo: false
-#| output: asis
-mdtable(["h", "Stata `e(r2)`", "implicitfevd"],
-        [[h, f4(BK_STATA.r2[h + 1]), f4(fv.share[h + 1])] for h in 0:10];
-        align = ["---:", "---:", "---:"])
-```
-
-For the joint test the two programs differ in one convention.
-`suest, vce(robust)` multiplies the stacked heteroskedasticity-robust matrix of
-every horizon by $N/(N-1)$, with $N = `{julia} N`$ the observations used at any
-horizon, while `jointtest` keeps the finite-sample factor of each horizon's own
-pointwise standard error, here the HC1 factor $n_h/(n_h-k)$ with $n_h$ falling from
-58 to 48 and $k = 13$, so its statistic is smaller. With the unadjusted `HC0()`
-stored, the two are proportional:
-
-| | $\chi^2(11)$ | p-value |
-|---|---:|---:|
-| Stata: `suest lp*, vce(robust)`, `test` | `{julia} f2(BK_STATA.chi2)` | `{julia} f4(BK_STATA.p)` |
-| `jointtest(m, HC0()).wald * (N - 1) / N` | `{julia} f2(t0.wald * (N - 1) / N)` | `{julia} f4(ccdf(Chisq(11), t0.wald * (N - 1) / N))` |
-| `jointtest(m)` (HC1, the pointwise factors) | `{julia} f2(t.statistic)` | `{julia} f4(t.pvalue)` |
-
-The covariance matrix itself matches `suest` to about $10^{-10}$ of its scale. The
-design is ill-conditioned (log GDP near 900 next to its own lags), so the smallest
-entries agree to fewer digits.
-
-The sup-t critical value depends only on the correlation, which every
-heteroskedasticity-robust estimator shares, so it does not depend on the
-convention. The course computes it with Kessler's `estimate_supt_critical_value`,
-by default from 1000 `drawnorm` draws (seed 192837), which gives
-`{julia} f4(BK_STATA.cv68_1000)` at 68%. Applied to those same draws, the package's
-quantile rule returns the same number to the last digit. Stata's draws cannot be
-reproduced in Julia, so the default `supt_critical_value` (100,000 draws of its own)
-is compared with a million Stata draws:
-
-| level | Stata, $10^6$ draws | `supt_critical_value` |
-|---|---:|---:|
-| 68% | `{julia} f3(BK_STATA.cv_1e6[1])` | `{julia} f3(c68)` |
-| 90% | `{julia} f3(BK_STATA.cv_1e6[2])` | `{julia} f3(supt_critical_value(m; level = 0.9))` |
-| 95% | `{julia} f3(BK_STATA.cv_1e6[3])` | `{julia} f3(supt_critical_value(m; level = 0.95))` |
-
-The differences are Monte Carlo error. On Stata/BE the course's `lecture3.do`
-fails at this step: the command stores its 1000 draws in a Stata matrix, and BE
-caps matrices at 800 rows.
