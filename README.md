@@ -19,8 +19,11 @@ inference with Student-`t` critical values, the Herbst–Johannsen bias
 correction, the VAR residual moving-block bootstrap with VAR lag selection,
 horizon-tracking regressors for cumulative multipliers, state-dependent
 local projections, long-difference local projections (Piger–Stockwell),
-the Hall–Barro–Redlick transformation for fiscal multipliers, and the
-Gorodnichenko–Lee local-projection forecast-error variance decompositions.
+the Hall–Barro–Redlick transformation for fiscal multipliers, the
+Gorodnichenko–Lee local-projection forecast-error variance decompositions, and
+the joint inference across horizons (Wald tests, sup-t simultaneous bands) and
+implicit-shock variance decomposition taught in Plagborg-Møller's
+local-projection course.
 
 ## Contents
 
@@ -32,10 +35,12 @@ Gorodnichenko–Lee local-projection forecast-error variance decompositions.
   - [Bias correction](#bias-correction)
   - [Lag selection](#lag-selection)
   - [Bootstrap inference](#bootstrap-inference)
+  - [Joint inference and simultaneous bands](#joint-inference-and-simultaneous-bands)
   - [Variance decompositions](#variance-decompositions)
   - [Instrumental variables](#instrumental-variables)
   - [Worked example: Ramey–Zubairy (2018)](#worked-example-rameyzubairy-2018)
   - [Worked example: Piger–Stockwell (2025)](#worked-example-pigerstockwell-2025)
+  - [Worked example: Plagborg-Møller's course (Bilal–Känzig)](#worked-example-plagborg-møllers-course-bilalkänzig)
   - [Plotting](#plotting)
   - [Scope and known limitations](#scope-and-known-limitations)
   - [Development](#development)
@@ -323,6 +328,37 @@ reproducible and identical whether or not `threaded = true` is passed. On a
 typical macro sample (T ≈ 240, horizon 20) a draw costs about a millisecond,
 dominated by rebuilding the StatsModels design rather than by linear algebra.
 
+## Joint inference and simultaneous bands
+
+Pointwise bands cover each horizon separately, so they cannot test a hypothesis
+about several horizons. The estimates of different horizons are correlated
+(overlapping samples), and `jointvcov` estimates their covariance by stacking the
+scores of every horizon on one time axis, the `suest` step of Stata, under the
+stored estimator and with the pointwise standard errors on its diagonal.
+`jointtest` is the Wald test of the response at several horizons, and
+`bands = :supt` turns any band into the sup-t simultaneous band of Montiel Olea and
+Plagborg-Møller (2019), which covers the whole response with probability `level`:
+
+```julia
+jointtest(lp_result)                         # H₀: no effect at any horizon, χ²(H+1)
+jointtest(lp_result; horizons = 4:8, value = 0)
+jointvcov(lp_result)                         # (H+1)×(H+1) covariance of θ̂₀, …, θ̂_H
+supt_critical_value(lp_result; level = 0.68) # the c of θ̂_h ± c·se_h
+summarize(lp_result; level = 0.68, bands = :supt)
+plot(lp_result; levels = [0.68], bands = :supt)
+```
+
+The reference distribution follows the stored estimator, as for the pointwise
+bands: `χ²` and Gaussian draws for HC and kernel HAC, and for `EWC(B)` the
+fixed-smoothing `F(m, B−m+1)` test (it needs `B ≥ m` horizons) and sup-t draws from
+the Wishart limit, whose margins are Student-`t_B`. The sup-t value is simulated
+(100,000 draws, a fixed default seed, Monte Carlo error up to about 0.01 at 95%) with the
+quantile rule of Kessler's Stata command `estimate_supt_critical_value`.
+Supported for OLS and IV projections on a single series with HC0–HC5, kernel HAC
+or EWC estimators; panels, `fe()` and cluster or Driscoll–Kraay estimators throw.
+The [course example](#worked-example-plagborg-møllers-course-bilalkänzig) checks
+everything against Stata.
+
 ## Variance decompositions
 
 `fevd` estimates the share of the forecast-error variance of
@@ -356,7 +392,16 @@ fl = fevd(fm, gl; horizon = 20, estimator = :lpb,
 summarize(fevdbootstrap(fl; method = :simulation, rng = Xoshiro(1)))
 ```
 
-Bias-corrected shares and bands are not clamped to `[0, 1]`. The
+Bias-corrected shares and bands are not clamped to `[0, 1]`.
+
+`implicitfevd(lp_result)` is the simpler recipe of Plagborg-Møller's course, for
+any OLS projection with controls: the share at horizon `h` is the `R²` of the
+residual of the response on the controls, regressed on the current and future
+values of the projection's *implicit shock* `x̃_t`, the residual of the impulse on
+all the controls (`implicitshock(lp_result)`, by Frisch–Waugh the shock the
+projection measures responses to). Unlike `fevd`, it conditions on contemporaneous
+controls, takes any left-hand side, and has no standard errors; with an observed
+shock and lagged controls only the two estimate the same share. The
 [FEVD tutorial](docs/src/tutorials/fevd.md) covers the estimators, the band
 conventions and the points where the port departs from the authors' MATLAB
 code.
@@ -671,6 +716,51 @@ their MATLAB loop, the long-difference estimates and standard errors agree to
 log-level regressors), on identical samples. `julia +1.13 --project=docs docs/make_ps_figure.jl`
 regenerates the figure.
 
+## Worked example: Plagborg-Møller's course (Bilal–Känzig)
+
+Mikkel Plagborg-Møller's short course *Local projections for applied
+macroeconomics* (2026) runs one example through its Stata code: the effect of a
+global temperature shock on world GDP per capita, after Bilal and Känzig (2026),
+on annual data for 1960–2019 (`docs/src/data/bilal_kanzig.csv`, provenance in
+`bilal_kanzig_README.md`). The impulse is the temperature anomaly; the controls
+are a global-recession indicator (current and two lags) and two lags of GDP, the
+anomaly, the oil price and the one-year Treasury yield.
+
+```julia
+using LocalProjections, CSV, DataFrames, Plots
+
+bk = CSV.read("docs/src/data/bilal_kanzig.csv", DataFrame)
+m = lp(@formula(leads(lnrgdppc_world_pwt) ~ gtmp_bkly_aw_dtfe2s + recessiondates +
+                lags(recessiondates, 2) + lags(lnrgdppc_world_pwt, 2) +
+                lags(gtmp_bkly_aw_dtfe2s, 2) + lags(lnpoil_wti, 2) + lags(treasury1y, 2)),
+       bk; horizon = 10)                        # HC1, as `reg ..., robust`
+
+implicitfevd(m).share[[3, 8]]                   # 0.085, 0.492 at 2 and 7 years
+jointtest(m)                                    # χ²(11) = 23.16, p = 0.017
+summarize(m; level = 0.68, bands = :supt)       # c = 1.88
+plot(m; levels = [0.68], bands = :supt)
+```
+
+A 1 °C anomaly lowers world GDP by 6.7% after four years and 11.6% after six (the
+typical shock, the standard deviation of `implicitshock(m)`, is 0.10 °C).
+Temperature shocks explain 8.5% of the GDP forecast-error variance at two years
+and 49.2% at seven. The null of no effect at any horizon 0–10 is rejected at 2%,
+and the 68% sup-t band (critical value 1.88 instead of 1) excludes zero at
+horizons 4–8; at 90% it still does at horizons 5 and 6.
+
+Rerun through PyStata (StataNow 19.5) with the course's commands, the variance
+shares agree to 1e-13, the `suest` covariance matrix to 6e-11 of its scale (the
+design has a condition number of 2e10), and the sup-t critical value computed by
+the package's quantile rule from Stata's own `drawnorm` draws to the last digit
+(1.8907 with the default 1000 draws; with a million draws Stata gives
+1.877/2.424/2.689 at 68/90/95%, the package 1.877/2.417/2.680 with 100,000).
+One convention differs: `suest, vce(robust)` scales every horizon by
+`N/(N−1)`, `N = 58` the union of the samples, while `jointtest` keeps each
+horizon's own HC1 factor `n_h/(n_h−k)`, the one of the pointwise standard
+errors. With `HC0()` stored the two are proportional:
+`jointtest(m, HC0()).wald * 57/58` is Stata's `χ²(11) = 30.32`. The sup-t
+critical value depends only on the correlation and is the same under both.
+
 ## Plotting
 
 Every plot draws the `LocalProjectionIRFResult` (MacroEconometricTools.jl)
@@ -678,7 +768,9 @@ that `as_irf_result` returns, so it shows the bands of `summarize`. With
 Plots.jl: `plot(lp; term, levels)` or `plot(lp, estimator; term, levels)` for
 OLS, IV and bias-corrected results, `plot(b; levels, method)` for bootstrap
 bands, and `plot(f)` / `plot(b; band, biascorrected)` for variance
-decompositions. With a Makie backend loaded, `irfplot` and `irfplot!` have
+decompositions (`plot(implicitfevd(m))` for the course's shares).
+`bands = :supt` draws sup-t simultaneous bands in `plot`, `irfplot` and
+`as_irf_result`. With a Makie backend loaded, `irfplot` and `irfplot!` have
 methods for the same results.
 
 ## Scope and known limitations
@@ -694,8 +786,14 @@ methods for the same results.
     with `cumul(v)` or `ldiff(y)` responses on a gap-free single time series
     (`fevd(lp_result, data)` rejects IV, state dependence, panels and
     `sample = :fixed`). Not implemented:
-    the VAR FEVD estimator and its VAR–VAR bootstrap, joint inference across
-    horizons, Driscoll–Kraay standard errors, and `method = :var` with a trend.
+    the VAR FEVD estimator and its VAR–VAR bootstrap, joint inference on the
+    shares across horizons, Driscoll–Kraay standard errors, and `method = :var`
+    with a trend.
+  - **Joint inference.** `jointvcov`, `jointtest` and sup-t bands need one time
+    series (no `unit`, no `fe()`) and an HC0–HC5, kernel HAC or EWC estimator.
+    An automatic HAC bandwidth is selected once for the stacked scores, so the
+    cross-horizon correlation may use a different bandwidth from the standard
+    errors. The bootstrap bands of `varbootstrap` remain pointwise.
   - **Finite-sample factor.** Kernel HAC, EWC and VARHAC carry `n/(n−k)` on
     `lp` and `lpiv` results alike (see [Inference](#inference)); Stata's
     `ivreg2, robust` and `harreg` apply none. `lp_result + vcov(estimator)`
@@ -720,7 +818,7 @@ julia +1.13 --project=benchmark -t 4 benchmark/coverage_study.jl  # bootstrap co
 ```
 
 Test items are tagged (`:vcov`, `:ewc`, `:biascorr`, `:bootstrap`,
-`:lagselect`, `:lpiv`, `:state`, `:ldiff`, `:hbr`, `:fevd`, …) and can be run in isolation with
+`:lagselect`, `:lpiv`, `:state`, `:ldiff`, `:hbr`, `:fevd`, `:joint`, …) and can be run in isolation with
 TestItemRunner.
 
 ## License

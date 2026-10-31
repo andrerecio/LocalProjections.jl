@@ -20,6 +20,12 @@ ld = lp(@formula(ldiff(lip) ~ mp + lags(firstdiff(lip), 12) + lags(firstdiff(lcp
                  lags(firstdiff(gs1), 12)), ps; horizon = 36)
 lv = lp(@formula(leads(lip) ~ mp + lags(lip, 12) + lags(lcpi, 12) + lags(lsp500, 12) +
                  lags(ebp, 12) + lags(gs1, 12)), ps; horizon = 36)
+bk = bk_data()
+m_bk = lp(@formula(leads(lnrgdppc_world_pwt) ~ gtmp_bkly_aw_dtfe2s + recessiondates +
+                   lags(recessiondates, 2) + lags(lnrgdppc_world_pwt, 2) +
+                   lags(gtmp_bkly_aw_dtfe2s, 2) + lags(lnpoil_wti, 2) + lags(treasury1y, 2)),
+          bk; horizon = 10)
+fv_bk = implicitfevd(m_bk)
 commit = try strip(read(`git -C $ROOT rev-parse --short HEAD`, String)) catch; "unknown" end
 ```
 
@@ -47,6 +53,15 @@ ways with `ldiff`.
 [industrial production after 36 months: long differences `{julia} f2(coefpath(ld)[37])` · levels `{julia} f2(coefpath(lv)[37])`]{.figs}
 :::
 
+::: {.example-card}
+### [FEVD and joint inference](lp-course.qmd)
+The variance decomposition and the joint tests and simultaneous bands of
+Plagborg-Møller's local-projection course: temperature shocks and world GDP,
+1960–2019.
+
+[share of the GDP forecast error at 7 years: `{julia} round(Int, 100 * fv_bk.share[8])`% · sup-t 68% critical value `{julia} f2(supt_critical_value(m_bk; level = 0.68))`]{.figs}
+:::
+
 :::
 
 ## Install
@@ -65,7 +80,9 @@ This is a fork of Giuseppe Ragusa's
 0.2. It adds HAR inference with equal-weighted-cosine (EWC) variances and Student-$t$
 critical values, the Herbst–Johannsen bias correction, the VAR moving-block
 bootstrap, VAR lag selection, state-dependent projections, long-difference
-projections, and the Hall–Barro–Redlick transformation for fiscal multipliers.
+projections, the Hall–Barro–Redlick transformation for fiscal multipliers,
+Gorodnichenko–Lee variance decompositions, and joint inference across horizons
+with sup-t simultaneous bands.
 
 ## The workflow in a few lines
 

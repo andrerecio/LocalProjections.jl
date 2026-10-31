@@ -17,6 +17,8 @@ website:
         text: "Ramey–Zubairy (2018)"
       - href: piger-stockwell.qmd
         text: "Piger–Stockwell (2025)"
+      - href: lp-course.qmd
+        text: "FEVD and joint inference"
     right:
       - icon: github
         href: https://github.com/andrerecio/LocalProjections.jl

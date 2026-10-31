@@ -9,6 +9,8 @@ export lagselect, VARLagSelection, nlags
 export biascorrect, BiasCorrectedLP
 export varbootstrap, LPBootstrap
 export fevd, LPFEVD, fevdbootstrap, FEVDBootstrap, FEVDSummary
+export jointvcov, jointtest, JointTest, supt_critical_value
+export implicitshock, implicitfevd, ImplicitFEVD
 export irfplot, irfplot!
 public CumulTerm, LeadTerm, AnchorTerm, LongDiffTerm, DiffTerm
 
@@ -21,12 +23,13 @@ using Regress: Regress, OLSMatrixEstimator, IVMatrixEstimator, ols, iv, TSLS, LI
     KClass, AbstractIVEstimator,
     VcovSpec, LagTerm, lags, fe, first_stage, weakivtest
 using CovarianceMatrices: CovarianceMatrices, CR, CR0, CR1, CR2, CR3, Cluster, Clustering,
-    DriscollKraay, EWC, HC1, clusters, timekernel, timeindex, unitindex
+    DriscollKraay, EWC, HAC, HC1, HR, HR0, HR1, aVar, bread, clusters, mask, momentmatrix,
+    residual_adjustment, timekernel, timeindex, unitindex
 using Statistics: mean, quantile, std, var
 using Random: AbstractRNG, Xoshiro, default_rng, randn!
 using Distributions: Chisq, FDist, Normal, TDist, ccdf
-using LinearAlgebra: Factorization, I, Symmetric, cholesky, cond, dot, eigen, eigmin, eigvals,
-    factorize, issuccess, logdet, lu, tr
+using LinearAlgebra: ColumnNorm, Diagonal, Factorization, I, Symmetric, cholesky, cond, diag,
+    diagind, dot, eigen, eigmin, eigvals, factorize, issuccess, logdet, lu, mul!, qr, tr
 using RecipesBase: RecipesBase, @recipe, @series
 using ShiftedArrays: lag, lead
 using StatsBase: StatsBase, StatisticalModel, coef, modelmatrix, nobs, response, stderror,
@@ -919,7 +922,10 @@ function _missing_to_nan(tbl, vars)
     cols = map(keys(tbl), values(tbl)) do name, col
         name in vars || return col
         if nonmissingtype(eltype(col)) <: Number
-            return Missing <: eltype(col) ? map(v -> ismissing(v) ? NaN : Float64(v), col) : col
+            Missing <: eltype(col) && return map(v -> ismissing(v) ? NaN : Float64(v), col)
+            # Integer columns (a 0/1 dummy read from CSV) as Float64: Regress's `lags`
+            # pads the first rows with NaN, which an integer matrix cannot hold
+            return eltype(col) <: Integer && !(eltype(col) <: Bool) ? Float64.(col) : col
         end
         any(ismissing, col) && throw(
             ArgumentError(
@@ -1715,6 +1721,8 @@ include("fevd.jl")
 include("fevd_bootstrap.jl")
 include("fevd_summary.jl")
 include("fevd_plotting.jl")
+include("joint.jl")
+include("implicit.jl")
 
 # ============================================================================
 # Shared methods for LocalProjection and LocalProjectionIV
@@ -1772,8 +1780,8 @@ end
 _vcov_estimator(lp::AbstractLocalProjection) = lp.vcov_estimator
 
 """
-    summarize(lp; term=lp.shock, level=0.95, scale=1.0) -> IRFSummary
-    summarize(lp, estimator; term=lp.shock, level=0.95, scale=1.0) -> IRFSummary
+    summarize(lp; term=lp.shock, level=0.95, scale=1.0, bands=:pointwise) -> IRFSummary
+    summarize(lp, estimator; term=lp.shock, level=0.95, scale=1.0, bands=:pointwise)
 
 Table of the impulse response of `term` with standard errors and `level` confidence
 intervals, all multiplied by `scale`; `level` must lie strictly between 0 and 1. The
@@ -1785,12 +1793,17 @@ Standard errors come from the covariance estimator stored in `lp` (see
 `summarize(lp + vcov(estimator); ...)`. The bounds use Student-``t_B`` critical values
 when the estimator is `EWC(B)` (see [`ewc_bandwidth`](@ref)) and normal critical values
 otherwise.
+
+`bands = :supt` makes the bounds a sup-t simultaneous band, which covers the whole
+response with probability `level` (see [`supt_critical_value`](@ref)); the default
+`:pointwise` covers each horizon separately.
 """
 function summarize(
         lp::AbstractLocalProjection;
-        term::Symbol = lp.shock, level::Real = 0.95, scale::Real = 1.0
+        term::Symbol = lp.shock, level::Real = 0.95, scale::Real = 1.0,
+        bands::Symbol = :pointwise
     )
-    irf = _irf_result(lp, term, (level,); diagnostics = false)
+    irf = _irf_result(lp, term, (level,); diagnostics = false, bands)
     scale_f = Float64(scale)
     lower = scale_f .* _horizon_vector(only(lowerbounds(irf)))
     upper = scale_f .* _horizon_vector(only(upperbounds(irf)))
@@ -1832,15 +1845,17 @@ Bands use the estimator stored in `lp`; passing `estimator` plots
 `lp + vcov(estimator)`. They are the bands of [`as_irf_result`](@ref) with
 `coverage = levels`. The figure is drawn by MacroEconometricTools' `irfplot` for that
 object, which receives the remaining keywords (`bandcolor`, `bandalpha`, `linecolor`,
-`linewidth`, `drawzero`, `xtickstep`, `title`, `size`, ...).
+`linewidth`, `drawzero`, `xtickstep`, `title`, `size`, ...). `bands = :supt` draws
+sup-t simultaneous bands instead of pointwise ones (see [`supt_critical_value`](@ref)).
 
 With Plots.jl, `plot(lp; term, levels)` and `plot(lp, estimator; term, levels)` draw
 the same object with MacroEconometricTools' Plots recipe.
 """
 function MacroEconometricTools.irfplot(
-        lp::AbstractLocalProjection; term::Symbol = lp.shock, levels = [0.95], kwargs...
+        lp::AbstractLocalProjection; term::Symbol = lp.shock, levels = [0.95],
+        bands::Symbol = :pointwise, kwargs...
     )
-    return irfplot(_irf_result(lp, term, levels; diagnostics = false); kwargs...)
+    return irfplot(_irf_result(lp, term, levels; diagnostics = false, bands); kwargs...)
 end
 
 function MacroEconometricTools.irfplot(
@@ -1860,9 +1875,10 @@ Bands and keywords are as in [`irfplot`](@ref); MacroEconometricTools' `irfplot!
 draws the panel.
 """
 function MacroEconometricTools.irfplot!(
-        ax, lp::AbstractLocalProjection; term::Symbol = lp.shock, levels = [0.95], kwargs...
+        ax, lp::AbstractLocalProjection; term::Symbol = lp.shock, levels = [0.95],
+        bands::Symbol = :pointwise, kwargs...
     )
-    irf = _irf_result(lp, term, levels; diagnostics = false)
+    irf = _irf_result(lp, term, levels; diagnostics = false, bands)
     return irfplot!(ax, irf; var = lp.response, shock = term, kwargs...)
 end
 
@@ -1874,16 +1890,18 @@ function MacroEconometricTools.irfplot!(
     return irfplot!(ax, lp + vcov(estimator); kwargs...)
 end
 
-@recipe function f(lp::AbstractLocalProjection; term = lp.shock, levels = [0.95])
-    return _irf_result(lp, term, levels; diagnostics = false)
+@recipe function f(
+        lp::AbstractLocalProjection; term = lp.shock, levels = [0.95], bands = :pointwise
+    )
+    return _irf_result(lp, term, levels; diagnostics = false, bands)
 end
 
 @recipe function f(
         lp::AbstractLocalProjection,
         estimator::CovarianceMatrices.AbstractAsymptoticVarianceEstimator;
-        term = lp.shock, levels = [0.95]
+        term = lp.shock, levels = [0.95], bands = :pointwise
     )
-    return _irf_result(lp + vcov(estimator), term, levels; diagnostics = false)
+    return _irf_result(lp + vcov(estimator), term, levels; diagnostics = false, bands)
 end
 
 # ============================================================================
@@ -1891,7 +1909,8 @@ end
 # ============================================================================
 
 """
-    as_irf_result(lp; term=lp.shock, vcov_estimator=nothing, coverage=[0.68, 0.90, 0.95])
+    as_irf_result(lp; term=lp.shock, vcov_estimator=nothing, coverage=[0.68, 0.90, 0.95],
+                  bands=:pointwise)
 
 Convert a `LocalProjection` or `LocalProjectionIV` result to MET's `LocalProjectionIRFResult` type.
 
@@ -1908,6 +1927,8 @@ included in metadata.
   `HR1()`); `nothing` uses the estimator stored in `lp` (see [`stderror`](@ref))
 - `coverage=[0.68, 0.90, 0.95]`: confidence levels for the bands, each strictly between
   0 and 1
+- `bands=:pointwise`: `:supt` for sup-t simultaneous bands (see
+  [`supt_critical_value`](@ref)); the metadata then records `bands = :supt`
 
 # Returns
 - `LocalProjectionIRFResult`: MET-compatible IRF result with AxisArray data
@@ -1931,12 +1952,13 @@ function as_irf_result(
         lp::AbstractLocalProjection;
         term::Symbol = lp.shock,
         vcov_estimator = nothing,
-        coverage = [0.68, 0.9, 0.95]
+        coverage = [0.68, 0.9, 0.95],
+        bands::Symbol = :pointwise
     )
     if vcov_estimator !== nothing
-        return as_irf_result(lp + vcov(vcov_estimator); term, coverage)
+        return as_irf_result(lp + vcov(vcov_estimator); term, coverage, bands)
     end
-    return _irf_result(lp, term, coverage; diagnostics = true)
+    return _irf_result(lp, term, coverage; diagnostics = true, bands)
 end
 
 function _check_levels(levels)
@@ -1955,10 +1977,14 @@ _horizon_vector(a::AxisArray) = vec(Array(a))
 
 # Coefficient path, standard errors and confidence bands for `term` at each level in
 # `coverage`, using the covariance estimator stored in `lp` and the critical value paired
-# with it (Student-t_B for EWC, normal otherwise; see `_critical_value`). Every confidence bound
+# with it (Student-t_B for EWC, normal otherwise; see `_critical_value`), or the sup-t
+# critical value with `bands = :supt` (`_band_critical_values`). Every confidence bound
 # the package reports (`summarize`, `as_irf_result`) is computed here. With
 # `diagnostics = true`, IV results also carry the first-stage regressions per horizon.
-function _irf_result(lp::AbstractLocalProjection, term::Symbol, coverage; diagnostics::Bool)
+function _irf_result(
+        lp::AbstractLocalProjection, term::Symbol, coverage; diagnostics::Bool,
+        bands::Symbol = :pointwise
+    )
     levels = collect(Float64, coverage)
     _check_levels(levels)
     beta = coefpath(lp; term)
@@ -1969,12 +1995,13 @@ function _irf_result(lp::AbstractLocalProjection, term::Symbol, coverage; diagno
         Axis{:shock}([term]),
         Axis{:horizon}(0:lp.horizon)
     )
-    z = [_critical_value(_vcov_estimator(lp), c) for c in levels]
+    z = _band_critical_values(lp, term, levels, bands)
     lower = [cube(beta .- zc .* se) for zc in z]
     upper = [cube(beta .+ zc .* se) for zc in z]
 
     meta = (horizon = lp.horizon, formula = lp.base_formula, term = term)
     lp isa BiasCorrectedLP && (meta = (meta..., bias_corrected = true))
+    bands === :supt && (meta = (meta..., bands = :supt))
     if diagnostics && lp isa LocalProjectionIV
         meta = (meta..., is_iv = true, first_stage = [first_stage(lp, h) for h in 0:lp.horizon])
     end

@@ -71,6 +71,9 @@ function ps_data()
     return ps
 end
 
+# ── Plagborg-Møller's course: Bilal & Känzig, annual, 1960–2019 ──────────────
+bk_data() = CSV.read(datafile("bilal_kanzig.csv"), DataFrame)
+
 # ── figure style (shared with docs/make_rz_*.jl) ─────────────────────────────
 const INK = RGB(0.106, 0.18, 0.31)          # response line and band fill
 const BANDALPHA = 0.18

@@ -248,6 +248,49 @@ With a Makie backend loaded, `irfplot(f; levels, prewhiten)` and
 `irfplot(b; levels, band, biascorrected, prewhiten)` draw the same bands from that
 object.
 
+## The implicit shock of a projection (`implicitfevd`)
+
+Lecture 1 of Plagborg-Møller's short course *Local projections for applied
+macroeconomics* (2026) teaches a simpler version of the ``R^2`` estimator, for any
+local projection with controls. By Frisch–Waugh, the coefficient on ``x_t`` is the
+response to the **implicit shock** ``\tilde x_t``, the residual of ``x_t`` on all
+the controls ``r_t, w_{t-1}, \dots`` (`implicitshock`). The variance share of that
+shock at horizon ``h`` is the ``R^2`` of the regression of ``\hat f_{h,t+h}``, the
+residual of the response on the same controls, on a constant and
+``\tilde x_t, \dots, \tilde x_{t+h}``:
+
+```julia
+bk = CSV.read("docs/src/data/bilal_kanzig.csv", DataFrame)   # the course's data
+m = lp(@formula(leads(lnrgdppc_world_pwt) ~ gtmp_bkly_aw_dtfe2s + recessiondates +
+                lags(recessiondates, 2) + lags(lnrgdppc_world_pwt, 2) +
+                lags(gtmp_bkly_aw_dtfe2s, 2) + lags(lnpoil_wti, 2) + lags(treasury1y, 2)),
+       bk; horizon = 10)
+f = implicitfevd(m)
+f.share[[3, 8]]          # 0.085 and 0.492: climate shocks explain 8.5% of the
+                         # GDP forecast-error variance after 2 years, 49.2% after 7
+std(filter(isfinite, implicitshock(m)))   # 0.10 °C, the typical shock
+```
+
+On the course's data these shares agree with its Stata code to ``10^{-13}``: at
+horizon 4, say, `reg x controls` and `predict xres, resid`, then
+`reg F4.y controls`, `predict res, resid`, `reg res F(0/4).xres` and `e(r2)`.
+
+The differences from `fevd(…; estimator = :r2)`:
+
+| | `fevd(…; estimator = :r2)` (Gorodnichenko–Lee code) | `implicitfevd(lp_result)` (course) |
+|---|---|---|
+| shock | observed ``x_t``, demeaned with its full-sample mean | residual ``\tilde x_t`` of ``x_t`` on all the controls, on every row where they exist |
+| forecast error | ``y_{t+h} - y_{t-1}`` on ``W_{t-1}`` (lags only) | the projection's response on all its controls, contemporaneous ones included |
+| ``R^2`` | uncentred, no constant | centred, with a constant |
+| samples | contiguous window ``t_0..T-h``, gap-free data | the rows available to each regression |
+| response | `cumul(v)`, `ldiff(y)` | any `lp` left-hand side (`leads(y)` with lags of ``y`` among the controls gives the same forecast error as `ldiff(y)`) |
+| inference | asymptotic, bootstrap, bias correction | none (point estimate) |
+
+With an observed shock and only lagged controls the two estimate the same share.
+`implicitfevd` rejects IV projections: with a proxy the decomposition is not
+identified, and treating the proxy as the shock understates the share
+(Plagborg-Møller and Wolf 2022 derive bounds instead). `plot(f)` draws the shares.
+
 ## Conventions and reproducing the paper
 
 - **Sample start.** ``t_0 \ge 2`` is the first row where every regressor
@@ -274,7 +317,8 @@ object.
   authors' choice, `SimulationAVarR2.m:180-182`), so they depend on the draws;
   `fevd` reports them at ``\hat s_h``.
 - **Not implemented:** the VAR FEVD estimator and its VAR–VAR bootstrap, joint
-  inference across horizons (`jointIndicator = 1`), Driscoll–Kraay standard
+  inference on the shares across horizons (`jointIndicator = 1`; `jointtest`
+  covers impulse responses only), Driscoll–Kraay standard
   errors (`semIndicator = 1`), and `method = :var` with `trend ≥ 1` (it throws).
 
 ## Decisions relative to the MATLAB reference

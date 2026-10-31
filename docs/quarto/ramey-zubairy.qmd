@@ -223,3 +223,110 @@ instrument *is* the regressor: the regression treats it as exogenous, there is
 no first stage to test (`weakivtest` returns `nothing`), and the figure omits
 that point. Ramey and Zubairy respond to weak instruments with
 Anderson–Rubin inference, which the package does not implement yet.
+
+## Bias correction and bootstrap bands
+
+The bands above use Newey–West standard errors. Montiel Olea, Plagborg-Møller,
+Qian and Wolf (2025) recommend a different recipe for local projections:
+correct the estimates for small-sample bias with the procedure of Herbst and
+Johannsen (2024), and report either heteroskedasticity-robust standard errors or,
+better, the bands of a VAR moving-block bootstrap. The bootstrap fits a VAR to
+the data, its slopes corrected for bias with Pope's (1990) formula, resamples its
+residuals in overlapping blocks, re-estimates the complete local projection on
+each artificial sample, and builds Hall percentile-$t$ bands. `biascorrect` and
+`varbootstrap` implement it, with both corrections on by default. The procedure
+is for OLS projections, so it covers the impulse responses but not the IV
+multiplier.
+
+The VAR is fitted on the shock and the two responses, which must have no
+missing values, so the first quarters, before `newsy` starts, are dropped. The
+estimation samples do not change. The reference picks the lag order by AIC and
+uses it for both the projection's controls and the bootstrap VAR:
+
+```{julia}
+using Random: Xoshiro
+rzc = dropmissing(rz, [:newsy, :y, :g])
+sel = lagselect(rzc, [:newsy, :y, :g]; maxlags = 10, criterion = :aic)
+nlags(sel)
+```
+
+```{julia}
+#| echo: false
+#| output: false
+bic_p = argmin(sel.bic)
+```
+
+AIC picks `{julia} nlags(sel)` lags (BIC would pick `{julia} bic_p`). Both the
+four lags of the Ramey–Zubairy specification and the AIC order are shown below.
+`@formula` takes a literal lag count, so each order is written out:
+
+```{julia}
+boot(f, p) = varbootstrap(lp(f, rzc; horizon = 20), rzc; vars = [:newsy, :y, :g],
+                          nlags = p, nboot = 1000, rng = Xoshiro(20260916))
+# the same seed gives both responses the same artificial samples
+b4 = (y = boot(@formula(leads(y) ~ newsy + lags(newsy, 4) + lags(y, 4) + lags(g, 4)), 4),
+      g = boot(@formula(leads(g) ~ newsy + lags(newsy, 4) + lags(y, 4) + lags(g, 4)), 4))
+b9 = (y = boot(@formula(leads(y) ~ newsy + lags(newsy, 9) + lags(y, 9) + lags(g, 9)), 9),
+      g = boot(@formula(leads(g) ~ newsy + lags(newsy, 9) + lags(y, 9) + lags(g, 9)), 9))
+summarize(b4.y; level = 0.90)       # bias-corrected path, Hall percentile-t band
+```
+
+```{julia}
+#| echo: false
+#| fig-cap: "Responses to the news shock: Herbst–Johannsen bias-corrected local projection (solid) with 68% and 90% Hall percentile-t bands from the VAR moving-block bootstrap (1000 draws, Pope-corrected VAR); the uncorrected OLS path is dashed."
+# the uncorrected OLS path: `b.lp` wraps it when the bias correction is on
+olspath(b) = coefpath(b.lp isa BiasCorrectedLP ? b.lp.lp : b.lp; term = :newsy)
+function bootpanel(b; title, xlab = "")
+    s90, s68 = summarize(b; level = 0.90), summarize(b; level = 0.68)
+    H = s90.horizon
+    p = plot(H, s90.lower; fillrange = s90.upper, linealpha = 0, fillcolor = INK,
+             fillalpha = 0.12, title, xlabel = xlab, base()...)
+    plot!(p, H, s68.lower; fillrange = s68.upper, linealpha = 0, fillcolor = INK,
+          fillalpha = 0.2)
+    hline!(p, [0.0]; c = RULE, ls = :dot, lw = 0.8)
+    plot!(p, H, olspath(b); c = INK, ls = :dash, lw = 1.0)
+    plot!(p, H, s90.coef; c = INK, lw = 1.8)
+    return p
+end
+plot(bootpanel(b4.g; title = "Government spending · 4 lags (RZ)"),
+     bootpanel(b4.y; title = "GDP · 4 lags (RZ)"),
+     bootpanel(b9.g; title = "Government spending · $(nlags(sel)) lags (AIC)", xlab = "quarters"),
+     bootpanel(b9.y; title = "GDP · $(nlags(sel)) lags (AIC)", xlab = "quarters");
+     layout = (2, 2), size = (900, 560), FIGKW...)
+```
+
+```{julia}
+#| echo: false
+#| output: false
+bpeak(b) = (s = summarize(b; level = 0.9); i = argmax(s.coef); (h = s.horizon[i], b = s.coef[i]))
+excl(b) = (s = summarize(b; level = 0.9); findall((s.lower .> 0) .| (s.upper .< 0)) .- 1)
+# horizons as runs: [0, 1, 2, 18] -> "0–2 and 18"
+function span(v)
+    isempty(v) && return "none"
+    runs = UnitRange{Int}[]
+    for h in v
+        !isempty(runs) && h == last(runs[end]) + 1 ? (runs[end] = first(runs[end]):h) :
+            push!(runs, h:h)
+    end
+    parts = [length(r) == 1 ? string(first(r)) : "$(first(r))–$(last(r))" for r in runs]
+    return length(parts) == 1 ? parts[1] : join(parts[1:(end - 1)], ", ") * " and " * parts[end]
+end
+shift(b) = maximum(abs.(summarize(b; level = 0.9).coef .- olspath(b)))
+nfail = sum(b.nfail for b in (b4..., b9...))
+pope = unique([b.pope_delta for b in (b4..., b9...)])
+p4y, p4g, p9y, p9g = bpeak(b4.y), bpeak(b4.g), bpeak(b9.y), bpeak(b9.g)
+```
+
+With four lags, GDP peaks at `{julia} f2(p4y.b)` after `{julia} p4y.h` quarters
+and spending at `{julia} f2(p4g.b)` after `{julia} p4g.h`. On this long sample
+the bias correction moves the paths by at most
+`{julia} f3(max(shift(b4.y), shift(b4.g)))`. The 90% band excludes zero at
+horizons `{julia} span(excl(b4.y))` for GDP and `{julia} span(excl(b4.g))` for
+spending. With `{julia} nlags(sel)` lags the shape is the same (peaks of
+`{julia} f2(p9y.b)` for GDP at `{julia} p9y.h` quarters and `{julia} f2(p9g.b)`
+for spending at `{julia} p9g.h`), but the bands are wider at long horizons and
+right-skewed: they exclude zero at horizons `{julia} span(excl(b9.y))` for GDP
+and `{julia} span(excl(b9.g))` for spending. Bands are pointwise, and because
+the percentile-$t$ construction corrects for bias they need not be centred on
+the estimate. `{julia} nfail` of the 4000 draws fail, and the Pope correction
+applies `{julia} pope == [1.0] ? "in full in all four bootstraps" : "partially (pope_delta = $(pope))"`.
