@@ -142,10 +142,10 @@ structural shock, so `UnitStd()` is an error for them.
 A bias-corrected projection (`biascorrect`) takes `UnitStd()` too: the response is `σ̂`
 times the corrected path. `UnitStd()` is an error where the horizon-0 residual does not
 measure the shock: state-dependent projections (the regime columns are zero outside
-their regime) and projections with a horizon-tracking regressor. Sup-t bands
-(`bands = :supt`) are built from the correlation of the coefficients across horizons,
-which leaves out the sampling error of `σ̂`, so they are an error with `UnitStd()` as
-well.
+their regime) and projections with a horizon-tracking regressor. Joint inference
+(below) takes the same keyword: `jointvcov(lp_std; normalization = UnitStd())` is the
+covariance of `σ̂ β_h` across horizons, with the sampling error of `σ̂` that every
+horizon shares, and `bands = :supt` builds the simultaneous band from its correlation.
 
 ### Different Confidence Levels
 

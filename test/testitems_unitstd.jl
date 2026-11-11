@@ -1,13 +1,14 @@
 # Upstream's one-standard-deviation shocks (`normalization = UnitStd()`, `shockstd`) on
-# the fork's features: supported for bias-corrected projections, an `ArgumentError`
-# where the horizon-0 residual does not measure the shock.
+# the fork's features: supported for bias-corrected projections and joint inference
+# across horizons, an `ArgumentError` where the horizon-0 residual does not measure
+# the shock.
 
 @testitem "one-standard-deviation shocks on the fork's features" tags = [
     :summarize, :biascorr, :state, :joint, :api,
 ] begin
     using LocalProjections
-    using DataFrames, StableRNGs, Test
-    using CovarianceMatrices: HC0
+    using DataFrames, LinearAlgebra, StableRNGs, Test
+    using CovarianceMatrices: HC0, HC1, EWC, Bartlett, NeweyWest
 
     rng = StableRNG(20261111)
     n = 240
@@ -62,15 +63,59 @@
     @test_throws "horizon-tracking" summarize(rt; normalization = UnitStd())
     @test summarize(rt).normalization === UnitEffect()
 
-    # Sup-t bands use the correlation of the coefficients across horizons
-    @test_throws "sup-t bands" summarize(r; bands = :supt, normalization = UnitStd())
-    @test_throws "sup-t bands" as_irf_result(r; bands = :supt, normalization = UnitStd())
-    s_supt = summarize(r; bands = :supt)
-    @test s_supt.normalization === UnitEffect()
-    @test s_supt.upper .- s_supt.lower ≈
-        2 .* supt_critical_value(r) .* s_supt.se
-    meta = as_irf_result(r; bands = :supt).metadata
-    @test meta.bands === :supt && meta.shocksize == 1.0
+    # Joint covariance of σ̂ β̂_h across horizons. Under HC0 it is the delta method on
+    # the joint covariance V of the coefficients, with c_h = Cov(β̂_h, σ̂):
+    #     σ̂² V + Var(σ̂) β̂ β̂' + σ̂ (β̂ c' + c β̂').
+    V_std = jointvcov(r; normalization = UnitStd())
+    @test V_std ≈ sigma^2 .* jointvcov(r) .+ var_sigma .* (beta * beta') .+
+        sigma .* (beta * cov_beta_sigma' .+ cov_beta_sigma * beta')
+    @test jointvcov(r; normalization = UnitStd(), horizons = [1, 4]) ≈ V_std[[2, 5], [2, 5]]
+    @test jointvcov(r, HC0(); normalization = UnitStd()) == V_std
+    @test jointvcov(r; normalization = UnitEffect()) == jointvcov(r)
+
+    # Its diagonal is the squared delta-method standard error under every estimator
+    for est in (HC1(), Bartlett(4), Bartlett{NeweyWest}(), EWC(12))
+        re = r + vcov(est)
+        V = jointvcov(re; normalization = UnitStd())
+        @test sqrt.(diag(V)) ≈ summarize(re; normalization = UnitStd()).se
+        @test issymmetric(V)
+    end
+    @test sqrt.(diag(jointvcov(bc; normalization = UnitStd()))) ≈ s_bc.se
+
+    # Sup-t bands use the correlation of the normalized responses
+    c_std = supt_critical_value(r; normalization = UnitStd(), level = 0.9)
+    @test c_std == supt_critical_value(r; normalization = UnitStd(), level = 0.9)
+    @test c_std != supt_critical_value(r; level = 0.9)
+    @test 1.645 < c_std < 3.0
+    s_supt = summarize(r; bands = :supt, normalization = UnitStd(), level = 0.9)
+    @test s_supt.normalization === UnitStd()
+    @test s_supt.coef == s_r.coef && s_supt.se == s_r.se
+    @test s_supt.upper .- s_supt.lower ≈ 2 .* c_std .* s_supt.se
+    meta = as_irf_result(r; bands = :supt, normalization = UnitStd()).metadata
+    @test meta.bands === :supt && meta.shocksize == sigma
+    s_unit = summarize(r; bands = :supt)
+    @test s_unit.normalization === UnitEffect()
+    @test s_unit.upper .- s_unit.lower ≈ 2 .* supt_critical_value(r) .* s_unit.se
+    @test supt_critical_value(r; normalization = UnitStd(), horizons = [3], level = 0.9) ≈
+        LocalProjections.critical_value(HC0(), 0.9)
+
+    # When the response is the shock, the unit-effect response at h = 0 is 1 with no
+    # sampling error and is left out; the one-standard-deviation response there is σ̂
+    rxx = lp(@formula(leads(x) ~ x + lags(y, 2) + lags(x, 2)), df; horizon = 3) + vcov(HC0())
+    @test size(jointvcov(rxx)) == (3, 3)
+    V_xx = jointvcov(rxx; normalization = UnitStd())
+    @test size(V_xx) == (4, 4)
+    @test V_xx[1, 1] ≈ var_sigma
+    @test_throws "leave h = 0 out" jointvcov(rxx; horizons = 0:2)
+    s_xx = summarize(rxx; bands = :supt, normalization = UnitStd())
+    @test s_xx.coef[1] ≈ sigma && s_xx.lower[1] < sigma < s_xx.upper[1]
+
+    # Joint inference inherits the guards of the shock size
+    @test_throws "state-dependent" jointvcov(rs; normalization = UnitStd())
+    @test_throws "state-dependent" summarize(rs; bands = :supt, normalization = UnitStd())
+    riv = lpiv(TSLS(), @formula(leads(y) ~ (x ~ lag(x)) + lags(y, 2)), df; horizon = 2)
+    @test_throws "not identified by an IV" jointvcov(riv; normalization = UnitStd())
+    @test size(jointvcov(riv)) == (3, 3)
 
     # A bootstrap summary is of the unit-effect response
     df2 = DataFrame(; shock = x, y)

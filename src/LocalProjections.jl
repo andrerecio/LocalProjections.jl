@@ -1986,7 +1986,7 @@ Student-``t_B`` quantile (see [`ewc_bandwidth`](@ref)).
 
 `bands = :supt` makes the bounds a sup-t simultaneous band, which covers the whole
 response with probability `level` (see [`supt_critical_value`](@ref)); the default
-`:pointwise` covers each horizon separately. Sup-t bands are for `UnitEffect()` only.
+`:pointwise` covers each horizon separately.
 """
 function summarize(
         lp::AbstractLocalProjection;
@@ -2130,8 +2130,7 @@ diagnostics are included in metadata.
   projections, `UnitStd()` with delta-method bands (see [`summarize`](@ref)). The
   metadata record it with the shock size (`shocksize`, 1 or [`shockstd`](@ref)).
 - `bands=:pointwise`: `:supt` for sup-t simultaneous bands (see
-  [`supt_critical_value`](@ref)), with `UnitEffect()` only; the metadata then records
-  `bands = :supt`
+  [`supt_critical_value`](@ref)); the metadata then records `bands = :supt`
 
 # Returns
 - `LocalProjectionIRFResult`: MET-compatible IRF result with AxisArray data
