@@ -1668,8 +1668,10 @@ end
     # Horizon h uses rows that horizon 0 drops (y_t missing, y_{t+h} observed), so the
     # contributions are stacked on the union of the two row sets
     @test any(r.rows[2] .& .!r.rows[1])
-    for est in (CR1(:id), DriscollKraay(Bartlett(3); tis = :t, iis = :id),
-            DriscollKraay(Bartlett{NeweyWest}(); tis = :t, iis = :id))
+    for est in (
+            CR1(:id), DriscollKraay(Bartlett(3); tis = :t, iis = :id),
+            DriscollKraay(Bartlett{NeweyWest}(); tis = :t, iis = :id),
+        )
         s = summarize(r + vcov(est); normalization = UnitStd())
         @test s.coef ≈ shockstd(r) .* coefpath(r)
         @test all(isfinite, s.se) && all(>(0), s.se)
