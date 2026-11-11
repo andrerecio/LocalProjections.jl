@@ -3,9 +3,9 @@ module LocalProjections
 export AbstractLocalProjection, LocalProjection, LocalProjectionIV, IRFSummary
 export lp, lpiv, TSLS, LIML, Fuller, KClass, fe, horizonmodel, coefpath, nobs, stderror, vcov, summarize, first_stage, weakivtest
 export @formula, lag, lead, cumul, lags, leads, anchor
-export as_irf_result
+export as_irf_result, shockstd, UnitEffect, UnitStd
 export irfplot, irfplot!
-public CumulTerm, LeadTerm, AnchorTerm
+public CumulTerm, LeadTerm, AnchorTerm, critical_value
 
 using PrettyTables: pretty_table, TextHighlighter, TextTableFormat,
     text_table_borders__unicode_rounded, @crayon_str
@@ -16,15 +16,19 @@ using Regress: Regress, OLSMatrixEstimator, IVMatrixEstimator, ols, iv, TSLS, LI
     KClass, AbstractIVEstimator,
     VcovSpec, lags, fe, first_stage, weakivtest
 using CovarianceMatrices: CovarianceMatrices, CR, CR0, CR1, CR2, CR3, Cluster, Clustering,
-    DriscollKraay, clusters, timekernel, timeindex, unitindex
-using Statistics: quantile
-using Distributions: Normal
+    DriscollKraay, EWC, HAC, HR, HR0, Fixed, Uncorrelated, Bartlett, Parzen,
+    QuadraticSpectral, Truncated, TukeyHanning, aVar, bandwidth, bread, clusters,
+    momentmatrix, timekernel, timeindex, unitindex
+using Statistics: mean, quantile
+using Distributions: Normal, TDist
 using RecipesBase: RecipesBase, @recipe
 using ShiftedArrays: lag, lead
-using StatsBase: StatsBase, StatisticalModel, coef, nobs, response, stderror, vcov
+using StatsBase: StatsBase, StatisticalModel, coef, dof_residual, modelmatrix, nobs, response,
+    stderror, vcov
 using AxisArrays: AxisArrays, AxisArray, Axis
 using MacroEconometricTools: MacroEconometricTools, LocalProjectionIRFResult, irfplot, irfplot!,
-    point_estimate, lowerbounds, upperbounds, coverages
+    point_estimate, lowerbounds, upperbounds, coverages, AbstractNormalization, UnitEffect,
+    UnitStd
 
 # ============================================================================
 # Helper Functions for Common Patterns
@@ -480,7 +484,7 @@ Supertype of local projection results: [`LocalProjection`](@ref) (OLS, from
 [`lp`](@ref)) and [`LocalProjectionIV`](@ref) (IV, from [`lpiv`](@ref)). Each holds
 one fitted Regress.jl model per horizon `0:horizon`.
 
-Per-horizon models are reached with [`horizonmodel`](@ref); [`coefnames`](@ref) and
+Per-horizon models are reached with [`horizonmodel`](@ref); `coefnames` and
 [`nobs`](@ref) give the coefficient names and the sample size at each horizon.
 """
 abstract type AbstractLocalProjection end
@@ -622,18 +626,29 @@ end
 """
     _horizon_vcov(estimator, lp, h)
 
-The covariance estimator for the model at horizon `h`. Estimators that name columns,
-`CR1(:id)`, `CR1((:id, :t))` or `DriscollKraay(K; tis = :t, iis = :id)`, become the same
-estimator built from those columns of `lp.data`, restricted to the rows used at horizon
-`h`. Other estimators are returned unchanged.
+The covariance estimator for the model at horizon `h`: [`_rows_vcov`](@ref) on the
+rows used at horizon `h`.
+"""
+function _horizon_vcov(estimator, lp::AbstractLocalProjection, h::Integer)
+    return _rows_vcov(estimator, lp, lp.rows[h + 1], "at horizon $h")
+end
+
+"""
+    _rows_vcov(estimator, lp, rows, at)
+
+The covariance estimator for observations `rows` (a mask over the rows of `lp.data`).
+Estimators that name columns, `CR1(:id)`, `CR1((:id, :t))` or
+`DriscollKraay(K; tis = :t, iis = :id)`, become the same estimator built from those
+columns of `lp.data`, restricted to `rows`. Other estimators are returned unchanged.
+`at` describes the rows in error messages.
 
 Estimators that hold one value per observation (cluster vectors, Driscoll-Kraay index
 vectors) are an error: each horizon uses its own rows, and with `time` the rows are
 reordered, so no single vector lines up with every horizon.
 """
-_horizon_vcov(estimator, lp::AbstractLocalProjection, h::Integer) = estimator
+_rows_vcov(estimator, lp::AbstractLocalProjection, rows::BitVector, at) = estimator
 
-function _horizon_vcov(estimator::CR, lp::AbstractLocalProjection, h::Integer)
+function _rows_vcov(estimator::CR, lp::AbstractLocalProjection, rows::BitVector, at)
     names = clusters(estimator)
     names isa Tuple{Vararg{Symbol}} || throw(
         ArgumentError(
@@ -642,19 +657,16 @@ function _horizon_vcov(estimator::CR, lp::AbstractLocalProjection, h::Integer)
                 "instead, e.g. `$(nameof(typeof(estimator)))(:id)`"
         )
     )
-    groups = map(name -> _horizon_column(lp, name, "cluster", h), names)
+    groups = map(name -> _rows_column(lp, name, "cluster", rows, at), names)
     return _rebuild_cluster(estimator, groups)
 end
 
-# Values of column `name` of `lp.data` on the rows used at horizon `h`.
-function _horizon_column(lp::AbstractLocalProjection, name::Symbol, role, h::Integer)
+# Values of column `name` of `lp.data` on `rows`.
+function _rows_column(lp::AbstractLocalProjection, name::Symbol, role, rows::BitVector, at)
     haskey(lp.data, name) || throw(ArgumentError("$role column `$name` is not in the data"))
-    g = lp.data[name][lp.rows[h + 1]]
+    g = lp.data[name][rows]
     any(_isunavailable, g) && throw(
-        ArgumentError(
-            "$role column `$name` contains missing or NaN values in the rows used at " *
-                "horizon $h"
-        )
+        ArgumentError("$role column `$name` contains missing or NaN values in the rows used $at")
     )
     return g
 end
@@ -666,9 +678,9 @@ _rebuild_cluster(::CR3, groups::Tuple) = CR3(groups)
 _rebuild_cluster(::Cluster, groups::Tuple) = Cluster(groups)
 
 # Period codes come from the time grid of the whole table, shifted so that the first
-# period used at `h` has code 1: a period with no rows at `h` keeps its place as a zero
+# period among `rows` has code 1: a period with no rows keeps its place as a zero
 # period sum, and the kernel weights depend on the distance between codes.
-function _horizon_vcov(estimator::DriscollKraay, lp::AbstractLocalProjection, h::Integer)
+function _rows_vcov(estimator::DriscollKraay, lp::AbstractLocalProjection, rows::BitVector, at)
     tis, iis = timeindex(estimator), unitindex(estimator)
     tis isa Symbol && iis isa Symbol || throw(
         ArgumentError(
@@ -677,8 +689,8 @@ function _horizon_vcov(estimator::DriscollKraay, lp::AbstractLocalProjection, h:
                 "columns instead, e.g. `DriscollKraay(K; tis = :t, iis = :id)`"
         )
     )
-    t = _horizon_column(lp, tis, "time index", h)
-    u = _horizon_column(lp, iis, "unit index", h)
+    t = _rows_column(lp, tis, "time index", rows, at)
+    u = _rows_column(lp, iis, "unit index", rows, at)
     grid = sort!(unique(filter(!_isunavailable, lp.data[tis])))
     codes = [searchsortedfirst(grid, v) for v in t]
     codes .-= minimum(codes) - 1
@@ -687,6 +699,9 @@ function _horizon_vcov(estimator::DriscollKraay, lp::AbstractLocalProjection, h:
         correction = CovarianceMatrices.correction(estimator)
     )
 end
+
+# `x` as a `Vector{Float64}` with `NaN` in place of `missing`.
+_nan_floats(x::AbstractVector)::Vector{Float64} = map(v -> ismissing(v) ? NaN : Float64(v), x)
 
 """
     _create_cumulative(y::AbstractVector, h::Int) -> Vector{Float64}
@@ -707,10 +722,7 @@ NaN values are returned when:
 """
 function _create_cumulative(y::AbstractVector, h::Int)::Vector{Float64}
     n = length(y)
-
-    # Convert input to Float64, replacing missing with NaN
-    # This handles both pure Float64 vectors and Union{Missing, Float64} vectors
-    y_float = map(v -> ismissing(v) ? NaN : Float64(v), y)
+    y_float = _nan_floats(y)
 
     # Fast path for h=0
     h == 0 && return y_float
@@ -753,7 +765,8 @@ The key difference from standard lead:
 
 NaN values are returned when:
 - Cannot compute lead (at the end of the series)
-- Either y_{t+h} or z_t is missing or NaN
+- Either y_{t+h} or z_t is missing or NaN, as in `anchor(y, lag(y))`, whose anchor
+  `lag(y)` is `missing` in the first row
 
 # Returns
 - `Vector{Float64}`: Type-stable Float64 vector with NaN at boundaries
@@ -761,7 +774,7 @@ NaN values are returned when:
 function _create_anchored(y::AbstractVector, z::AbstractVector, h::Int)::Vector{Float64}
     n = length(y)
     length(z) == n || throw(ArgumentError("y and z must have same length"))
-    return lead(y, h, default = NaN) .- z
+    return lead(_nan_floats(y), h, default = NaN) .- _nan_floats(z)
 end
 
 """
@@ -1341,20 +1354,24 @@ end
 """
     IRFSummary
 
-Impulse response of `response` to `term` at horizons `0:H`: coefficients, standard
-errors and `level` confidence bounds, all multiplied by `scale`. Built by
-[`summarize`](@ref).
+Impulse response of `response` to a shock to `term` at horizons `0:H`: coefficients,
+standard errors and `level` confidence bounds, all multiplied by `scale`. The shock has
+size `shocksize` in the units of `term`: 1 with `normalization = UnitEffect()`, and the
+standard deviation of the shock ([`shockstd`](@ref)) with `normalization = UnitStd()`.
+Built by [`summarize`](@ref).
 
 An `IRFSummary` is a Tables.jl table with one row per horizon and columns `response`,
-`term`, `horizon`, `coef`, `se`, `lower`, `upper`, `level`, `scale`, so
-`DataFrame(summarize(lp))` works. Its text display marks in bold the horizons whose
-confidence interval excludes zero, when the output supports color.
+`term`, `horizon`, `coef`, `se`, `lower`, `upper`, `level`, `scale`, `normalization`,
+`shocksize`, so `DataFrame(summarize(lp))` works. Its text display marks in bold the
+horizons whose confidence interval excludes zero, when the output supports color.
 """
 struct IRFSummary
     response::Symbol
     term::Symbol
     level::Float64
     scale::Float64
+    normalization::AbstractNormalization
+    shocksize::Float64
     horizon::Vector{Int}
     coef::Vector{Float64}
     se::Vector{Float64}
@@ -1371,12 +1388,15 @@ function Tables.columns(s::IRFSummary)
         response = fill(s.response, n), term = fill(s.term, n), horizon = s.horizon,
         coef = s.coef, se = s.se, lower = s.lower, upper = s.upper,
         level = fill(s.level, n), scale = fill(s.scale, n),
+        normalization = fill(s.normalization, n), shocksize = fill(s.shocksize, n),
     )
 end
 
 function Base.show(io::IO, s::IRFSummary)
     return print(
-        io, "IRFSummary(response=$(s.response), term=$(s.term), level=$(s.level), scale=$(s.scale))"
+        io,
+        "IRFSummary(response=$(s.response), term=$(s.term), level=$(s.level), " *
+            "scale=$(s.scale), normalization=$(nameof(typeof(s.normalization)))())"
     )
 end
 
@@ -1393,7 +1413,12 @@ function Base.show(io::IO, ::MIME"text/plain", s::IRFSummary)
         crayon"bold"
     )
 
-    title = "Impulse response of $(s.response) to $(s.term)"
+    title = if s.normalization isa UnitStd
+        "Impulse response of $(s.response) to a one-standard-deviation shock to " *
+            "$(s.term) ($(round(s.shocksize; sigdigits = 4)))"
+    else
+        "Impulse response of $(s.response) to $(s.term)"
+    end
     if s.scale != 1.0
         title *= " (scale=$(s.scale))"
     end
@@ -1706,14 +1731,183 @@ end
 # The estimator as given, before clusters named by column are resolved per horizon.
 _vcov_estimator(lp::AbstractLocalProjection) = lp.vcov_estimator
 
+# ============================================================================
+# One-standard-deviation shocks
+# ============================================================================
+
 """
-    summarize(lp; term=lp.shock, level=0.95, scale=1.0) -> IRFSummary
-    summarize(lp, estimator; term=lp.shock, level=0.95, scale=1.0) -> IRFSummary
+    shockstd(lp::LocalProjection; term = lp.shock) -> Float64
+
+Standard deviation `σ̂` of the shock to `term`: the residual `ε̂` of `term` regressed on
+the other regressors of the projection, over the rows used at horizon 0, with
+
+```math
+\\hat\\sigma^2 = \\frac{1}{n_0 - k_0} \\sum_t \\hat\\varepsilon_t^2,
+```
+
+where `n₀` is the number of those rows and `k₀` counts the other coefficients and the
+absorbed fixed-effect levels. When the controls are lags of every variable and the
+variables ordered before `term`, `ε̂` estimates the recursively identified shock to
+`term` (Plagborg-Møller and Wolf 2021, "Local Projections and VARs Estimate the Same
+Impulse Responses", Econometrica), and `σ̂` is the size of a one-standard-deviation
+shock in the units of `term`. Responses to that shock are reported with
+`normalization = UnitStd()` (see [`summarize`](@ref)).
+
+Instrumental-variables projections ([`lpiv`](@ref)) identify the response to a unit
+change in the instrumented variable but not the size of the structural shock, so
+`shockstd` of a `LocalProjectionIV` is an `ArgumentError`.
+"""
+function shockstd(lp::AbstractLocalProjection; term::Symbol = lp.shock)
+    return _shock_residual(lp, _term_index(lp, term)).sigma
+end
+
+function _shock_residual(lp::LocalProjectionIV, idx::Int)
+    throw(
+        ArgumentError(
+            "the standard deviation of the shock is not identified by an IV local " *
+                "projection, whose responses are to a unit change in the instrumented " *
+                "variable; use `normalization = UnitEffect()`"
+        )
+    )
+end
+
+# The residual of regressor `idx` on the other regressors at horizon 0, one entry per row
+# used at horizon 0, and its standard deviation. With fixed effects the model matrix is
+# demeaned within them, so the residual absorbs them too; the residual degrees of freedom
+# are those of the horizon-0 regression plus one, for the regressor that is now the
+# dependent variable.
+function _shock_residual(lp::LocalProjection, idx::Int)
+    m = horizonmodel(lp, 0)
+    X = modelmatrix(m)
+    m.basis_coef[idx] || throw(
+        ArgumentError(
+            "`$(lp.coef_names[idx])` is collinear with the other regressors at horizon 0, " *
+                "so its shock has no variation"
+        )
+    )
+    others = [j for j in axes(X, 2) if j != idx && m.basis_coef[j]]
+    x = X[:, idx]
+    residual = isempty(others) ? x : x .- X[:, others] * (X[:, others] \ x)
+    sigma = sqrt(sum(abs2, residual) / (dof_residual(m) + 1))
+    sigma > 0 || throw(
+        ArgumentError(
+            "`$(lp.coef_names[idx])` is an exact linear function of the other regressors " *
+                "at horizon 0, so its shock has standard deviation 0"
+        )
+    )
+    return (; residual, sigma)
+end
+
+# The response path of `term` under `normalization`, its standard errors, and the size of
+# the shock in the units of `term`.
+function _response_path(lp::AbstractLocalProjection, term::Symbol, ::UnitEffect)
+    return (coef = coefpath(lp; term), se = stderror(lp; term), shocksize = 1.0)
+end
+
+# Responses to a one-standard-deviation shock, θ_h = σ β_h, estimated by σ̂ β̂_h. The
+# delta-method variance includes the sampling error of σ̂:
+#
+#     Var(θ̂_h) = σ̂² Var(β̂_h) + β̂_h² Var(σ̂) + 2 σ̂ β̂_h Cov(β̂_h, σ̂).
+#
+# Var(β̂_h) is the horizon model's own, with every finite-sample correction of its
+# estimator. Var(σ̂) and Cov(β̂_h, σ̂) come from the contributions of each observation to
+# β̂_h − β_h (the row of (X'X)⁻¹X'û for `term`, on the rows of horizon h) and to σ̂ − σ
+# ((ε̂_t² − mean ε̂²) / (2 σ̂ n₀), on the rows of horizon 0). The two columns are stacked on
+# the union of the two row sets, in time order with zeros where a row is not used, and
+# passed to the covariance estimator of `lp` (`_moment_estimator`), so a HAC, EWC,
+# clustered or Driscoll-Kraay estimator accounts for the dependence between the two.
+function _response_path(lp::AbstractLocalProjection, term::Symbol, ::UnitStd)
+    idx = _term_index(lp, term)
+    (; residual, sigma) = _shock_residual(lp, idx)
+    beta = coefpath(lp; term)
+    se = stderror(lp; term)
+    rows0 = lp.rows[1]
+    shock_part = (abs2.(residual) .- mean(abs2, residual)) ./ (2 * sigma * length(residual))
+    se_theta = similar(se)
+    for h in 0:lp.horizon
+        m = horizonmodel(lp, h)
+        rows_h = lp.rows[h + 1]
+        rows = rows0 .| rows_h
+        position = cumsum(rows)
+        contributions = zeros(count(rows), 2)
+        # When the response is the shock, β̂_0 = 1 exactly and has no sampling error.
+        if !(h == 0 && lp.tautological_h0)
+            basis = m.basis_coef
+            j = count(view(basis, 1:idx))
+            contributions[position[rows_h], 1] = momentmatrix(m)[:, basis] * bread(m)[:, j]
+        end
+        contributions[position[rows0], 2] = shock_part
+        estimator = _moment_estimator(
+            _rows_vcov(_vcov_estimator(lp), lp, rows, "at horizons 0 and $h"), vcov(m)
+        )
+        A = aVar(estimator, contributions; demean = false, scale = false)
+        v = sigma^2 * se[h + 1]^2 + beta[h + 1]^2 * A[2, 2] + 2 * sigma * beta[h + 1] * A[1, 2]
+        v >= 0 || throw(
+            ArgumentError(
+                "the delta-method variance of the one-standard-deviation response at " *
+                    "horizon $h is negative ($v) with $(repr(_vcov_estimator(lp)))"
+            )
+        )
+        se_theta[h + 1] = sqrt(v)
+    end
+    return (coef = sigma .* beta, se = se_theta, shocksize = sigma)
+end
+
+# The estimator `_response_path` applies to a matrix of observation contributions, given
+# the estimator `k` resolved on its rows and the covariance matrix `V` of a horizon
+# model. Finite-sample corrections need a fitted model, so heteroskedasticity-robust and
+# clustered estimators use their uncorrected versions (HR0, CR0). A HAC kernel that
+# selects its bandwidth from the data, alone or inside Driscoll-Kraay, uses the
+# bandwidth selected for the horizon model, so every term of the variance shares one
+# kernel and one bandwidth.
+_moment_estimator(k, V) = k
+_moment_estimator(::Union{HR, Uncorrelated}, V) = HR0()
+_moment_estimator(k::CR, V) = CR0(clusters(k))
+_moment_estimator(k::HAC, V) = _fixed_bandwidth(k, V)
+function _moment_estimator(k::DriscollKraay, V)
+    return DriscollKraay(_fixed_bandwidth(timekernel(k), V), timeindex(k), unitindex(k))
+end
+
+_fixed_bandwidth(k::HAC{Fixed}, V) = k
+function _fixed_bandwidth(k::HAC, V)
+    bw = bandwidth(V)
+    bw === nothing && throw(
+        ArgumentError(
+            "the covariance matrix of the horizon model does not record the bandwidth " *
+                "its $(repr(k)) kernel selected"
+        )
+    )
+    return _kernel_with_bandwidth(k, bw)
+end
+
+_kernel_with_bandwidth(::Bartlett, bw) = Bartlett(bw)
+_kernel_with_bandwidth(::Parzen, bw) = Parzen(bw)
+_kernel_with_bandwidth(::QuadraticSpectral, bw) = QuadraticSpectral(bw)
+_kernel_with_bandwidth(::Truncated, bw) = Truncated(bw)
+_kernel_with_bandwidth(::TukeyHanning, bw) = TukeyHanning(bw)
+
+"""
+    summarize(lp; term=lp.shock, level=0.95, scale=1.0, normalization=UnitEffect())
+        -> IRFSummary
+    summarize(lp, estimator; kwargs...) -> IRFSummary
 
 Table of the impulse response of `term` with standard errors and `level` confidence
 intervals, all multiplied by `scale`; `level` must lie strictly between 0 and 1. The
-numbers are those of [`as_irf_result`](@ref) with `coverage = [level]`. A negative
+intervals use the critical value of the covariance estimator ([`critical_value`](@ref)).
+The numbers are those of [`as_irf_result`](@ref) with `coverage = [level]`. A negative
 `scale` flips the sign of the response, and the bounds swap so that `lower <= upper`.
+
+`normalization` sets the size of the shock:
+
+- `UnitEffect()`: a shock that moves `term` by one unit on impact. The response is the
+  coefficient `β_h`.
+- `UnitStd()` (OLS projections only): a one-standard-deviation shock, of size
+  `σ̂ = shockstd(lp; term)`. The response is `σ̂ β_h`, and its standard error comes from
+  the delta method, which includes the sampling error of `σ̂` and its covariance with
+  `β_h`; both are estimated with the covariance estimator of `lp` (heteroskedasticity-
+  robust and clustered estimators without their finite-sample corrections, HAC kernels
+  with the bandwidth selected for the horizon's model). The intervals use the
+  estimator's critical value, as for `UnitEffect()`.
 
 Standard errors come from the covariance estimator stored in `lp` (see
 [`stderror`](@ref)). Passing a CovarianceMatrices.jl `estimator` is the same as
@@ -1721,9 +1915,10 @@ Standard errors come from the covariance estimator stored in `lp` (see
 """
 function summarize(
         lp::AbstractLocalProjection;
-        term::Symbol = lp.shock, level::Real = 0.95, scale::Real = 1.0
+        term::Symbol = lp.shock, level::Real = 0.95, scale::Real = 1.0,
+        normalization::AbstractNormalization = UnitEffect()
     )
-    irf = _irf_result(lp, term, (level,); diagnostics = false)
+    irf = _irf_result(lp, term, (level,); diagnostics = false, normalization)
     scale_f = Float64(scale)
     lower = scale_f .* _horizon_vector(only(lowerbounds(irf)))
     upper = scale_f .* _horizon_vector(only(upperbounds(irf)))
@@ -1732,7 +1927,8 @@ function summarize(
         lower, upper = upper, lower
     end
     return IRFSummary(
-        lp.response, term, only(coverages(irf)), scale_f, collect(0:lp.horizon),
+        lp.response, term, only(coverages(irf)), scale_f, normalization,
+        irf.metadata.shocksize, collect(0:lp.horizon),
         scale_f .* _horizon_vector(point_estimate(irf)),
         abs(scale_f) .* _horizon_vector(irf.stderr),
         lower, upper
@@ -1755,25 +1951,29 @@ end
 # MacroEconometricTools' Makie methods and Plots recipe for that object.
 
 """
-    irfplot(lp; term = lp.shock, levels = [0.95], kwargs...) -> Makie.Figure
-    irfplot(lp, estimator; term = lp.shock, levels = [0.95], kwargs...)
+    irfplot(lp; term = lp.shock, levels = [0.95], normalization = UnitEffect(), kwargs...)
+        -> Makie.Figure
+    irfplot(lp, estimator; kwargs...)
 
 Plot the impulse response of `lp.response` to `term`, with a confidence band for each
 of `levels`. Requires a Makie backend (e.g. `CairoMakie`).
 
 Bands use the estimator stored in `lp`; passing `estimator` plots
 `lp + vcov(estimator)`. They are the bands of [`as_irf_result`](@ref) with
-`coverage = levels`. The figure is drawn by MacroEconometricTools' `irfplot` for that
+`coverage = levels` and `normalization` (see [`summarize`](@ref)). The figure is drawn by MacroEconometricTools' `irfplot` for that
 object, which receives the remaining keywords (`bandcolor`, `bandalpha`, `linecolor`,
 `linewidth`, `drawzero`, `xtickstep`, `title`, `size`, ...).
 
-With Plots.jl, `plot(lp; term, levels)` and `plot(lp, estimator; term, levels)` draw
-the same object with MacroEconometricTools' Plots recipe.
+With Plots.jl, `plot(lp; term, levels, normalization)` and
+`plot(lp, estimator; term, levels, normalization)` draw the same object with
+MacroEconometricTools' Plots recipe.
 """
 function MacroEconometricTools.irfplot(
-        lp::AbstractLocalProjection; term::Symbol = lp.shock, levels = [0.95], kwargs...
+        lp::AbstractLocalProjection; term::Symbol = lp.shock, levels = [0.95],
+        normalization::AbstractNormalization = UnitEffect(), kwargs...
     )
-    return irfplot(_irf_result(lp, term, levels; diagnostics = false); kwargs...)
+    irf = _irf_result(lp, term, levels; diagnostics = false, normalization)
+    return irfplot(irf; kwargs...)
 end
 
 function MacroEconometricTools.irfplot(
@@ -1785,17 +1985,19 @@ function MacroEconometricTools.irfplot(
 end
 
 """
-    irfplot!(ax, lp; term = lp.shock, levels = [0.95], kwargs...) -> ax
-    irfplot!(ax, lp, estimator; term = lp.shock, levels = [0.95], kwargs...)
+    irfplot!(ax, lp; term = lp.shock, levels = [0.95], normalization = UnitEffect(),
+        kwargs...) -> ax
+    irfplot!(ax, lp, estimator; kwargs...)
 
 Draw the impulse response of `lp.response` to `term` onto the Makie `Axis` `ax`.
 Bands and keywords are as in [`irfplot`](@ref); MacroEconometricTools' `irfplot!`
 draws the panel.
 """
 function MacroEconometricTools.irfplot!(
-        ax, lp::AbstractLocalProjection; term::Symbol = lp.shock, levels = [0.95], kwargs...
+        ax, lp::AbstractLocalProjection; term::Symbol = lp.shock, levels = [0.95],
+        normalization::AbstractNormalization = UnitEffect(), kwargs...
     )
-    irf = _irf_result(lp, term, levels; diagnostics = false)
+    irf = _irf_result(lp, term, levels; diagnostics = false, normalization)
     return irfplot!(ax, irf; var = lp.response, shock = term, kwargs...)
 end
 
@@ -1807,16 +2009,19 @@ function MacroEconometricTools.irfplot!(
     return irfplot!(ax, lp + vcov(estimator); kwargs...)
 end
 
-@recipe function f(lp::AbstractLocalProjection; term = lp.shock, levels = [0.95])
-    return _irf_result(lp, term, levels; diagnostics = false)
+@recipe function f(
+        lp::AbstractLocalProjection; term = lp.shock, levels = [0.95],
+        normalization = UnitEffect()
+    )
+    return _irf_result(lp, term, levels; diagnostics = false, normalization)
 end
 
 @recipe function f(
         lp::AbstractLocalProjection,
         estimator::CovarianceMatrices.AbstractAsymptoticVarianceEstimator;
-        term = lp.shock, levels = [0.95]
+        term = lp.shock, levels = [0.95], normalization = UnitEffect()
     )
-    return _irf_result(lp + vcov(estimator), term, levels; diagnostics = false)
+    return _irf_result(lp + vcov(estimator), term, levels; diagnostics = false, normalization)
 end
 
 # ============================================================================
@@ -1824,14 +2029,16 @@ end
 # ============================================================================
 
 """
-    as_irf_result(lp; term=lp.shock, vcov_estimator=nothing, coverage=[0.68, 0.90, 0.95])
+    as_irf_result(lp; term=lp.shock, vcov_estimator=nothing, coverage=[0.68, 0.90, 0.95],
+        normalization=UnitEffect())
 
 Convert a `LocalProjection` or `LocalProjectionIV` result to MET's `LocalProjectionIRFResult` type.
 
 This enables using MET's unified plotting infrastructure with AxisArray support.
-Bands are `coef ± z * se`, with `z` the standard normal quantile for each coverage level
-and `se` from the covariance estimator. For IV results, first-stage diagnostics are
-included in metadata.
+Bands are `coef ± c * se`, with `se` from the covariance estimator and `c` its critical
+value for each coverage level ([`critical_value`](@ref): Student-t with `B` degrees of
+freedom for `EWC(B)`, standard normal otherwise). For IV results, first-stage
+diagnostics are included in metadata.
 
 # Keyword Arguments
 - `term::Symbol=lp.shock`: Which coefficient to extract (defaults to shock variable)
@@ -1839,6 +2046,9 @@ included in metadata.
   `HR1()`); `nothing` uses the estimator stored in `lp` (see [`stderror`](@ref))
 - `coverage=[0.68, 0.90, 0.95]`: confidence levels for the bands, each strictly between
   0 and 1
+- `normalization=UnitEffect()`: the size of the shock, `UnitEffect()` or, for OLS
+  projections, `UnitStd()` with delta-method bands (see [`summarize`](@ref)). The
+  metadata record it with the shock size (`shocksize`, 1 or [`shockstd`](@ref)).
 
 # Returns
 - `LocalProjectionIRFResult`: MET-compatible IRF result with AxisArray data
@@ -1862,12 +2072,13 @@ function as_irf_result(
         lp::AbstractLocalProjection;
         term::Symbol = lp.shock,
         vcov_estimator = nothing,
-        coverage = [0.68, 0.9, 0.95]
+        coverage = [0.68, 0.9, 0.95],
+        normalization::AbstractNormalization = UnitEffect()
     )
     if vcov_estimator !== nothing
-        return as_irf_result(lp + vcov(vcov_estimator); term, coverage)
+        return as_irf_result(lp + vcov(vcov_estimator); term, coverage, normalization)
     end
-    return _irf_result(lp, term, coverage; diagnostics = true)
+    return _irf_result(lp, term, coverage; diagnostics = true, normalization)
 end
 
 function _check_levels(levels)
@@ -1884,26 +2095,51 @@ end
 # over horizons 0:H.
 _horizon_vector(a::AxisArray) = vec(Array(a))
 
-# Coefficient path, standard errors and normal confidence bands for `term` at each level
-# in `coverage`, using the covariance estimator stored in `lp`. Every confidence bound
-# the package reports (`summarize`, `as_irf_result`) is computed here. With
-# `diagnostics = true`, IV results also carry the first-stage regressions per horizon.
-function _irf_result(lp::AbstractLocalProjection, term::Symbol, coverage; diagnostics::Bool)
+"""
+    critical_value(estimator, level) -> Float64
+
+The two-sided critical value `c` of a `level` confidence interval `coef ± c * se`
+whose standard error comes from the covariance `estimator`, i.e. the `(1 + level) / 2`
+quantile of the reference distribution of the t-statistic:
+
+- `EWC(B)`: Student-t with `B` degrees of freedom. With a fixed number `B` of cosine
+  basis functions the EWC t-statistic is t-distributed with `B` degrees of freedom in
+  the limit, and normal critical values undercover (Lazarus, Lewis, Stock and Watson
+  2018, "HAR Inference: Recommendations for Practice", JBES).
+- every other estimator (HC/HR, HAC kernels, clustered, Driscoll-Kraay, VARHAC):
+  standard normal.
+
+Every confidence bound the package reports ([`summarize`](@ref), [`as_irf_result`](@ref)
+and the plots) uses this value.
+"""
+critical_value(estimator, level::Real) = quantile(Normal(), (1 + level) / 2)
+critical_value(estimator::EWC, level::Real) = quantile(TDist(estimator.B), (1 + level) / 2)
+
+# Response path, standard errors and confidence bands for `term` under `normalization`
+# at each level in `coverage`, using the covariance estimator stored in `lp` and its
+# critical values (`critical_value`). Every confidence bound the package reports
+# (`summarize`, `as_irf_result`, the plots) is computed here. With `diagnostics = true`,
+# IV results also carry the first-stage regressions per horizon.
+function _irf_result(
+        lp::AbstractLocalProjection, term::Symbol, coverage; diagnostics::Bool,
+        normalization::AbstractNormalization = UnitEffect()
+    )
     levels = collect(Float64, coverage)
     _check_levels(levels)
-    beta = coefpath(lp; term)
-    se = stderror(lp; term)
+    beta, se, shocksize = _response_path(lp, term, normalization)
     cube(v) = AxisArray(
         reshape(v, 1, 1, length(v)),
         Axis{:response}([lp.response]),
         Axis{:shock}([term]),
         Axis{:horizon}(0:lp.horizon)
     )
-    z = [quantile(Normal(), 0.5 + c / 2) for c in levels]
+    z = [critical_value(_vcov_estimator(lp), c) for c in levels]
     lower = [cube(beta .- zc .* se) for zc in z]
     upper = [cube(beta .+ zc .* se) for zc in z]
 
-    meta = (horizon = lp.horizon, formula = lp.base_formula, term = term)
+    meta = (;
+        horizon = lp.horizon, formula = lp.base_formula, term, normalization, shocksize,
+    )
     if diagnostics && lp isa LocalProjectionIV
         meta = (meta..., is_iv = true, first_stage = [first_stage(lp, h) for h in 0:lp.horizon])
     end

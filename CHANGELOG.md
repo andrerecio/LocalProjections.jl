@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **One-standard-deviation shocks**: `summarize`, `as_irf_result`, `irfplot`, `irfplot!` and the Plots recipe take `normalization = UnitStd()` (default `UnitEffect()`) for OLS projections. The response is `σ̂ β_h`, with `σ̂ = shockstd(lp; term)` the standard deviation of the residual of `term` on the other regressors at horizon 0. Standard errors come from the delta method, which includes the sampling error of `σ̂` and its covariance with `β_h`, estimated with the stored covariance estimator (HC and CR estimators without their finite-sample corrections for those terms; HAC kernels, also inside Driscoll-Kraay, with the bandwidth selected for each horizon's model). `UnitStd()` is an `ArgumentError` for `lpiv` results. `IRFSummary` gains `normalization` and `shocksize` fields and columns. `shockstd`, `UnitStd` and `UnitEffect` are exported. Driscoll-Kraay with an automatic bandwidth needs the Regress.jl version whose Driscoll-Kraay `vcov` records the selected bandwidth.
+
+### Changed
+
+- **Critical values follow the covariance estimator**: confidence bands are `coef ± c * se` with `c = critical_value(estimator, level)`, the Student-t quantile with `B` degrees of freedom for `EWC(B)` and the standard normal quantile for every other estimator. EWC bands were built with normal quantiles, which undercover with a fixed `B`; they are now wider. `summarize`, `as_irf_result` and the plots all use it, and `critical_value` is public.
+
+### Fixed
+
+- **`anchor(y, lag(y))`**, the long difference `y_{t+h} - y_{t-1}`, threw a `MethodError` because `lag` pads with `missing`. Missing values in the response or the anchor now mark the row as unavailable, as elsewhere.
+
+### Documentation
+
+- The API page lists `lpiv`, `as_irf_result`, `first_stage`, `weakivtest`, `horizonmodel`, `nobs`, the plotting functions and the result types, so the manual builds without errors.
+
 ## 0.2.0
 
 This release breaks the 0.1 API. No deprecation shims are provided.
