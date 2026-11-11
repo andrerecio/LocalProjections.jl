@@ -1,33 +1,9 @@
 # ============================================================================
-# Critical values (fixed-smoothing HAR inference)
-# Every confidence bound goes through `_irf_result`, which asks `_critical_value`
-# for the critical value paired with the stored covariance estimator.
+# EWC bandwidth (fixed-smoothing HAR inference)
+# The critical value paired with a covariance estimator, Student-t_B for `EWC(B)`,
+# is upstream's `critical_value` in the main file; every confidence bound goes
+# through `_irf_result`, which asks it.
 # ============================================================================
-
-"""
-    _critical_distribution(estimator)
-
-Reference distribution used to build confidence-interval critical values for
-a given covariance estimator.
-
-Defaults to `Normal()`. For the equal-weighted cosine estimator `EWC(B)`,
-returns `TDist(B)`: under fixed-smoothing asymptotics the EWC long-run
-variance is paired with Student-``t_B`` critical values for a single
-restriction (Lazarus, Lewis, Stock & Watson, 2018). Pairing EWC with normal
-critical values would understate the band width in finite samples.
-"""
-_critical_distribution(::Any) = Normal()
-_critical_distribution(estimator::EWC) = TDist(estimator.B)
-
-"""
-    _critical_value(estimator, level::Real)
-
-Two-sided critical value at confidence `level` from the reference
-distribution paired with `estimator` (see `_critical_distribution`).
-"""
-function _critical_value(estimator, level::Real)
-    return quantile(_critical_distribution(estimator), 0.5 + level / 2)
-end
 
 """
     ewc_bandwidth(T₀::Integer) -> Int

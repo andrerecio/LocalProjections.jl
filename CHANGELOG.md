@@ -31,6 +31,7 @@
 ### Changed
 
 - **EWC bands are wider than before**: upstream 0.2 used normal critical values for EWC too. This is a deliberate methodological change.
+- **Upstream's unreleased changes merged** (gragusa pull request 7, 2026-11-11; listed under "Unreleased (upstream)" below): one-standard-deviation shocks (`normalization = UnitStd()`, `shockstd`) and the public `critical_value`, which replaces the fork's private `_critical_value`/`_critical_distribution` with the same values. On the fork's features, `UnitStd()` works for `biascorrect` results (`σ̂` times the corrected path, delta-method standard errors on the uncorrected coefficient) and is an `ArgumentError` for state-dependent projections (a regime column is zero outside its regime, so the horizon-0 residual understates the shock), for projections with a horizon-tracking regressor, and with `bands = :supt` (the sup-t correlation leaves out the sampling error of `σ̂`). `summarize` of a `varbootstrap` result reports `UnitEffect()`. Driscoll–Kraay with an automatic bandwidth under `UnitStd()` needs Regress.jl `main` at or after `2f7ed63` (2026-11-11).
 
 ### Fixed
 
@@ -38,6 +39,24 @@
 - `anchor(y, lag(y))` (any anchor that is `missing` in its first rows) no longer throws when converting the anchored response; it equals `ldiff(y)`.
 - `weakivtest(lpiv, h; regime)` works with Regress.jl's unified estimation path (Regress.jl pull request 24, merged 2026-10-24), whose matrix IV fits store the endogenous columns as `endo_cols` and may drop collinear columns or recategorize an endogenous regressor as exogenous; it threw a `FieldError` before. When that leaves no even split of the endogenous regressors and instruments between the two regimes (an instrument equal to its regressor, as Blanchard–Perotti at h = 0), it throws an `ArgumentError`. With that Regress, `weakivtest(lpiv, h)` on such a horizon throws for linear projections too (with a message that says why), where it returned a numerically infinite F; `weakivtest(lpiv)` over all horizons returns `nothing` there, as for a tautological horizon 0, with or without `regime`.
 - The documentation builds again: `docs/src/api.md` lists every exported docstring (it was missing 18, including `lpiv`, `horizonmodel`, `as_irf_result` and the `irfplot` methods) and no longer asks for a `lags` docstring, which Regress.jl does not provide; the `@ref`s that pointed to undocumented names resolve. The manual adds the Plotting and FEVD tutorials and an EWC section in the inference tutorial; `pagesonly = true` skips stray `.md` files.
+
+## Unreleased (upstream)
+
+### Added
+
+- **One-standard-deviation shocks**: `summarize`, `as_irf_result`, `irfplot`, `irfplot!` and the Plots recipe take `normalization = UnitStd()` (default `UnitEffect()`) for OLS projections. The response is `σ̂ β_h`, with `σ̂ = shockstd(lp; term)` the standard deviation of the residual of `term` on the other regressors at horizon 0. Standard errors come from the delta method, which includes the sampling error of `σ̂` and its covariance with `β_h`, estimated with the stored covariance estimator (HC and CR estimators without their finite-sample corrections for those terms; HAC kernels, also inside Driscoll-Kraay, with the bandwidth selected for each horizon's model). `UnitStd()` is an `ArgumentError` for `lpiv` results. `IRFSummary` gains `normalization` and `shocksize` fields and columns. `shockstd`, `UnitStd` and `UnitEffect` are exported. Driscoll-Kraay with an automatic bandwidth needs the Regress.jl version whose Driscoll-Kraay `vcov` records the selected bandwidth.
+
+### Changed
+
+- **Critical values follow the covariance estimator**: confidence bands are `coef ± c * se` with `c = critical_value(estimator, level)`, the Student-t quantile with `B` degrees of freedom for `EWC(B)` and the standard normal quantile for every other estimator. EWC bands were built with normal quantiles, which undercover with a fixed `B`; they are now wider. `summarize`, `as_irf_result` and the plots all use it, and `critical_value` is public.
+
+### Fixed
+
+- **`anchor(y, lag(y))`**, the long difference `y_{t+h} - y_{t-1}`, threw a `MethodError` because `lag` pads with `missing`. Missing values in the response or the anchor now mark the row as unavailable, as elsewhere.
+
+### Documentation
+
+- The API page lists `lpiv`, `as_irf_result`, `first_stage`, `weakivtest`, `horizonmodel`, `nobs`, the plotting functions and the result types, so the manual builds without errors.
 
 ## 0.2.0
 

@@ -73,7 +73,8 @@ The EWC estimator of Lazarus, Lewis, Stock and Watson (2018) averages `B` cosine
 periodogram terms. `ewc_bandwidth` gives their rule ``B = \lfloor 0.41\,T_0^{2/3} \rfloor``
 from the horizon-0 sample, to be held fixed across horizons. Bands on an EWC covariance
 use Student-``t_B`` critical values instead of normal ones (fixed-smoothing asymptotics),
-so they are wider than a normal band with the same standard errors.
+so they are wider than a normal band with the same standard errors;
+`LocalProjections.critical_value(EWC(B), 0.90)` is the value used.
 
 ```@example infer
 B = ewc_bandwidth(lp_result)
@@ -105,6 +106,46 @@ println(summary_irf)
 summary_pct = summarize(lp_result, HC1(); scale=100, level=0.90)
 println(summary_pct)
 ```
+
+### One-standard-deviation shocks
+
+By default the response is to a shock that moves `x` by one unit (`UnitEffect()`).
+With `normalization = UnitStd()` it is the response to a one-standard-deviation shock:
+`σ̂ β_h`, where `σ̂ = shockstd(lp_result)` is the standard deviation of the residual of
+`x` on the other regressors over the rows of horizon 0. The standard errors come from
+the delta method, which includes the sampling error of `σ̂` and its covariance with
+`β_h`, estimated with the stored covariance estimator:
+
+```math
+\operatorname{Var}(\hat\sigma \hat\beta_h) \approx
+\sigma^2 \operatorname{Var}(\hat\beta_h) + \beta_h^2 \operatorname{Var}(\hat\sigma)
++ 2 \sigma \beta_h \operatorname{Cov}(\hat\beta_h, \hat\sigma).
+```
+
+Multiplying the unit-effect bands by `σ̂` instead treats `σ̂` as known and gives bands
+that are too narrow, most of all at short horizons, where `β_h` is large relative to
+its standard error.
+
+```@example infer
+lp_std = lp(@formula(leads(y) ~ x + lags(y, 2) + lags(x, 2)), df; horizon = 12)
+shockstd(lp_std)
+```
+
+```@example infer
+println(summarize(lp_std; normalization = UnitStd()))
+```
+
+`as_irf_result` and the plots take the same keyword. IV projections (`lpiv`) identify
+the response to a unit change in the instrumented variable but not the size of the
+structural shock, so `UnitStd()` is an error for them.
+
+A bias-corrected projection (`biascorrect`) takes `UnitStd()` too: the response is `σ̂`
+times the corrected path. `UnitStd()` is an error where the horizon-0 residual does not
+measure the shock: state-dependent projections (the regime columns are zero outside
+their regime) and projections with a horizon-tracking regressor. Sup-t bands
+(`bands = :supt`) are built from the correlation of the coefficients across horizons,
+which leaves out the sampling error of `σ̂`, so they are an error with `UnitStd()` as
+well.
 
 ### Different Confidence Levels
 

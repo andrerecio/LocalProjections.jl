@@ -96,6 +96,31 @@ function _shock_terms(lp::AbstractLocalProjection)
     return (Symbol(st.shock, "_", st.labels[1]), Symbol(st.shock, "_", st.labels[2]))
 end
 
+# The fork's specifications on which upstream's `shockstd` (and with it
+# `normalization = UnitStd()`) is not defined. A regime column is zero outside its
+# regime, so the horizon-0 residual sum of squares belongs to one regime while its
+# degrees of freedom count every row: the ratio understates the shock by about the
+# square root of the regime's share of the sample. A horizon-tracking regressor
+# changes the design with the horizon, so the horizon-0 residual is not the shock
+# the coefficient at `h > 0` responds to.
+function _check_shockstd(lp::AbstractLocalProjection)
+    lp.state === nothing || throw(
+        ArgumentError(
+            "the standard deviation of the shock is not available for state-dependent " *
+                "local projections: the regime columns are zero outside their regime; " *
+                "use `normalization = UnitEffect()`"
+        )
+    )
+    _rhs_tracks_horizon(lp.base_formula) && throw(
+        ArgumentError(
+            "the standard deviation of the shock needs the same regressors at every " *
+                "horizon; the projection has a horizon-tracking right-hand-side term. " *
+                "Use `normalization = UnitEffect()`"
+        )
+    )
+    return nothing
+end
+
 # ============================================================================
 # Test of equal responses across regimes
 # ============================================================================
