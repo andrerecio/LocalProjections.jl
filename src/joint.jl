@@ -6,19 +6,31 @@
 # ============================================================================
 
 # Horizons with a sampling variance: all of 0:H, except h = 0 when the response
-# is the shock (coefficient 1, standard error 0 by construction).
-_joint_default_horizons(lp::AbstractLocalProjection) =
-    collect(lp.tautological_h0 ? (1:(lp.horizon)) : (0:(lp.horizon)))
+# is the shock (coefficient 1, standard error 0 by construction). The response to a
+# one-standard-deviation shock is then `σ̂` at h = 0, which has the sampling variance
+# of `σ̂`, so every horizon counts.
+_degenerate_h0(lp::AbstractLocalProjection, ::UnitEffect) = lp.tautological_h0
+_degenerate_h0(lp::AbstractLocalProjection, ::UnitStd) = false
 
-function _joint_horizons(lp::AbstractLocalProjection, horizons)
-    hs = horizons === nothing ? _joint_default_horizons(lp) : collect(Int, horizons)
+function _joint_default_horizons(
+        lp::AbstractLocalProjection, normalization::AbstractNormalization = UnitEffect()
+    )
+    return collect(_degenerate_h0(lp, normalization) ? (1:(lp.horizon)) : (0:(lp.horizon)))
+end
+
+function _joint_horizons(
+        lp::AbstractLocalProjection, horizons,
+        normalization::AbstractNormalization = UnitEffect()
+    )
+    hs = horizons === nothing ? _joint_default_horizons(lp, normalization) :
+        collect(Int, horizons)
     isempty(hs) && throw(ArgumentError("`horizons` is empty"))
     allunique(hs) || throw(ArgumentError("`horizons` lists a horizon twice"))
     for h in hs
         0 <= h <= lp.horizon || throw(
             ArgumentError("horizon $h is outside the estimated horizons 0:$(lp.horizon)")
         )
-        h == 0 && lp.tautological_h0 && throw(
+        h == 0 && _degenerate_h0(lp, normalization) && throw(
             ArgumentError(
                 "the response is the shock, so its h = 0 coefficient is 1 with no " *
                     "sampling variance; leave h = 0 out of `horizons`"
@@ -81,7 +93,9 @@ end
 # The influence of every horizon in `hs` on one time axis, the rows of `lp.data`
 # from the first to the last row any of them uses, with zeros on the rows a horizon
 # does not use. Lags between rows are then distances in time, as a kernel needs.
-function _stacked_influence(lp::AbstractLocalProjection, term::Symbol, hs, est)
+function _stacked_influence(
+        lp::AbstractLocalProjection, term::Symbol, hs, est, ::UnitEffect = UnitEffect()
+    )
     j = _term_index(lp, term)
     used = reduce(.|, (lp.rows[h + 1] for h in hs))
     t1, t2 = findfirst(used), findlast(used)
@@ -89,6 +103,33 @@ function _stacked_influence(lp::AbstractLocalProjection, term::Symbol, hs, est)
     for (c, h) in enumerate(hs)
         idx = findall(lp.rows[h + 1]) .- (t1 - 1)
         Ψ[idx, c] = _influence(lp.models[h + 1], j, est, h, term)
+    end
+    return Ψ
+end
+
+# The same for the response to a one-standard-deviation shock, `σ̂ β̂_h`, whose
+# influence is `σ̂ ψ_h + β̂_h ψ_σ`: `ψ_h` that of the coefficient and
+# `ψ_σ = (ε̂² − mean ε̂²) / (2 σ̂ n₀)` that of `σ̂`, on the rows of horizon 0 (the
+# terms of upstream's `_response_path`). `ψ_σ` enters every horizon, which raises
+# the correlation across horizons. When the response is the shock, `β̂_0 = 1` has no
+# sampling error and the column of h = 0 is `ψ_σ` alone.
+function _stacked_influence(lp::AbstractLocalProjection, term::Symbol, hs, est, ::UnitStd)
+    j = _term_index(lp, term)
+    (; residual, sigma) = _shock_residual(lp, j)
+    beta = coefpath(lp; term)
+    rows0 = lp.rows[1]
+    used = reduce(.|, (lp.rows[h + 1] for h in hs); init = rows0)
+    t1, t2 = findfirst(used), findlast(used)
+    ψσ = zeros(t2 - t1 + 1)
+    ψσ[findall(rows0) .- (t1 - 1)] =
+        (abs2.(residual) .- mean(abs2, residual)) ./ (2 * sigma * length(residual))
+    Ψ = zeros(t2 - t1 + 1, length(hs))
+    for (c, h) in enumerate(hs)
+        if !(h == 0 && lp.tautological_h0)
+            idx = findall(lp.rows[h + 1]) .- (t1 - 1)
+            Ψ[idx, c] = sigma .* _influence(lp.models[h + 1], j, est, h, term)
+        end
+        Ψ[:, c] .+= beta[h + 1] .* ψσ
     end
     return Ψ
 end
@@ -102,9 +143,12 @@ function _stacked_avar(Ψ::Matrix{Float64}, est)
     return Matrix{Float64}(parent(aVar(k, Ψ; demean = false)))
 end
 
-function _joint_correlation(lp::AbstractLocalProjection, term::Symbol, hs)
+function _joint_correlation(
+        lp::AbstractLocalProjection, term::Symbol, hs,
+        normalization::AbstractNormalization = UnitEffect()
+    )
     est = _check_joint(lp)
-    Ω = _stacked_avar(_stacked_influence(lp, term, hs, est), est)
+    Ω = _stacked_avar(_stacked_influence(lp, term, hs, est, normalization), est)
     d = sqrt.(diag(Ω))
     all(>(0), d) || throw(
         ArgumentError("a horizon in `horizons` has a zero long-run variance for $term")
@@ -115,7 +159,8 @@ function _joint_correlation(lp::AbstractLocalProjection, term::Symbol, hs)
 end
 
 """
-    jointvcov(lp; term = lp.shock, horizons = nothing) -> Matrix{Float64}
+    jointvcov(lp; term = lp.shock, horizons = nothing, normalization = UnitEffect())
+        -> Matrix{Float64}
     jointvcov(lp, estimator; kwargs...)
 
 Covariance matrix of the coefficients of `term` across `horizons` (by default
@@ -147,12 +192,26 @@ kernel HAC or `EWC` estimator. Panels, absorbed fixed effects and cluster or
 Driscoll–Kraay estimators throw. A `BiasCorrectedLP` uses the standard errors of
 the uncorrected coefficients, as its bands do.
 
+With `normalization = UnitStd()` (OLS projections) the matrix is the covariance of
+the responses to a one-standard-deviation shock, ``\\hat\\sigma\\hat\\beta_h`` with
+``\\hat\\sigma`` = [`shockstd`](@ref). Each stacked score is then
+``\\hat\\sigma\\,\\psi_h + \\hat\\beta_h\\,\\psi_\\sigma``, the delta-method influence
+with the sampling error ``\\psi_\\sigma`` of ``\\hat\\sigma``, which every horizon
+shares; the diagonal is the squared delta-method standard error of
+`summarize(lp; normalization = UnitStd())`. When the response is the shock,
+``h = 0`` is included: its response is ``\\hat\\sigma``, with the sampling variance
+of ``\\hat\\sigma``. A test of zero responses does not depend on the size of the
+shock, so [`jointtest`](@ref) has no `normalization`.
+
 See also [`jointtest`](@ref) and [`supt_critical_value`](@ref).
 """
-function jointvcov(lp::AbstractLocalProjection; term::Symbol = lp.shock, horizons = nothing)
-    hs = _joint_horizons(lp, horizons)
-    R, _ = _joint_correlation(lp, term, hs)
-    se = stderror(lp; term)[hs .+ 1]
+function jointvcov(
+        lp::AbstractLocalProjection; term::Symbol = lp.shock, horizons = nothing,
+        normalization::AbstractNormalization = UnitEffect()
+    )
+    hs = _joint_horizons(lp, horizons, normalization)
+    R, _ = _joint_correlation(lp, term, hs, normalization)
+    se = _response_path(lp, term, normalization).se[hs .+ 1]
     return Matrix(Symmetric(se .* R .* se'))
 end
 
@@ -366,7 +425,8 @@ end
 
 """
     supt_critical_value(lp; term = lp.shock, level = 0.95, horizons = nothing,
-                        ndraws = 100_000, rng = Xoshiro($(_SUPT_SEED))) -> Float64
+                        normalization = UnitEffect(), ndraws = 100_000,
+                        rng = Xoshiro($(_SUPT_SEED))) -> Float64
     supt_critical_value(lp, estimator; kwargs...)
 
 Critical value ``c`` of the sup-t simultaneous confidence band
@@ -385,18 +445,23 @@ The quantile rule is that of Kessler's Stata command
 error with 100,000 draws is up to about 0.01 at a 95% level; pass a larger
 `ndraws` for more digits.
 
+With `normalization = UnitStd()` the band is for the responses to a
+one-standard-deviation shock, and the correlation is that of
+``\\hat\\sigma\\hat\\beta_h`` across horizons (see [`jointvcov`](@ref)), which
+includes the sampling error of ``\\hat\\sigma`` that every horizon shares.
+
 `summarize`, `plot`, `irfplot` and `as_irf_result` build these bands with
 `bands = :supt`.
 """
 function supt_critical_value(
         lp::AbstractLocalProjection; term::Symbol = lp.shock, level::Real = 0.95,
-        horizons = nothing, ndraws::Integer = 100_000,
-        rng::AbstractRNG = Xoshiro(_SUPT_SEED)
+        horizons = nothing, normalization::AbstractNormalization = UnitEffect(),
+        ndraws::Integer = 100_000, rng::AbstractRNG = Xoshiro(_SUPT_SEED)
     )
     0 < level < 1 || throw(ArgumentError("`level` must lie strictly between 0 and 1"))
     ndraws >= 1 || throw(ArgumentError("`ndraws` must be positive"))
-    hs = _joint_horizons(lp, horizons)
-    R, est = _joint_correlation(lp, term, hs)
+    hs = _joint_horizons(lp, horizons, normalization)
+    R, est = _joint_correlation(lp, term, hs, normalization)
     length(hs) == 1 && return critical_value(est, level)
     return _supt_quantile(_supt_maxabs(R, est, Int(ndraws), rng), level)
 end
@@ -409,9 +474,8 @@ function supt_critical_value(
 end
 
 # Critical values of the bands of `_irf_result` at each of `levels`. sup-t bands
-# share one set of draws across the levels. They come from the correlation of the
-# coefficients across horizons; a one-standard-deviation response `σ̂ β̂_h` adds the
-# sampling error of `σ̂` to every horizon, which that correlation leaves out.
+# share one set of draws across the levels, from the correlation across horizons of
+# the responses under `normalization`.
 function _band_critical_values(
         lp::AbstractLocalProjection, term::Symbol, levels, bands::Symbol,
         normalization::AbstractNormalization
@@ -421,16 +485,8 @@ function _band_critical_values(
     bands === :supt || throw(
         ArgumentError("`bands` must be :pointwise or :supt (got $(repr(bands)))")
     )
-    normalization isa UnitEffect || throw(
-        ArgumentError(
-            "sup-t bands are built from the correlation of the coefficients across " *
-                "horizons and are not available with `normalization = " *
-                "$(nameof(typeof(normalization)))()`; use `bands = :pointwise` or " *
-                "`normalization = UnitEffect()`"
-        )
-    )
-    hs = _joint_default_horizons(lp)
-    R, est = _joint_correlation(lp, term, hs)
+    hs = _joint_default_horizons(lp, normalization)
+    R, est = _joint_correlation(lp, term, hs, normalization)
     length(hs) == 1 && return [critical_value(est, c) for c in levels]
     t = _supt_maxabs(R, est, 100_000, Xoshiro(_SUPT_SEED))
     return [_supt_quantile(t, c) for c in levels]
