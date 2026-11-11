@@ -795,13 +795,8 @@ end
     rt = lpiv(TSLS(), f, df; horizon = h)
 
     for est in (LIML(), Fuller(1.0), KClass(1.5))
-        # Fuller(1)'s kappa is just below 1 at horizon 2 on this sample, which warns
-        fits = () -> (
-            lpiv(est, f, df; horizon = h),
-            Regress.iv(est, fit, @formula(yh ~ (x ~ z1 + z2 + z3) + w)),
-        )
-        r, ref = est isa Fuller ?
-            (@test_logs (:warn, r"kappa < 1") match_mode = :any fits()) : fits()
+        r, ref = lpiv(est, f, df; horizon = h),
+            Regress.iv(est, fit, @formula(yh ~ (x ~ z1 + z2 + z3) + w))
         m = horizonmodel(r, h)
         @test m.estimator == est
         @test coef(m) ≈ coef(ref)
@@ -958,7 +953,7 @@ end
     result = lpiv(TSLS(), @formula(leads(x) ~ (x ~ z) + w), df; horizon = horizon)
 
     @test result isa LocalProjectionIV
-    @test result.tautological_h0
+    @test result.h0_identity == findfirst(==("x"), result.coef_names)
 
     # coefpath: h=0 should be exactly 1.0 for the shock term
     irf = coefpath(result; term = :x)
@@ -988,7 +983,7 @@ end
     @test wiv[1] === nothing
     @test all(r -> isfinite(r.F_eff), wiv[2:end])
     @test_throws ArgumentError weakivtest(result, 0)
-    @test_throws "weakivtest is undefined at horizon 0 when the response equals the shock (x)" weakivtest(result, 0)
+    @test_throws "weakivtest is undefined at horizon 0 when the response equals the regressor x" weakivtest(result, 0)
     @test wiv[2].F_eff == weakivtest(result, 1).F_eff
     @test isfinite(weakivtest(result, 1).F_eff)
 
@@ -997,13 +992,76 @@ end
 
     # OLS LP where response == shock
     ols_result = lp(@formula(leads(x) ~ x + w), df; horizon = horizon)
-    @test ols_result.tautological_h0
+    @test ols_result.h0_identity == findfirst(==("x"), ols_result.coef_names)
     irf_ols = coefpath(ols_result; term = :x)
     @test irf_ols[1] == 1.0
 
     # Non-tautological case: response != shock
     result_ok = lpiv(TSLS(), @formula(leads(y) ~ (x ~ z) + w), df; horizon = horizon)
-    @test !result_ok.tautological_h0
+    @test result_ok.h0_identity === nothing
+end
+
+@testitem "exact horizon 0 when the response is a regressor at t" tags = [:core, :lpiv, :iv, :tautological] begin
+    using LocalProjections
+    using DataFrames, StableRNGs, StatsModels
+    using Regress: coef, coefnames
+    using CovarianceMatrices: HC1, Bartlett, NeweyWest
+
+    rng = StableRNG(4411)
+    n = 240
+    z = randn(rng, n)
+    w = randn(rng, n)
+    x = 0.4 * w + 0.8 * z + randn(rng, n)
+    v = randn(rng, n)
+    y = 0.5 * x + 0.3 * w + randn(rng, n)
+    id = repeat(1:4, inner = 60)
+    t = repeat(1:60, outer = 4)
+    df = DataFrame(; y, x, z, w, v, id, t)
+    H = 3
+
+    # `w` enters at t and is the response: on impact its response to `x` is exactly 0
+    for f in (@formula(leads(w) ~ w + x + lags(y, 2)), @formula(cumul(w) ~ w + x + lags(y, 2)))
+        r = lp(f, df; horizon = H, shock = :x)
+        @test r.h0_identity == findfirst(==("w"), r.coef_names)
+        @test coefpath(r)[1] === 0.0
+        @test coefpath(r; term = :w)[1] === 1.0
+        @test stderror(r)[1] === 0.0
+        @test stderror(r + vcov(Bartlett{NeweyWest}()))[1] === 0.0
+        jx = findfirst(==("x"), r.coef_names)
+        @test coefpath(r)[2:end] == [coef(horizonmodel(r, h))[jx] for h in 1:H]
+        s = summarize(r; normalization = UnitStd())
+        @test s.coef[1] === 0.0
+        @test s.se[1] === 0.0
+        @test (s.lower[1], s.upper[1]) == (0.0, 0.0)
+        @test all(>(0), s.se[2:end])
+    end
+
+    # The horizon-0 response of an anchor is not a regressor
+    ra = lp(@formula(anchor(x, v) ~ x + w), df; horizon = H, shock = :x)
+    @test ra.h0_identity === nothing
+    b0 = coef(horizonmodel(ra, 0))[2]
+    @test coefpath(ra)[1] == b0
+    @test !isapprox(b0, 1.0; atol = 1.0e-3)
+    @test stderror(ra)[1] > 0
+
+    # Absorbed fixed effects keep the identity
+    rf = lp(@formula(leads(w) ~ w + x + fe(id)), df; horizon = H, shock = :x, unit = :id, time = :t)
+    @test rf.h0_identity == findfirst(==("w"), rf.coef_names)
+    @test coefpath(rf)[1] === 0.0
+    @test stderror(rf)[1] === 0.0
+
+    # IV: an exogenous regressor at t as the response
+    ri = lpiv(TSLS(), @formula(leads(w) ~ (x ~ z) + w), df; horizon = H, shock = :x)
+    @test ri.h0_identity == findfirst(==("w"), ri.coef_names)
+    @test coefpath(ri)[1] === 0.0
+    @test coefpath(ri; term = :w)[1] === 1.0
+    @test stderror(ri + vcov(HC1()))[1] === 0.0
+    @test weakivtest(ri)[1] === nothing
+    @test_throws "weakivtest is undefined at horizon 0 when the response equals the regressor w" weakivtest(ri, 0)
+
+    # The instrument is not a regressor
+    rz = lpiv(TSLS(), @formula(leads(z) ~ (x ~ z) + w), df; horizon = H, shock = :x)
+    @test rz.h0_identity === nothing
 end
 
 @testitem "shock selection and formula validation" tags = [:core, :lpiv, :api] begin

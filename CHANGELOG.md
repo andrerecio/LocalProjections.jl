@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- **Exact horizon-0 coefficients when the response is a regressor**: the horizon-0 regression fits exactly when the response at `t` is one of the regressors, so its coefficients are 1 on that regressor and 0 elsewhere, with standard error 0. This was applied only when the response was named like the shock. It now applies whenever the horizon-0 response equals a regressor column on the horizon-0 rows, which includes a response that is also a regressor entered at `t` (`leads(w) ~ x + w + ...`, whose response to `x` was reported as rounding noise around 0) and excludes `anchor(x, z) ~ x + ...`, whose horizon-0 response `x_t - z_t` is not a regressor and whose coefficient was wrongly reported as exactly 1. `weakivtest(lpiv, 0)` throws in every such case. The `tautological_h0::Bool` field of `LocalProjection` and `LocalProjectionIV` is replaced by `h0_identity`, the index of the matching regressor or `nothing`.
 - **`anchor(y, lag(y))`**, the long difference `y_{t+h} - y_{t-1}`, threw a `MethodError` because `lag` pads with `missing`. Missing values in the response or the anchor now mark the row as unavailable, as elsewhere.
 
 ### Documentation
