@@ -93,6 +93,25 @@ The anchor stays **fixed at time ``t``** while ``y`` shifts forward:
 - At ``h=1``: ``y_{t+1} - z_t``
 - At ``h=2``: ``y_{t+2} - z_t``
 
+### Long differences
+
+Anchoring on the response's own lag gives the long difference ``y_{t+h} - y_{t-1}``.
+The first row has no lag, so it is left out:
+
+```@example trans
+lp_longdiff = lp(@formula(anchor(y, lag(y)) ~ x), df; horizon=8)
+println("Long-difference IRF: ", round.(coefpath(lp_longdiff), digits=4))
+```
+
+When ``y_{t-1}`` is also a control, the long difference and `leads(y)` give the same
+coefficient on `x` (only the coefficient on ``y_{t-1}`` changes, by one):
+
+```@example trans
+lp_levels = lp(@formula(leads(y) ~ x + lag(y)), df; horizon=8)
+lp_diff = lp(@formula(anchor(y, lag(y)) ~ x + lag(y)), df; horizon=8)
+println("Same shock path: ", coefpath(lp_levels) ≈ coefpath(lp_diff))
+```
+
 ## Nested Transformations
 
 Combine transformations for complex responses:

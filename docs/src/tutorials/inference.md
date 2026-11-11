@@ -67,6 +67,22 @@ se_fixed = stderror(lp_result + vcov(Bartlett(5)); term=:x)
 println("Fixed bandwidth SEs: ", round.(se_fixed, digits=4))
 ```
 
+### Equal-weighted cosine (EWC)
+
+`EWC(B)` projects the regression moments on `B` cosine functions. With `B` fixed, its
+t-statistic is Student-t with `B` degrees of freedom in the limit (Lazarus, Lewis, Stock
+and Watson 2018), so the bands of an EWC result use Student-t(`B`) critical values,
+which are wider than the normal ones; every other estimator uses the normal quantile.
+`critical_value` gives the value used:
+
+```@example infer
+using CovarianceMatrices: EWC
+lp_ewc = lp_result + vcov(EWC(8))
+s_ewc = summarize(lp_ewc; level=0.95)
+println("Critical value: ", round(LocalProjections.critical_value(EWC(8), 0.95), digits=3))
+println("Half-widths: ", round.((s_ewc.upper .- s_ewc.lower) ./ 2, digits=3))
+```
+
 ## Summary Tables with `summarize()`
 
 Get an `IRFSummary` table with coefficients, standard errors, and confidence intervals:
@@ -91,6 +107,38 @@ println(summary_irf)
 summary_pct = summarize(lp_result, HC1(); scale=100, level=0.90)
 println(summary_pct)
 ```
+
+### One-standard-deviation shocks
+
+By default the response is to a shock that moves `x` by one unit (`UnitEffect()`).
+With `normalization = UnitStd()` it is the response to a one-standard-deviation shock:
+`σ̂ β_h`, where `σ̂ = shockstd(lp_result)` is the standard deviation of the residual of
+`x` on the other regressors over the rows of horizon 0. The standard errors come from
+the delta method, which includes the sampling error of `σ̂` and its covariance with
+`β_h`, estimated with the stored covariance estimator:
+
+```math
+\operatorname{Var}(\hat\sigma \hat\beta_h) \approx
+\sigma^2 \operatorname{Var}(\hat\beta_h) + \beta_h^2 \operatorname{Var}(\hat\sigma)
++ 2 \sigma \beta_h \operatorname{Cov}(\hat\beta_h, \hat\sigma).
+```
+
+Multiplying the unit-effect bands by `σ̂` instead treats `σ̂` as known and gives bands
+that are too narrow, most of all at short horizons, where `β_h` is large relative to
+its standard error.
+
+```@example infer
+lp_std = lp(@formula(leads(y) ~ x + lags(y, 2) + lags(x, 2)), df; horizon = 12)
+shockstd(lp_std)
+```
+
+```@example infer
+println(summarize(lp_std; normalization = UnitStd()))
+```
+
+`as_irf_result` and the plots take the same keyword. IV projections (`lpiv`) identify
+the response to a unit change in the instrumented variable but not the size of the
+structural shock, so `UnitStd()` is an error for them.
 
 ### Different Confidence Levels
 
@@ -146,5 +194,6 @@ plot(p1, p2, p3, layout=(1,3), size=(900, 300))
 | `Bartlett(bw)` | HAC with fixed bandwidth |
 | `Parzen{NeweyWest}()` | HAC with Parzen kernel |
 | `QuadraticSpectral{Andrews}()` | HAC with QS kernel |
+| `EWC(B)` | Equal-weighted cosine with `B` basis functions; Student-t(`B`) bands |
 
 See [CovarianceMatrices.jl documentation](https://gragusa.github.io/CovarianceMatrices.jl/stable/) for more options.
