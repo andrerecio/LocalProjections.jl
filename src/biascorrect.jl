@@ -239,6 +239,11 @@ function coefpath(bc::BiasCorrectedLP; term::Symbol = bc.lp.shock)
     return corrected
 end
 
+# The shock of a bias-corrected projection is the shock of the projection it wraps, so
+# `shockstd(bc)` and `normalization = UnitStd()` work: the response is `σ̂ θ̂ᶜ_h`, with the
+# delta-method standard error built on the uncorrected coefficient, as for `UnitEffect()`.
+_shock_residual(bc::BiasCorrectedLP, idx::Int) = _shock_residual(bc.lp, idx)
+
 """
     bc + vcov(estimator)
 

@@ -20,8 +20,14 @@ horizon. Bands built on `EWC(B)` use Student-``t_B`` critical values.
 stderror(::AbstractLocalProjection)
 summarize
 IRFSummary
+shockstd
+LocalProjections.critical_value
 ewc_bandwidth
 ```
+
+`normalization` takes MacroEconometricTools' `UnitEffect()` (the default: a shock that
+moves the shock variable by one unit) or `UnitStd()` (a one-standard-deviation shock,
+[`shockstd`](@ref)); LocalProjections re-exports both.
 
 ## Joint inference across horizons
 

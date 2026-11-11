@@ -506,7 +506,7 @@ function summarize(
     end
     H = length(b.theta) - 1
     return IRFSummary(
-        b.response, b.term, Float64(level), scale_f, collect(0:H),
+        b.response, b.term, Float64(level), scale_f, UnitEffect(), 1.0, collect(0:H),
         scale_f .* b.theta, abs(scale_f) .* b.se, lower, upper
     )
 end

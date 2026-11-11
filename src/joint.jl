@@ -397,7 +397,7 @@ function supt_critical_value(
     ndraws >= 1 || throw(ArgumentError("`ndraws` must be positive"))
     hs = _joint_horizons(lp, horizons)
     R, est = _joint_correlation(lp, term, hs)
-    length(hs) == 1 && return _critical_value(est, level)
+    length(hs) == 1 && return critical_value(est, level)
     return _supt_quantile(_supt_maxabs(R, est, Int(ndraws), rng), level)
 end
 
@@ -409,16 +409,29 @@ function supt_critical_value(
 end
 
 # Critical values of the bands of `_irf_result` at each of `levels`. sup-t bands
-# share one set of draws across the levels.
-function _band_critical_values(lp::AbstractLocalProjection, term::Symbol, levels, bands::Symbol)
+# share one set of draws across the levels. They come from the correlation of the
+# coefficients across horizons; a one-standard-deviation response `σ̂ β̂_h` adds the
+# sampling error of `σ̂` to every horizon, which that correlation leaves out.
+function _band_critical_values(
+        lp::AbstractLocalProjection, term::Symbol, levels, bands::Symbol,
+        normalization::AbstractNormalization
+    )
     est = _vcov_estimator(lp)
-    bands === :pointwise && return [_critical_value(est, c) for c in levels]
+    bands === :pointwise && return [critical_value(est, c) for c in levels]
     bands === :supt || throw(
         ArgumentError("`bands` must be :pointwise or :supt (got $(repr(bands)))")
     )
+    normalization isa UnitEffect || throw(
+        ArgumentError(
+            "sup-t bands are built from the correlation of the coefficients across " *
+                "horizons and are not available with `normalization = " *
+                "$(nameof(typeof(normalization)))()`; use `bands = :pointwise` or " *
+                "`normalization = UnitEffect()`"
+        )
+    )
     hs = _joint_default_horizons(lp)
     R, est = _joint_correlation(lp, term, hs)
-    length(hs) == 1 && return [_critical_value(est, c) for c in levels]
+    length(hs) == 1 && return [critical_value(est, c) for c in levels]
     t = _supt_maxabs(R, est, 100_000, Xoshiro(_SUPT_SEED))
     return [_supt_quantile(t, c) for c in levels]
 end

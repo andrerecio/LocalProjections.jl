@@ -338,8 +338,10 @@ end
     summary_df = DataFrame(summary_obj)
     @test summary_df isa DataFrame
     @test nrow(summary_df) == 6
-    @test names(summary_df) ==
-        ["response", "term", "horizon", "coef", "se", "lower", "upper", "level", "scale"]
+    @test names(summary_df) == [
+        "response", "term", "horizon", "coef", "se", "lower", "upper", "level", "scale",
+        "normalization", "shocksize",
+    ]
 
     # Test with scale
     summary_scaled = summarize(lp_result; scale = 100)
@@ -405,7 +407,8 @@ end
     @test occursin("Impulse response of y to x", plain)
     @test occursin("Lower 90%", plain)
     @test !occursin("0.0 │", plain)  # horizons print as integers
-    @test sprint(show, s) == "IRFSummary(response=y, term=x, level=0.9, scale=1.0)"
+    @test sprint(show, s) ==
+        "IRFSummary(response=y, term=x, level=0.9, scale=1.0, normalization=UnitEffect())"
 
     # One validation of confidence levels for every entry point
     msg = "confidence levels must lie strictly between 0 and 1; got 95"
@@ -1483,6 +1486,198 @@ end
     @test_throws msg Plots.plot(r; levels = [95])
 end
 
+@testitem "critical values follow the covariance estimator" tags = [:vcov, :summarize, :api] begin
+    using LocalProjections
+    using LocalProjections: critical_value
+    using DataFrames, StableRNGs, Test
+    using CovarianceMatrices: HC1, HC3, EWC, Bartlett, NeweyWest
+    using Distributions: Normal, TDist, quantile
+
+    # EWC(B): Student-t with B degrees of freedom; everything else: standard normal
+    for level in (0.68, 0.9, 0.95)
+        @test critical_value(EWC(8), level) == quantile(TDist(8), (1 + level) / 2)
+        @test critical_value(HC1(), level) == quantile(Normal(), (1 + level) / 2)
+        @test critical_value(Bartlett{NeweyWest}(), level) == critical_value(HC3(), level)
+    end
+    @test critical_value(EWC(4), 0.95) > critical_value(EWC(16), 0.95) > critical_value(HC1(), 0.95)
+
+    rng = StableRNG(1110)
+    n = 150
+    df = DataFrame(x = randn(rng, n), y = cumsum(randn(rng, n)))
+    r = lp(@formula(leads(y) ~ x + lags(y, 2)), df; horizon = 6)
+    for (est, c) in ((EWC(6), quantile(TDist(6), 0.95)), (HC1(), quantile(Normal(), 0.95)))
+        re = r + vcov(est)
+        beta, se = coefpath(re), stderror(re)
+        s = summarize(re; level = 0.9)
+        @test s.lower ≈ beta .- c .* se
+        @test s.upper ≈ beta .+ c .* se
+        # as_irf_result and summarize report the same bands
+        irf = as_irf_result(re; coverage = [0.9])
+        @test vec(Array(only(irf.lower))) ≈ s.lower
+        @test vec(Array(only(irf.upper))) ≈ s.upper
+    end
+    # A negative scale swaps the bounds of the Student-t interval as well
+    s = summarize(r + vcov(EWC(6)); level = 0.9, scale = -1)
+    @test all(s.lower .<= s.upper)
+    @test s.upper ≈ -(coefpath(r) .- quantile(TDist(6), 0.95) .* stderror(r + vcov(EWC(6))))
+end
+
+@testitem "long differences anchor on the response's own lag" tags = [:anchor, :panel, :core] begin
+    using LocalProjections
+    using DataFrames, StableRNGs, Test
+
+    rng = StableRNG(2468)
+    n = 80
+    df = DataFrame(x = randn(rng, n), y = cumsum(randn(rng, n)))
+    df.ylag = [missing; df.y[1:(end - 1)]]
+    H = 4
+
+    # anchor(y, lag(y)) is y_{t+h} - y_{t-1}: the same projection as a precomputed lag
+    r = lp(@formula(anchor(y, lag(y)) ~ x), df; horizon = H)
+    r_col = lp(@formula(anchor(y, ylag) ~ x), df; horizon = H)
+    @test coefpath(r) ≈ coefpath(r_col)
+    @test nobs(r) == [n - 1 - h for h in 0:H]
+    for h in 0:H
+        rows = 2:(n - h)
+        X = [ones(length(rows)) df.x[rows]]
+        @test coefpath(r)[h + 1] ≈ (X \ (df.y[rows .+ h] .- df.y[rows .- 1]))[2]
+    end
+
+    # With y_{t-1} as a control the shock coefficient equals that of leads(y)
+    r_levels = lp(@formula(leads(y) ~ x + lag(y)), df; horizon = H)
+    r_diff = lp(@formula(anchor(y, lag(y)) ~ x + lag(y)), df; horizon = H)
+    @test coefpath(r_diff) ≈ coefpath(r_levels)
+    @test coefpath(r_diff; term = :y_lag1) ≈ coefpath(r_levels; term = :y_lag1) .- 1
+
+    # In a panel the lag is taken within each unit
+    T = 20
+    panel = DataFrame(
+        id = repeat(["a", "b"], inner = T), t = repeat(1:T, 2),
+        x = randn(rng, 2T), y = randn(rng, 2T)
+    )
+    rp = lp(@formula(anchor(y, lag(y)) ~ x), panel; horizon = 2, unit = :id, time = :t)
+    @test nobs(rp) == [2 * (T - 1 - h) for h in 0:2]
+end
+
+@testitem "one-standard-deviation responses" tags = [:summarize, :vcov, :api, :verification] begin
+    using LocalProjections
+    using DataFrames, StableRNGs, Test
+    using CovarianceMatrices: HC0, HC1, EWC
+    using Distributions: TDist, quantile
+
+    rng = StableRNG(2025)
+    n = 200
+    x = 2 .* randn(rng, n)
+    y = zeros(n)
+    for t in 2:n
+        y[t] = 0.5 * y[t - 1] + x[t] + 0.3 * x[t - 1] + randn(rng)
+    end
+    df = DataFrame(; y, x)
+    H = 3
+    r = lp(@formula(leads(y) ~ x + lag(y) + lag(x)), df; horizon = H)
+
+    # The shock: the residual of x on the other regressors over the rows of horizon 0
+    design(rows) = [ones(length(rows)) df.x[rows] df.y[rows .- 1] df.x[rows .- 1]]
+    rows0 = 2:n
+    X0 = design(rows0)
+    W0 = X0[:, [1, 3, 4]]
+    eps = X0[:, 2] .- W0 * (W0 \ X0[:, 2])
+    sigma = sqrt(sum(abs2, eps) / (length(rows0) - 3))
+    @test shockstd(r) ≈ sigma
+
+    # Delta method: θ_h = σ β_h, with the contributions of each row to β̂_h - β_h and
+    # to σ̂ - σ on the rows of horizon 0 (horizon h uses the first n - 1 - h of them)
+    psi_sigma = (abs2.(eps) .- sum(abs2, eps) / length(eps)) ./ (2 * sigma * length(eps))
+    for (est, factor) in ((HC0(), nh -> 1.0), (HC1(), nh -> nh / (nh - 4)))
+        re = r + vcov(est)
+        s = summarize(re; normalization = UnitStd(), level = 0.9)
+        @test s.shocksize ≈ sigma
+        @test s.coef ≈ sigma .* coefpath(r)
+        for h in 0:H
+            rows = 2:(n - h)
+            Xh = design(rows)
+            yh = df.y[rows .+ h]
+            b = Xh \ yh
+            u = yh .- Xh * b
+            Wh = Xh[:, [1, 3, 4]]
+            et = Xh[:, 2] .- Wh * (Wh \ Xh[:, 2])
+            g = et .* u ./ sum(abs2, et)
+            nh = length(rows)
+            v = sigma^2 * factor(nh) * sum(abs2, g) + b[2]^2 * sum(abs2, psi_sigma) +
+                2 * sigma * b[2] * sum(g .* psi_sigma[1:nh])
+            @test s.se[h + 1] ≈ sqrt(v)
+        end
+        # Without the sampling error of σ̂ the standard errors would be σ̂ · se(β̂_h)
+        @test !(s.se ≈ sigma .* stderror(re))
+    end
+
+    # The bands use the estimator's critical value: Student-t(B) for EWC(B)
+    re = r + vcov(EWC(6))
+    s = summarize(re; normalization = UnitStd(), level = 0.9)
+    @test s.lower ≈ s.coef .- quantile(TDist(6), 0.95) .* s.se
+    @test s.upper ≈ s.coef .+ quantile(TDist(6), 0.95) .* s.se
+    irf = as_irf_result(re; normalization = UnitStd(), coverage = [0.9])
+    @test vec(Array(only(irf.lower))) ≈ s.lower
+    @test irf.metadata.normalization === UnitStd()
+    @test irf.metadata.shocksize ≈ sigma
+    @test as_irf_result(re).metadata.shocksize == 1.0
+
+    # The summary records the normalization and the shock size
+    tbl = DataFrame(s)
+    @test all(==(UnitStd()), tbl.normalization)
+    @test all(≈(sigma), tbl.shocksize)
+    @test occursin("one-standard-deviation shock to x", sprint(show, MIME("text/plain"), s))
+    @test summarize(r).normalization === UnitEffect()
+    @test summarize(r).shocksize == 1.0
+
+    # When the response is the shock, θ_0 = σ̂ and its only sampling error is that of σ̂
+    rx = lp(@formula(leads(x) ~ x + lag(y) + lag(x)), df; horizon = 1) + vcov(HC0())
+    sx = summarize(rx; normalization = UnitStd())
+    @test sx.coef[1] ≈ sigma
+    @test sx.se[1] ≈ sqrt(sum(abs2, psi_sigma))
+
+    # IV projections identify unit-effect responses only
+    riv = lpiv(TSLS(), @formula(leads(y) ~ (x ~ lag(x)) + lag(y)), df; horizon = 1)
+    @test_throws "not identified by an IV local projection" summarize(riv; normalization = UnitStd())
+    @test_throws "not identified by an IV local projection" shockstd(riv)
+end
+
+@testitem "one-standard-deviation responses in panels" tags = [:panel, :vcov, :summarize, :verification] begin
+    using LocalProjections
+    using DataFrames, StableRNGs, Test
+    using CovarianceMatrices: CR1, DriscollKraay, Bartlett, NeweyWest
+
+    rng = StableRNG(77)
+    N, T = 15, 30
+    id = repeat(1:N, inner = T)
+    t = repeat(1:T, N)
+    x = randn(rng, N * T) .+ 0.5 .* id
+    y = Vector{Union{Missing, Float64}}(x .+ randn(rng, N * T) .+ id)
+    y[[7, 80, 201]] .= missing
+    df = DataFrame(; y, x, w = randn(rng, N * T), id, t)
+    r = lp(@formula(leads(y) ~ x + w + fe(id)), df; horizon = 2, unit = :id, time = :t)
+
+    # σ̂: residual of x on w within units, over the rows of horizon 0, with the unit
+    # effects among the degrees of freedom
+    rows0 = .!ismissing.(df.y)
+    within(v, rows) = v[rows] .- [sum(v[rows .& (df.id .== g)]) / count(rows .& (df.id .== g)) for g in df.id[rows]]
+    xd, wd = within(df.x, rows0), within(df.w, rows0)
+    eps = xd .- wd .* (wd \ xd)
+    @test shockstd(r) ≈ sqrt(sum(abs2, eps) / (count(rows0) - 1 - N))
+
+    # Horizon h uses rows that horizon 0 drops (y_t missing, y_{t+h} observed), so the
+    # contributions are stacked on the union of the two row sets
+    @test any(r.rows[2] .& .!r.rows[1])
+    for est in (
+            CR1(:id), DriscollKraay(Bartlett(3); tis = :t, iis = :id),
+            DriscollKraay(Bartlett{NeweyWest}(); tis = :t, iis = :id),
+        )
+        s = summarize(r + vcov(est); normalization = UnitStd())
+        @test s.coef ≈ shockstd(r) .* coefpath(r)
+        @test all(isfinite, s.se) && all(>(0), s.se)
+    end
+end
+
 @testitem "export surface" tags = [:api] begin
     using LocalProjections
     using Test
@@ -1490,10 +1685,11 @@ end
             :AbstractLocalProjection, :lp, :lpiv, :TSLS, :LIML, :Fuller, :KClass,
             :leads, :lags, :lag, :lead, :cumul, :anchor,
             :first_stage, :weakivtest, :as_irf_result, :irfplot, :irfplot!, :fe,
+            :shockstd, :UnitStd, :UnitEffect,
         )
         @test Base.isexported(LocalProjections, name)
     end
-    for name in (:CumulTerm, :LeadTerm, :AnchorTerm)
+    for name in (:CumulTerm, :LeadTerm, :AnchorTerm, :critical_value)
         @test Base.ispublic(LocalProjections, name)
         @test !Base.isexported(LocalProjections, name)
     end

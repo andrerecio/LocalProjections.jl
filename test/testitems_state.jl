@@ -215,7 +215,7 @@ end
     B = ewc_bandwidth(sth)
     se = stderror(sth + vcov(EWC(B)); term = :x_s1)
     @test summarize(sth, EWC(B); term = :x_s1, level = 0.9).upper ≈
-        coefpath(sth; term = :x_s1) .+ LocalProjections._critical_value(EWC(B), 0.9) .* se
+        coefpath(sth; term = :x_s1) .+ LocalProjections.critical_value(EWC(B), 0.9) .* se
     st = statetest(sth, EWC(B))
     @test st.pvalue ≈ ccdf.(FDist(1, B), st.stat)
 
