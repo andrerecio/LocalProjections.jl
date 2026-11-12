@@ -91,7 +91,10 @@ function _influence(m, j::Int, est, h::Int, term::Symbol)
             "$term is collinear with the other regressors at horizon $h and was dropped"
         )
     )
-    M = momentmatrix(m)[:, keep]
+    # The moments of an OLS model have one column per coefficient, those of an IV
+    # model one per estimable coefficient, as its bread does
+    M = momentmatrix(m)
+    size(M, 2) == length(keep) && (M = M[:, keep])
     if est isa HR && !(est isa Union{HR0, HR1})
         M = M .* residual_adjustment(est, m)
     end
