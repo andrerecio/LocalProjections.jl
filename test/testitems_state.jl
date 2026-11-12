@@ -77,11 +77,36 @@
 
     # tautological h = 0: the shock is the response, in both regimes
     rt = lp(@formula(leads(x) ~ x + lags(y, 1)), df; horizon = 2, state = :s)
-    @test rt.tautological_h0
+    @test rt.h0_identity == findfirst(==("x_s0"), rt.coef_names)
+    @test LocalProjections._h0_identity_columns(rt) ==
+        (rt.h0_identity, findfirst(==("x_s1"), rt.coef_names))
     @test coefpath(rt; term = :x_s0)[1] == 1.0 && coefpath(rt; term = :x_s1)[1] == 1.0
     @test coefpath(rt; term = :y_lag1_s1)[1] == 0.0
     @test stderror(rt + vcov(HR0()); term = :x_s1)[1] == 0.0
     @test isnan(statetest(rt, HR0()).stat[1])
+    @test (rt + vcov(HR0())).h0_identity == rt.h0_identity
+
+    # The response is a regressor at t other than the shock: its two regime columns
+    # carry the 1, and the shock has no effect on impact in either regime
+    rw = lp(@formula(leads(y) ~ y + x), df; horizon = 2, state = :s, shock = :x)
+    @test LocalProjections._h0_identity_columns(rw) ==
+        (findfirst(==("y_s0"), rw.coef_names), findfirst(==("y_s1"), rw.coef_names))
+    @test coefpath(rw; term = :x_s0)[1] === 0.0 && coefpath(rw; term = :x_s1)[1] === 0.0
+    @test coefpath(rw; term = :y_s0)[1] === 1.0 && coefpath(rw; term = :y_s1)[1] === 1.0
+    @test stderror(rw)[1] === 0.0
+    @test coefpath(rw)[2] == coef(horizonmodel(rw, 1))[findfirst(==("x_s0"), rw.coef_names)]
+    @test_throws "the horizon-0 response is the regressor y," jointvcov(rw; horizons = 0:1)
+
+    # A weight strictly between 0 and 1 splits the response the same way
+    df.p = 0.2 .+ 0.6 .* s
+    rp = lp(@formula(leads(x) ~ x + lags(y, 1)), df; horizon = 1, state = :p)
+    @test rp.h0_identity == findfirst(==("x_p0"), rp.coef_names)
+    @test coef(horizonmodel(rp, 0))[rp.h0_identity] ≈ 1.0
+    @test coefpath(rp; term = :x_p1)[1] === 1.0
+
+    # No identity when the response is not a regressor, or only its lag is
+    @test r.h0_identity === nothing
+    @test LocalProjections._h0_identity_columns(r) == ()
 end
 
 @testitem "state-dependent lp/lpiv reproduce Ramey-Zubairy (ivreg2, Stata 19.5)" tags = [

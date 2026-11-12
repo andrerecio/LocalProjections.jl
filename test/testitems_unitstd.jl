@@ -110,6 +110,18 @@
     s_xx = summarize(rxx; bands = :supt, normalization = UnitStd())
     @test s_xx.coef[1] ≈ sigma && s_xx.lower[1] < sigma < s_xx.upper[1]
 
+    # The response is a regressor at t other than the shock: the response to the shock
+    # is exactly 0 at h = 0 under either normalization, so h = 0 is left out of both;
+    # the response of that regressor to its own one-standard-deviation shock is kept
+    ryx = lp(
+        @formula(leads(y) ~ y + x + lags(y, 2) + lags(x, 2)), df; horizon = 3, shock = :x
+    ) + vcov(HC0())
+    @test size(jointvcov(ryx)) == size(jointvcov(ryx; normalization = UnitStd())) == (3, 3)
+    @test_throws "leave h = 0 out" jointvcov(ryx; horizons = 0:2, normalization = UnitStd())
+    s_yx = summarize(ryx; bands = :supt, normalization = UnitStd())
+    @test (s_yx.coef[1], s_yx.lower[1], s_yx.upper[1]) == (0.0, 0.0, 0.0)
+    @test size(jointvcov(ryx; term = :y, normalization = UnitStd())) == (4, 4)
+
     # Joint inference inherits the guards of the shock size
     @test_throws "state-dependent" jointvcov(rs; normalization = UnitStd())
     @test_throws "state-dependent" summarize(rs; bands = :supt, normalization = UnitStd())

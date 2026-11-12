@@ -89,11 +89,50 @@ function _resolve_state_shock(shock, coef_names, endo_names, labels::NTuple{2, S
     return Symbol(base, "_", labels[1]), base
 end
 
-# The terms whose h = 0 coefficient is 1 by construction when response == shock
-function _shock_terms(lp::AbstractLocalProjection)
+# ============================================================================
+# The exact horizon 0 of a state-dependent projection
+# ============================================================================
+
+# Upstream's `_h0_identity` looks for the column equal to the horizon-0 response. After
+# the regime split no single column is: the response `b` is the sum of the regime
+# columns `b .* (1 - I)` and `b .* I` of one regressor, so the horizon-0 regression
+# still fits exactly, with coefficient 1 on both and 0 on every other. The pair is
+# found by comparing each regime column with the response split the same way, which
+# is exact for a weight strictly between 0 and 1 too. Returns the index of the
+# first-regime column. `X` is `[exogenous endogenous]`, each block split in two halves.
+function _h0_identity(X, coef_names, y0, rows0, n_endogenous::Int, ::Nothing)
+    return _h0_identity(X, coef_names, y0, rows0)
+end
+function _h0_identity(
+        X::Matrix{Float64}, coef_names::Vector{String}, y0, rows0, n_endogenous::Int,
+        weights::Vector{Float64}
+    )
+    y, s = view(y0, rows0), view(weights, rows0)
+    y1, y2 = y .* (1.0 .- s), y .* s
+    k_exo = size(X, 2) - n_endogenous
+    for (offset, half) in ((0, k_exo ÷ 2), (k_exo, n_endogenous ÷ 2)), j in offset .+ (1:half)
+        startswith(coef_names[j], "(Intercept)_") && continue
+        view(X, rows0, j) == y1 && view(X, rows0, j + half) == y2 && return j
+    end
+    return nothing
+end
+
+# Name of the regressor equal to the horizon-0 response, before the regime split
+function _h0_identity_name(lp::AbstractLocalProjection)
+    name = lp.coef_names[lp.h0_identity]
     st = lp.state
-    st === nothing && return (lp.shock,)
-    return (Symbol(st.shock, "_", st.labels[1]), Symbol(st.shock, "_", st.labels[2]))
+    return st === nothing ? name : String(chopsuffix(name, "_" * st.labels[1]))
+end
+
+# The columns whose horizon-0 coefficient is exactly 1: the regressor equal to the
+# horizon-0 response, or its two regime columns. Empty when no regressor is.
+function _h0_identity_columns(lp::AbstractLocalProjection)
+    j = lp.h0_identity
+    j === nothing && return ()
+    st = lp.state
+    st === nothing && return (j,)
+    partner = _h0_identity_name(lp) * "_" * st.labels[2]
+    return (j, findfirst(==(partner), lp.coef_names))
 end
 
 # The fork's specifications on which upstream's `shockstd` (and with it
@@ -183,9 +222,9 @@ same as `statetest(lp + vcov(estimator))`. `term` is the name before the regime 
 and defaults to the shock.
 
 This is `test expf·cumulg = recf·cumulg` after the joint `ivreg2` regression of
-`jordagk.do`. The p-value refers to ``\\chi^2_1``, or to ``F_{1,B}`` for `EWC(B)`. With a
-tautological `h = 0` (response equal to the shock) the difference is identically zero
-and the statistic is `NaN`.
+`jordagk.do`. The p-value refers to ``\\chi^2_1``, or to ``F_{1,B}`` for `EWC(B)`. When
+the horizon-0 response is itself a regressor (e.g. the shock), every `h = 0` coefficient
+is exact, the difference is identically zero and the statistic is `NaN`.
 """
 function statetest(lp::AbstractLocalProjection; term::Union{Symbol, Nothing} = nothing)
     st = lp.state
@@ -199,7 +238,7 @@ function statetest(lp::AbstractLocalProjection; term::Union{Symbol, Nothing} = n
     n = lp.horizon + 1
     diff, se = Vector{Float64}(undef, n), Vector{Float64}(undef, n)
     for h in 0:lp.horizon
-        if h == 0 && lp.tautological_h0
+        if h == 0 && lp.h0_identity !== nothing
             diff[1], se[1] = 0.0, 0.0
             continue
         end
