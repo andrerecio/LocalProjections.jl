@@ -191,7 +191,7 @@ end
         "firstdiff(w)_lag1", "firstdiff(w)_lag2",
     ]
     @test r.response === :y
-    @test !r.tautological_h0
+    @test r.h0_identity === nothing
 
     d(v) = [NaN; diff(v)]
     L(v, j) = [t > j ? v[t - j] : NaN for t in eachindex(v)]
@@ -322,8 +322,14 @@ end
     @test coefpath(lp(@formula(ldiff(y, 7) ~ x), df; horizon = 2)) ≈
         coefpath(lp(@formula(ldiff(y) ~ x), df; horizon = 2))
 
-    # A long difference on y_t is not an identity at h = 0, even with y as the shock
-    @test !lp(@formula(ldiff(y) ~ y + x), df; horizon = 1).tautological_h0
+    # A long difference on y_t is not an identity at h = 0, even with y as the shock;
+    # on the first difference of y it is, since ldiff(y) at h = 0 is y_t - y_{t-1}
+    @test lp(@formula(ldiff(y) ~ y + x), df; horizon = 1).h0_identity === nothing
+    rd = lp(@formula(ldiff(y) ~ x + firstdiff(y)), df; horizon = 2)
+    @test rd.h0_identity == findfirst(==("firstdiff(y)"), rd.coef_names)
+    @test coefpath(rd)[1] === 0.0 && coefpath(rd; term = Symbol("firstdiff(y)"))[1] === 1.0
+    @test stderror(rd)[1] === 0.0
+    @test coefpath(rd)[2] == coef(horizonmodel(rd, 1))[2]
 
     # Errors
     @test_throws "long differences use ldiff(y) or hbr(x, y)" lp(@formula(y ~ x), df; horizon = 1)

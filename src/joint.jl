@@ -5,24 +5,31 @@
 # `estimate_supt_critical_value` of Montiel Olea & Plagborg-Møller 2019).
 # ============================================================================
 
-# Horizons with a sampling variance: all of 0:H, except h = 0 when the response
-# is the shock (coefficient 1, standard error 0 by construction). The response to a
-# one-standard-deviation shock is then `σ̂` at h = 0, which has the sampling variance
-# of `σ̂`, so every horizon counts.
-_degenerate_h0(lp::AbstractLocalProjection, ::UnitEffect) = lp.tautological_h0
-_degenerate_h0(lp::AbstractLocalProjection, ::UnitStd) = false
+# Horizons with a sampling variance: all of 0:H, except h = 0 when the horizon-0
+# response is itself a regressor (`lp.h0_identity`): every coefficient is then exact,
+# 1 on that regressor and 0 on the others, with standard error 0. The response to a
+# one-standard-deviation shock to that regressor is `σ̂` at h = 0, which has the
+# sampling variance of `σ̂`, so every horizon counts; the response of any other term
+# is `σ̂ · 0`, exactly 0 under either normalization.
+_degenerate_h0(lp::AbstractLocalProjection, ::Symbol, ::UnitEffect) = lp.h0_identity !== nothing
+function _degenerate_h0(lp::AbstractLocalProjection, term::Symbol, ::UnitStd)
+    return lp.h0_identity !== nothing && !(_term_index(lp, term) in _h0_identity_columns(lp))
+end
 
 function _joint_default_horizons(
-        lp::AbstractLocalProjection, normalization::AbstractNormalization = UnitEffect()
+        lp::AbstractLocalProjection, term::Symbol,
+        normalization::AbstractNormalization = UnitEffect()
     )
-    return collect(_degenerate_h0(lp, normalization) ? (1:(lp.horizon)) : (0:(lp.horizon)))
+    return collect(
+        _degenerate_h0(lp, term, normalization) ? (1:(lp.horizon)) : (0:(lp.horizon))
+    )
 end
 
 function _joint_horizons(
-        lp::AbstractLocalProjection, horizons,
+        lp::AbstractLocalProjection, term::Symbol, horizons,
         normalization::AbstractNormalization = UnitEffect()
     )
-    hs = horizons === nothing ? _joint_default_horizons(lp, normalization) :
+    hs = horizons === nothing ? _joint_default_horizons(lp, term, normalization) :
         collect(Int, horizons)
     isempty(hs) && throw(ArgumentError("`horizons` is empty"))
     allunique(hs) || throw(ArgumentError("`horizons` lists a horizon twice"))
@@ -30,10 +37,11 @@ function _joint_horizons(
         0 <= h <= lp.horizon || throw(
             ArgumentError("horizon $h is outside the estimated horizons 0:$(lp.horizon)")
         )
-        h == 0 && _degenerate_h0(lp, normalization) && throw(
+        h == 0 && _degenerate_h0(lp, term, normalization) && throw(
             ArgumentError(
-                "the response is the shock, so its h = 0 coefficient is 1 with no " *
-                    "sampling variance; leave h = 0 out of `horizons`"
+                "the horizon-0 response is the regressor $(_h0_identity_name(lp)), so " *
+                    "the h = 0 coefficients are exact (1 on it, 0 on the others) with " *
+                    "no sampling variance; leave h = 0 out of `horizons`"
             )
         )
     end
@@ -83,7 +91,10 @@ function _influence(m, j::Int, est, h::Int, term::Symbol)
             "$term is collinear with the other regressors at horizon $h and was dropped"
         )
     )
-    M = momentmatrix(m)[:, keep]
+    # The moments of an OLS model have one column per coefficient, those of an IV
+    # model one per estimable coefficient, as its bread does
+    M = momentmatrix(m)
+    size(M, 2) == length(keep) && (M = M[:, keep])
     if est isa HR && !(est isa Union{HR0, HR1})
         M = M .* residual_adjustment(est, m)
     end
@@ -111,8 +122,8 @@ end
 # influence is `σ̂ ψ_h + β̂_h ψ_σ`: `ψ_h` that of the coefficient and
 # `ψ_σ = (ε̂² − mean ε̂²) / (2 σ̂ n₀)` that of `σ̂`, on the rows of horizon 0 (the
 # terms of upstream's `_response_path`). `ψ_σ` enters every horizon, which raises
-# the correlation across horizons. When the response is the shock, `β̂_0 = 1` has no
-# sampling error and the column of h = 0 is `ψ_σ` alone.
+# the correlation across horizons. When the horizon-0 response is `term`, `β̂_0 = 1`
+# has no sampling error and the column of h = 0 is `ψ_σ` alone.
 function _stacked_influence(lp::AbstractLocalProjection, term::Symbol, hs, est, ::UnitStd)
     j = _term_index(lp, term)
     (; residual, sigma) = _shock_residual(lp, j)
@@ -125,7 +136,7 @@ function _stacked_influence(lp::AbstractLocalProjection, term::Symbol, hs, est, 
         (abs2.(residual) .- mean(abs2, residual)) ./ (2 * sigma * length(residual))
     Ψ = zeros(t2 - t1 + 1, length(hs))
     for (c, h) in enumerate(hs)
-        if !(h == 0 && lp.tautological_h0)
+        if !(h == 0 && lp.h0_identity !== nothing)
             idx = findall(lp.rows[h + 1]) .- (t1 - 1)
             Ψ[idx, c] = sigma .* _influence(lp.models[h + 1], j, est, h, term)
         end
@@ -164,7 +175,8 @@ end
     jointvcov(lp, estimator; kwargs...)
 
 Covariance matrix of the coefficients of `term` across `horizons` (by default
-`0:lp.horizon`, without ``h = 0`` when the response is the shock), the
+`0:lp.horizon`, without ``h = 0`` when the horizon-0 response is itself a regressor,
+such as the shock: its coefficients are then exact), the
 `suest` step of joint inference on an impulse-response path.
 
 The regressions of different horizons share their observations, so their
@@ -198,7 +210,7 @@ the responses to a one-standard-deviation shock, ``\\hat\\sigma\\hat\\beta_h`` w
 ``\\hat\\sigma\\,\\psi_h + \\hat\\beta_h\\,\\psi_\\sigma``, the delta-method influence
 with the sampling error ``\\psi_\\sigma`` of ``\\hat\\sigma``, which every horizon
 shares; the diagonal is the squared delta-method standard error of
-`summarize(lp; normalization = UnitStd())`. When the response is the shock,
+`summarize(lp; normalization = UnitStd())`. When the response is `term`,
 ``h = 0`` is included: its response is ``\\hat\\sigma``, with the sampling variance
 of ``\\hat\\sigma``. A test of zero responses does not depend on the size of the
 shock, so [`jointtest`](@ref) has no `normalization`.
@@ -209,7 +221,7 @@ function jointvcov(
         lp::AbstractLocalProjection; term::Symbol = lp.shock, horizons = nothing,
         normalization::AbstractNormalization = UnitEffect()
     )
-    hs = _joint_horizons(lp, horizons, normalization)
+    hs = _joint_horizons(lp, term, horizons, normalization)
     R, _ = _joint_correlation(lp, term, hs, normalization)
     se = _response_path(lp, term, normalization).se[hs .+ 1]
     return Matrix(Symmetric(se .* R .* se'))
@@ -286,7 +298,7 @@ function jointtest(
         lp::AbstractLocalProjection; term::Symbol = lp.shock, horizons = nothing,
         value = 0.0
     )
-    hs = _joint_horizons(lp, horizons)
+    hs = _joint_horizons(lp, term, horizons)
     m = length(hs)
     θ0 = value isa Real ? fill(Float64(value), m) : collect(Float64, value)
     length(θ0) == m || throw(
@@ -460,7 +472,7 @@ function supt_critical_value(
     )
     0 < level < 1 || throw(ArgumentError("`level` must lie strictly between 0 and 1"))
     ndraws >= 1 || throw(ArgumentError("`ndraws` must be positive"))
-    hs = _joint_horizons(lp, horizons, normalization)
+    hs = _joint_horizons(lp, term, horizons, normalization)
     R, est = _joint_correlation(lp, term, hs, normalization)
     length(hs) == 1 && return critical_value(est, level)
     return _supt_quantile(_supt_maxabs(R, est, Int(ndraws), rng), level)
@@ -485,7 +497,7 @@ function _band_critical_values(
     bands === :supt || throw(
         ArgumentError("`bands` must be :pointwise or :supt (got $(repr(bands)))")
     )
-    hs = _joint_default_horizons(lp, normalization)
+    hs = _joint_default_horizons(lp, term, normalization)
     R, est = _joint_correlation(lp, term, hs, normalization)
     length(hs) == 1 && return [critical_value(est, c) for c in levels]
     t = _supt_maxabs(R, est, 100_000, Xoshiro(_SUPT_SEED))

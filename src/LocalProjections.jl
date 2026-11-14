@@ -457,9 +457,10 @@ include("state.jl")
 Return the fitted Regress.jl model for horizon `h`, where `0 ≤ h ≤ lp.horizon`.
 
 The model supports the StatsAPI accessors (`coef`, `coefnames`, `coeftable`, `vcov`,
-`stderror`, `nobs`, ...), and `coefnames(horizonmodel(lp, h)) == coefnames(lp)`. When the response is the shock,
-the model at `h = 0` regresses the shock on itself; [`coefpath`](@ref) reports the
-exact values (1 for the shock, 0 for other terms) at that horizon instead.
+`stderror`, `nobs`, ...), and `coefnames(horizonmodel(lp, h)) == coefnames(lp)`. When the
+horizon-0 response is itself a regressor (the shock, or a regressor entered at `t`), the
+model at `h = 0` regresses that variable on itself; [`coefpath`](@ref) and
+[`stderror`](@ref) report the exact values at that horizon instead.
 
 Throws an `ArgumentError` when `h` is outside `0:lp.horizon`.
 
@@ -506,7 +507,7 @@ struct LocalProjection{M <: OLSMatrixEstimator} <: AbstractLocalProjection
     shock::Symbol
     base_formula::FormulaTerm
     coef_names::Vector{String}  # Coefficient names (constant across all horizons)
-    tautological_h0::Bool       # true when response == shock (h=0 is trivial: coef=1, SE=0)
+    h0_identity::Union{Int, Nothing}  # index of the regressor equal to the h=0 response, if any
     sample::Symbol              # :varying (per-horizon rows) or :fixed (rows complete at all horizons)
     unit::Union{Symbol, Nothing}  # panel unit identifier column, if any
     time::Union{Symbol, Nothing}  # time column, if any
@@ -570,7 +571,7 @@ function Base.:+(lp::LocalProjection, v::VcovSpec)
     models = _apply_vcov(lp, v.source)
     return LocalProjection{eltype(models)}(
         models, lp.horizon, lp.response, lp.shock, lp.base_formula, lp.coef_names,
-        lp.tautological_h0, lp.sample, lp.unit, lp.time, lp.data, lp.rows, v.source,
+        lp.h0_identity, lp.sample, lp.unit, lp.time, lp.data, lp.rows, v.source,
         lp.state
     )
 end
@@ -1146,7 +1147,6 @@ function _lp_design(
     if state === nothing
         state_spec, weights = nothing, nothing
         shock = _select_shock(shock, coef_names, endo_names)
-        base_shock = shock
     else
         isempty(fe_names) || throw(
             ArgumentError(
@@ -1179,9 +1179,8 @@ function _lp_design(
     return (;
         Xs = first.(XZ), Zs = last.(XZ),
         coef_names, endo_names, instr_names, response, lhs,
-        tautological_h0 = _lhs_tautological(lhs) && response === base_shock,
         has_intercept, fe = [tbl[name] for name in fe_names],
-        data = tbl, groups, shock, state = state_spec,
+        data = tbl, groups, shock, state = state_spec, weights,
     )
 end
 
@@ -1201,13 +1200,16 @@ end
 
 """
     _lp_estimate_horizons(estimator, Xs, Zs, n_endogenous, has_intercept, coef_names, fe,
-        lhs, data, groups, horizon, sample)
+        lhs, data, groups, horizon, sample, weights)
 
-Fit one model per horizon `0:horizon` and return the models with the row mask of each
-horizon: OLS when `estimator === nothing`, otherwise
+Fit one model per horizon `0:horizon` and return the models, the row mask of each
+horizon, and the index of the column of `Xs[1]` that equals the horizon-0 response on the
+horizon-0 rows (`nothing` when no column does; see [`_h0_identity`](@ref)): OLS when `estimator === nothing`, otherwise
 `Regress.iv(estimator, ...)`. `Xs[h + 1]` and `Zs[h + 1]` are the regressor and
 instrument matrices of horizon `h`; they are one shared pair unless a regressor tracks
-the horizon. With `sample = :varying`, each horizon uses the rows where
+the horizon. `weights` holds the state weights of a state-dependent projection (`nothing`
+otherwise), which the horizon-0 identity needs to recognize a regressor split by regime.
+With `sample = :varying`, each horizon uses the rows where
 `X`, `Z` and the transformed response at that horizon are all non-`NaN`; with
 `sample = :fixed`, every horizon uses the rows where they are non-`NaN` at all horizons.
 The response is computed within each block of rows in `groups`. `has_intercept` tells
@@ -1222,7 +1224,7 @@ function _lp_estimate_horizons(
         estimator, Xs::Vector{Matrix{Float64}}, Zs::Vector{Matrix{Float64}},
         n_endogenous::Int,
         has_intercept::Bool, coef_names::Vector{String}, fe::AbstractVector, lhs, data,
-        groups, horizon::Integer, sample::Symbol
+        groups, horizon::Integer, sample::Symbol, weights
     )
     sample in (:varying, :fixed) || throw(
         ArgumentError("sample must be :varying or :fixed (got $(repr(sample)))")
@@ -1258,7 +1260,25 @@ function _lp_estimate_horizons(
     for h in 1:horizon
         models[h + 1] = _estimate_horizon(h)
     end
-    return models, rows
+    return models, rows,
+        _h0_identity(Xs[1], coef_names, ys[1], rows[1], n_endogenous, weights)
+end
+
+"""
+    _h0_identity(X, coef_names, y0, rows0) -> Union{Int, Nothing}
+
+The index of the column of `X` equal to the horizon-0 response `y0` on the rows `rows0`,
+or `nothing` when no column is. The intercept is never matched. Such a column is the
+shock or a regressor entered at `t` that is also the response (`leads(y)` or `cumul(y)`
+with `y` among the regressors): the horizon-0 regression then fits exactly, with
+coefficient 1 on that column, 0 on every other, and no sampling error. The columns are
+compared before any fixed effect is absorbed, so equal columns stay equal after it.
+"""
+function _h0_identity(X::Matrix{Float64}, coef_names::Vector{String}, y0, rows0)
+    y = view(y0, rows0)
+    return findfirst(
+        j -> coef_names[j] != "(Intercept)" && view(X, rows0, j) == y, axes(X, 2)
+    )
 end
 
 """
@@ -1362,13 +1382,13 @@ function lp(
         state::Union{Symbol, Nothing} = nothing, statelag::Integer = 1, regimes = nothing
     )
     d = _lp_design(formula, data, horizon, shock, false, unit, time; state, statelag, regimes)
-    models, rows = _lp_estimate_horizons(
+    models, rows, h0_identity = _lp_estimate_horizons(
         nothing, d.Xs, d.Zs, 0, d.has_intercept, d.coef_names, d.fe, d.lhs, d.data,
-        d.groups, horizon, sample
+        d.groups, horizon, sample, d.weights
     )
     result = LocalProjection(
         models, horizon, d.response, d.shock, formula, d.coef_names,
-        d.tautological_h0, sample, unit, time, d.data, rows,
+        h0_identity, sample, unit, time, d.data, rows,
         CovarianceMatrices.estimator(vcov(first(models))), d.state
     )
     return unit === nothing ? result : result + vcov(CR1(unit))
@@ -1475,7 +1495,7 @@ struct LocalProjectionIV{M <: IVMatrixEstimator} <: AbstractLocalProjection
     coef_names::Vector{String}  # Coefficient names (constant across all horizons)
     endogenous_names::Vector{String}
     instrument_names::Vector{String}
-    tautological_h0::Bool       # true when response == shock (h=0 is trivial: coef=1, SE=0)
+    h0_identity::Union{Int, Nothing}  # index of the regressor equal to the h=0 response, if any
     sample::Symbol              # :varying (per-horizon rows) or :fixed (rows complete at all horizons)
     unit::Union{Symbol, Nothing}  # panel unit identifier column, if any
     time::Union{Symbol, Nothing}  # time column, if any
@@ -1527,7 +1547,7 @@ function Base.:+(lpiv::LocalProjectionIV, v::VcovSpec)
     return LocalProjectionIV{eltype(models)}(
         models, lpiv.horizon, lpiv.response, lpiv.shock, lpiv.base_formula,
         lpiv.coef_names, lpiv.endogenous_names, lpiv.instrument_names,
-        lpiv.tautological_h0, lpiv.sample, lpiv.unit, lpiv.time,
+        lpiv.h0_identity, lpiv.sample, lpiv.unit, lpiv.time,
         lpiv.data, lpiv.rows, v.source, lpiv.state
     )
 end
@@ -1613,13 +1633,13 @@ function lpiv(
         state::Union{Symbol, Nothing} = nothing, statelag::Integer = 1, regimes = nothing
     )
     d = _lp_design(formula, data, horizon, shock, true, unit, time; state, statelag, regimes)
-    models, rows = _lp_estimate_horizons(
+    models, rows, h0_identity = _lp_estimate_horizons(
         estimator, d.Xs, d.Zs, length(d.endo_names), d.has_intercept, d.coef_names, d.fe,
-        d.lhs, d.data, d.groups, horizon, sample
+        d.lhs, d.data, d.groups, horizon, sample, d.weights
     )
     result = LocalProjectionIV(
         models, horizon, d.response, d.shock, formula, d.coef_names,
-        d.endo_names, d.instr_names, d.tautological_h0, sample, unit, time,
+        d.endo_names, d.instr_names, h0_identity, sample, unit, time,
         d.data, rows, CovarianceMatrices.estimator(vcov(first(models))), d.state
     )
     return unit === nothing ? result : result + vcov(CR1(unit))
@@ -1668,12 +1688,13 @@ end
 
 Montiel-Olea-Pflueger robust weak instrument test for horizon `h` (0-indexed).
 
-When the response is the endogenous shock, horizon 0 is tautological (the coefficient
-is exactly 1) and there is no IV estimate to test; `weakivtest(lpiv, 0)` then throws an
-`ArgumentError`. `first_stage(lpiv, 0)` remains available. It also throws at a horizon
-where the instruments explain the endogenous regressors exactly (e.g. an instrument equal
-to its regressor, as for the Blanchard-Perotti shock at `h = 0`): Regress.jl then treats
-them as exogenous, so there is no first stage to test.
+When the horizon-0 response is itself a regressor (the endogenous shock, or an
+exogenous regressor entered at `t`), the horizon-0 coefficients are exact (see
+[`coefpath`](@ref)) and there is no IV estimate to test; `weakivtest(lpiv, 0)` then
+throws an `ArgumentError`. `first_stage(lpiv, 0)` remains available. It also throws at a
+horizon where the instruments explain the endogenous regressors exactly (e.g. an
+instrument equal to its regressor, as for the Blanchard-Perotti shock at `h = 0`):
+Regress.jl then treats them as exogenous, so there is no first stage to test.
 
 # Keyword Arguments
 - `level::Real=0.05`: Confidence level alpha
@@ -1698,12 +1719,13 @@ function Regress.weakivtest(lpiv::LocalProjectionIV, h::Int; regime = nothing, k
         )
     )
     m = _weakiv_model(lpiv, horizonmodel(lpiv, h), regime)
-    if h == 0 && lpiv.tautological_h0
+    if h == 0 && lpiv.h0_identity !== nothing
+        regressor = _h0_identity_name(lpiv)
         throw(
             ArgumentError(
-                "weakivtest is undefined at horizon 0 when the response equals the shock " *
-                    "($(lpiv.shock)): the horizon-0 coefficient is 1 by construction. " *
-                    "Use first_stage(lpiv, 0) for first-stage diagnostics."
+                "weakivtest is undefined at horizon 0 when the response equals the " *
+                    "regressor $regressor: the horizon-0 coefficients are exact by " *
+                    "construction. Use first_stage(lpiv, 0) for first-stage diagnostics."
             )
         )
     end
@@ -1717,12 +1739,12 @@ Montiel-Olea-Pflueger robust weak instrument test for all horizons.
 
 Returns a vector with one `Regress.WeakIVTestResult` per horizon `0:lpiv.horizon`. The entry
 is `nothing` at a horizon with nothing to test (see `weakivtest(lpiv, h)`): horizon 0 when
-the response is the endogenous shock, and any horizon where the instruments explain the
-endogenous regressors exactly. The vector stays aligned with the horizons.
+the horizon-0 response is itself a regressor, and any horizon where the instruments explain
+the endogenous regressors exactly. The vector stays aligned with the horizons.
 """
 function Regress.weakivtest(lpiv::LocalProjectionIV; regime = nothing, kwargs...)
     return [
-        (h == 0 && lpiv.tautological_h0) || _no_first_stage(lpiv, h) ? nothing :
+        (h == 0 && lpiv.h0_identity !== nothing) || _no_first_stage(lpiv, h) ? nothing :
             weakivtest(lpiv, h; regime, kwargs...)
             for h in 0:lpiv.horizon
     ]
@@ -1759,15 +1781,18 @@ end
     coefpath(lp; term = lp.shock) -> Vector{Float64}
 
 Coefficient of `term` across horizons; element `h + 1` belongs to horizon `h`.
-When the response is the shock, the value at `h = 0` is exactly 1 for the shock (in both
-regimes of a state-dependent projection) and 0
-for every other term.
+
+When the horizon-0 response is itself a regressor, that regression fits exactly: the
+value at `h = 0` is exactly 1 for that regressor (in both regimes of a state-dependent
+projection) and 0 for every other term. This is the
+case when the response is the shock (`leads(x) ~ x + ...`), and when it is a regressor
+entered at `t`, e.g. `leads(w) ~ w + x + ...`, whose response to `x` is 0 on impact.
 """
 function coefpath(lp::AbstractLocalProjection; term::Symbol = lp.shock)
     idx = _term_index(lp, term)
     coefficients = [coef(horizonmodel(lp, h))[idx] for h in 0:lp.horizon]
-    if lp.tautological_h0
-        coefficients[1] = term in _shock_terms(lp) ? 1.0 : 0.0
+    if lp.h0_identity !== nothing
+        coefficients[1] = idx in _h0_identity_columns(lp) ? 1.0 : 0.0
     end
     return coefficients
 end
@@ -1778,8 +1803,9 @@ end
 Standard errors of `term` across horizons; element `h + 1` belongs to horizon `h`.
 
 Each horizon uses the covariance estimator stored in its model: HC1 after [`lp`](@ref)
-or [`lpiv`](@ref), or the one applied with `lp + vcov(estimator)`. When the response is
-the shock, the standard error at `h = 0` is exactly 0 (see [`coefpath`](@ref)).
+or [`lpiv`](@ref), or the one applied with `lp + vcov(estimator)`. When the horizon-0
+response is itself a regressor, the standard error at `h = 0` is exactly 0 (see
+[`coefpath`](@ref)).
 
 # Example
 ```julia
@@ -1791,7 +1817,7 @@ stderror(r + vcov(Bartlett{NeweyWest}()))    # HAC
 function StatsBase.stderror(lp::AbstractLocalProjection; term::Symbol = lp.shock)
     idx = _term_index(lp, term)
     se = [stderror(horizonmodel(lp, h))[idx] for h in 0:lp.horizon]
-    if lp.tautological_h0
+    if lp.h0_identity !== nothing
         se[1] = 0.0
     end
     return se
@@ -1900,8 +1926,9 @@ function _response_path(lp::AbstractLocalProjection, term::Symbol, ::UnitStd)
         rows = rows0 .| rows_h
         position = cumsum(rows)
         contributions = zeros(count(rows), 2)
-        # When the response is the shock, β̂_0 = 1 exactly and has no sampling error.
-        if !(h == 0 && lp.tautological_h0)
+        # When the horizon-0 response is a regressor, β̂_0 is exact (1 or 0) and has no
+        # sampling error.
+        if !(h == 0 && lp.h0_identity !== nothing)
             basis = m.basis_coef
             j = count(view(basis, 1:idx))
             contributions[position[rows_h], 1] = momentmatrix(m)[:, basis] * bread(m)[:, j]

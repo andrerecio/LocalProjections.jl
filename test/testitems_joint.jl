@@ -213,6 +213,15 @@ end
     @test isposdef(Symmetric(V))
     @test jointtest(ri).pvalue < 0.01
 
+    # A control Regress drops as collinear: the moments of an IV model cover the
+    # estimable coefficients only, and the joint covariance is that of the fit without
+    # it. Re-applying an estimator to such a fit needs Regress.jl pull request 29.
+    dc = merge(d, (; y2 = 2 .* y))
+    rc = lpiv(TSLS(), @formula(leads(y) ~ (z ~ x) + lags(y, 2) + lags(y2, 1)), dc; horizon = 4)
+    @test jointvcov(rc) ≈ V
+    @test jointvcov(rc + vcov(HC1())) ≈ V
+    @test all(isnan, stderror(rc + vcov(HC1()); term = :y2_lag1))
+
     # panels are rejected
     dp = (;
         y = vcat(y, y), x = vcat(x, x), id = vcat(fill(1, T), fill(2, T)),

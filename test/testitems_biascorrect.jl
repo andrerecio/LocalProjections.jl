@@ -143,7 +143,7 @@ end
 
     # Tautological h=0 (response == shock): θ̂₀ᶜ stays pinned at 1
     lp_taut = lp(@formula(leads(x) ~ x + lags(y, 2)), df; horizon = 4)
-    @test lp_taut.tautological_h0
+    @test lp_taut.h0_identity == findfirst(==("x"), lp_taut.coef_names)
     @test coefpath(biascorrect(lp_taut))[1] == 1.0
 
     # No controls beyond intercept + shock: ĉ_j ≡ 1, recursion still runs

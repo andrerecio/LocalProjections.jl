@@ -48,19 +48,6 @@ function _lhs_response(t::AnchorTerm)
 end
 
 """
-    _lhs_tautological(lhs) -> Bool
-
-Whether regressing the horizon-0 response on the response variable itself is an
-identity (coefficient 1, zero variance), which `lp`/`lpiv` then impose exactly.
-Not so for long differences: ``y_t - y_{t-1}`` on ``y_t`` has coefficient 1 only
-when ``y_{t-1}`` is among the controls.
-"""
-_lhs_tautological(::Any) = true
-_lhs_tautological(::LongDiffTerm) = false
-_lhs_tautological(::CumulTerm{<:LongDiffTerm}) = false
-_lhs_tautological(t::AnchorTerm) = _lhs_tautological(t.response)
-
-"""
     _lhs_kind(formula) -> Symbol
 
 Which response transform the local-projection formula uses: `:leads`, `:cumul`,
